@@ -210,6 +210,23 @@ impl MovementRenderDispatcher {
         GHOST_MOVEMENT_ENABLED.load(Ordering::Relaxed)
     }
 
+    fn size_changes_during_animation(&self) -> bool {
+        !self.start_rect.is_same_size_as(&self.target_rect)
+    }
+
+    fn animated_rect(&self, progress: f64) -> Rect {
+        if self.size_changes_during_animation() {
+            Rect {
+                left: self.start_rect.left.lerp(self.target_rect.left, progress, self.style),
+                top: self.start_rect.top.lerp(self.target_rect.top, progress, self.style),
+                right: self.start_rect.right,
+                bottom: self.start_rect.bottom,
+            }
+        } else {
+            self.start_rect.lerp(self.target_rect, progress, self.style)
+        }
+    }
+
     /// Chromium / Electron windows expose a top-level class beginning with
     /// `Chrome_WidgetWin_`. Their renderer pipeline is suspended whenever
     /// `NativeWindowOcclusionTrackerWin` reads any non-zero `DWMWA_CLOAKED`
@@ -254,6 +271,7 @@ impl RenderDispatcher for MovementRenderDispatcher {
 
         if self.use_ghost() {
             let is_chromium = self.source_is_chromium_shell();
+            let size_changes = self.size_changes_during_animation();
 
             // The ghost host is sized to the LOGICAL rect (visible content
             // area). DWM thumbnails capture the source at its
@@ -283,7 +301,7 @@ impl RenderDispatcher for MovementRenderDispatcher {
             SetCloak(Window { hwnd: self.hwnd }.hwnd(), 1, 2);
             self.cloaked.store(true, Ordering::SeqCst);
 
-            if !is_chromium {
+            if !is_chromium && !size_changes {
                 if let Err(error) =
                     WindowsApi::position_window(self.hwnd, &self.target_rect, self.top, false)
                 {
@@ -322,7 +340,7 @@ impl RenderDispatcher for MovementRenderDispatcher {
     }
 
     fn render(&self, progress: f64) -> eyre::Result<()> {
-        let logical = self.start_rect.lerp(self.target_rect, progress, self.style);
+        let logical = self.animated_rect(progress);
         *self.last_animated_rect.lock() = logical;
 
         let ghost_active = self.ghost.lock().is_some();
@@ -346,6 +364,7 @@ impl RenderDispatcher for MovementRenderDispatcher {
     fn post_render(&self) -> eyre::Result<()> {
         let used_ghost = self.ghost.lock().is_some();
         let pre_painted = self.pre_painted.load(Ordering::SeqCst);
+        let size_changes = self.size_changes_during_animation();
 
         // Final single SetWindowPos. For the pre-paint ghost path the source
         // has already been moved to target_rect in pre_render and we skip
@@ -367,6 +386,13 @@ impl RenderDispatcher for MovementRenderDispatcher {
         }
 
         if used_ghost {
+            if size_changes
+                && let Some(ghost) = self.ghost.lock().as_ref()
+                && let Err(error) = ghost.update_rect(self.target_rect)
+            {
+                tracing::trace!("ghost final update_rect failed: {error}");
+            }
+
             // Crossfade the ghost out over several DWM frames. This masks the
             // texture mismatch (start-dim bitmap stretched vs. crisp
             // target-dim repaint) and gives slow-to-repaint apps time to
