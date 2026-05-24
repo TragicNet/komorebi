@@ -158,6 +158,7 @@ impl WindowManager {
             resize_delta: 50,
             focus_follows_mouse: None,
             mouse_follows_focus: true,
+            focus_new_windows: false,
             hotwatch: Hotwatch::new()?,
             has_pending_raise_op: false,
             pending_move_op: Arc::new(None),
@@ -2465,21 +2466,6 @@ impl WindowManager {
 
                     if target_workspace_has_monocle {
                         self.toggle_monocle()?;
-                    }
-
-                    // get a mutable ref to the focused workspace on the target monitor
-                    let target_workspace = self.focused_workspace_mut()?;
-
-                    // if there is only one container on the target workspace after the insertion
-                    // it means that there won't be one swapped back, so we have to decrement the
-                    // focused position
-                    if target_workspace.containers().len() == 1 {
-                        let origin_workspace =
-                            self.focused_workspace_for_monitor_idx_mut(origin_monitor_idx)?;
-
-                        origin_workspace.focus_container(
-                            origin_workspace.focused_container_idx().saturating_sub(1),
-                        );
                     }
                 }
 
