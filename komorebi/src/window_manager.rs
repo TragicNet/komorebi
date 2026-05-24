@@ -86,6 +86,7 @@ pub struct WindowManager {
     pub unmanaged_window_operation_behaviour: OperationBehaviour,
     pub focus_follows_mouse: Option<FocusFollowsMouseImplementation>,
     pub mouse_follows_focus: bool,
+    pub focus_new_windows: bool,
     pub hotwatch: Hotwatch,
     pub virtual_desktop_id: Option<Vec<u8>>,
     pub has_pending_raise_op: bool,

@@ -248,6 +248,7 @@ pub static DEFAULT_CONTAINER_PADDING: AtomicI32 = AtomicI32::new(10);
 pub static DEFAULT_RESIZE_DELTA: i32 = 50;
 
 pub static DEFAULT_MOUSE_FOLLOWS_FOCUS: bool = true;
+pub static DEFAULT_FOCUS_NEW_WINDOWS: bool = false;
 pub static INITIAL_CONFIGURATION_LOADED: AtomicBool = AtomicBool::new(false);
 pub static CUSTOM_FFM: AtomicBool = AtomicBool::new(false);
 pub static SESSION_ID: AtomicU32 = AtomicU32::new(0);

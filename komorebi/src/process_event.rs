@@ -542,8 +542,9 @@ impl WindowManager {
                                 }
                             }
 
-                            if (self.focused_workspace()?.containers().len() == 1
-                                && self.focused_workspace()?.floating_windows().is_empty())
+                            if self.focus_new_windows
+                                || (self.focused_workspace()?.containers().len() == 1
+                                    && self.focused_workspace()?.floating_windows().is_empty())
                                 || (self.focused_workspace()?.containers().is_empty()
                                     && self.focused_workspace()?.floating_windows().len() == 1)
                             {

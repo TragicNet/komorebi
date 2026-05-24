@@ -3,6 +3,7 @@ use crate::Axis;
 use crate::CrossBoundaryBehaviour;
 use crate::DATA_DIR;
 use crate::DEFAULT_CONTAINER_PADDING;
+use crate::DEFAULT_FOCUS_NEW_WINDOWS;
 use crate::DEFAULT_MOUSE_FOLLOWS_FOCUS;
 use crate::DEFAULT_RESIZE_DELTA;
 use crate::DEFAULT_WORKSPACE_PADDING;
@@ -548,6 +549,10 @@ pub struct StaticConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = DEFAULT_MOUSE_FOLLOWS_FOCUS)))]
     pub mouse_follows_focus: Option<bool>,
+    /// Focus new windows immediately when they are added to a workspace
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(extend("default" = DEFAULT_FOCUS_NEW_WINDOWS)))]
+    pub focus_new_windows: Option<bool>,
     /// Path to applications.json from komorebi-application-specific-configurations
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_specific_configuration_path: Option<AppSpecificConfigurationPath>,
@@ -900,6 +905,7 @@ impl From<&WindowManager> for StaticConfig {
             #[allow(deprecated)]
             focus_follows_mouse: value.focus_follows_mouse,
             mouse_follows_focus: Option::from(value.mouse_follows_focus),
+            focus_new_windows: Option::from(value.focus_new_windows),
             app_specific_configuration_path: None,
             border_width: Option::from(border_manager::BORDER_WIDTH.load(Ordering::SeqCst)),
             border_offset: Option::from(border_manager::BORDER_OFFSET.load(Ordering::SeqCst)),
@@ -1364,6 +1370,9 @@ impl StaticConfig {
             mouse_follows_focus: value
                 .mouse_follows_focus
                 .unwrap_or(DEFAULT_MOUSE_FOLLOWS_FOCUS),
+            focus_new_windows: value
+                .focus_new_windows
+                .unwrap_or(DEFAULT_FOCUS_NEW_WINDOWS),
             hotwatch: Hotwatch::new()?,
             has_pending_raise_op: false,
             pending_move_op: Arc::new(None),
@@ -1770,6 +1779,9 @@ impl StaticConfig {
         wm.mouse_follows_focus = value
             .mouse_follows_focus
             .unwrap_or(DEFAULT_MOUSE_FOLLOWS_FOCUS);
+        wm.focus_new_windows = value
+            .focus_new_windows
+            .unwrap_or(DEFAULT_FOCUS_NEW_WINDOWS);
         wm.work_area_offset = value.global_work_area_offset;
         #[allow(deprecated)]
         {
