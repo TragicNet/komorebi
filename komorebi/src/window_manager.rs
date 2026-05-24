@@ -274,7 +274,7 @@ impl WindowManager {
                     );
                 }
 
-                if let Err(error) = monitor.load_focused_workspace(mouse_follows_focus) {
+                if let Err(error) = monitor.load_focused_workspace(mouse_follows_focus, true) {
                     tracing::warn!(
                         "cannot load focused workspace '{focused_workspace}' on monitor '{monitor_idx}' from {}: {}",
                         temp_dir().join("komorebi.state.json").to_string_lossy(),
@@ -740,7 +740,7 @@ impl WindowManager {
 
         for monitor_idx in &target_monitors {
             if let Some(monitor) = self.monitors_mut().get_mut(*monitor_idx) {
-                monitor.load_focused_workspace(false)?;
+                monitor.load_focused_workspace(false, false)?;
                 monitor.update_focused_workspace(offset)?;
             }
         }
@@ -1144,6 +1144,12 @@ impl WindowManager {
                 {
                     window.focus(self.mouse_follows_focus)?;
                 }
+            } else if self.focused_workspace()?.layer == WorkspaceLayer::Floating {
+                if let Some(window) = self.focused_workspace()?.focused_floating_window()
+                    && trigger_focus
+                {
+                    window.focus(self.mouse_follows_focus)?;
+                }
             } else if let Ok(window) = self.focused_window_mut() {
                 if trigger_focus {
                     window.focus(self.mouse_follows_focus)?;
@@ -1225,10 +1231,15 @@ impl WindowManager {
                 for window in workspace.floating_windows().iter() {
                     if window.hwnd == focused_hwnd {
                         let mut rect = WindowsApi::window_rect(window.hwnd)?;
+                        let safe_work_area = Window::floating_resize_safe_area(
+                            &focused_monitor_work_area,
+                            rect.right,
+                            rect.bottom,
+                        );
                         match (direction, sizing) {
                             (OperationDirection::Left, Sizing::Increase) => {
-                                if rect.left - delta < focused_monitor_work_area.left {
-                                    rect.left = focused_monitor_work_area.left;
+                                if rect.left - delta < safe_work_area.left {
+                                    rect.left = safe_work_area.left;
                                 } else {
                                     rect.left -= delta;
                                 }
@@ -1238,12 +1249,10 @@ impl WindowManager {
                             }
                             (OperationDirection::Right, Sizing::Increase) => {
                                 if rect.left + rect.right + delta * 2
-                                    > focused_monitor_work_area.left
-                                        + focused_monitor_work_area.right
+                                    > safe_work_area.left + safe_work_area.right
                                 {
-                                    rect.right = focused_monitor_work_area.left
-                                        + focused_monitor_work_area.right
-                                        - rect.left;
+                                    rect.right =
+                                        safe_work_area.left + safe_work_area.right - rect.left;
                                 } else {
                                     rect.right += delta * 2;
                                 }
@@ -1252,8 +1261,8 @@ impl WindowManager {
                                 rect.right -= delta * 2;
                             }
                             (OperationDirection::Up, Sizing::Increase) => {
-                                if rect.top - delta < focused_monitor_work_area.top {
-                                    rect.top = focused_monitor_work_area.top;
+                                if rect.top - delta < safe_work_area.top {
+                                    rect.top = safe_work_area.top;
                                 } else {
                                     rect.top -= delta;
                                 }
@@ -1263,12 +1272,10 @@ impl WindowManager {
                             }
                             (OperationDirection::Down, Sizing::Increase) => {
                                 if rect.top + rect.bottom + delta * 2
-                                    > focused_monitor_work_area.top
-                                        + focused_monitor_work_area.bottom
+                                    > safe_work_area.top + safe_work_area.bottom
                                 {
-                                    rect.bottom = focused_monitor_work_area.top
-                                        + focused_monitor_work_area.bottom
-                                        - rect.top;
+                                    rect.bottom =
+                                        safe_work_area.top + safe_work_area.bottom - rect.top;
                                 } else {
                                     rect.bottom += delta * 2;
                                 }
@@ -1593,13 +1600,13 @@ impl WindowManager {
         if let Some(first_monitor) = self.monitors_mut().get_mut(first_idx) {
             first_monitor.update_workspaces_globals(offset);
             first_monitor.focus_workspace(second_focused_workspace)?;
-            first_monitor.load_focused_workspace(mouse_follows_focus)?;
+            first_monitor.load_focused_workspace(mouse_follows_focus, true)?;
         }
 
         if let Some(second_monitor) = self.monitors_mut().get_mut(second_idx) {
             second_monitor.update_workspaces_globals(offset);
             second_monitor.focus_workspace(first_focused_workspace)?;
-            second_monitor.load_focused_workspace(mouse_follows_focus)?;
+            second_monitor.load_focused_workspace(mouse_follows_focus, true)?;
         }
 
         self.update_focused_workspace_by_monitor_idx(second_idx)?;
@@ -1735,7 +1742,7 @@ impl WindowManager {
         }
 
         if should_load_workspace {
-            target_monitor.load_focused_workspace(mouse_follows_focus)?;
+            target_monitor.load_focused_workspace(mouse_follows_focus, true)?;
         }
         target_monitor.update_focused_workspace(offset)?;
 
@@ -1771,7 +1778,7 @@ impl WindowManager {
             .ok_or_eyre("there is no monitor")?;
 
         monitor.move_container_to_workspace(idx, follow, direction)?;
-        monitor.load_focused_workspace(mouse_follows_focus)?;
+        monitor.load_focused_workspace(mouse_follows_focus, true)?;
 
         self.update_focused_workspace(mouse_follows_focus, true)?;
         self.enforce_workspace_rules()?;
@@ -1811,7 +1818,7 @@ impl WindowManager {
             target_monitor.workspaces_mut().push_back(workspace);
             target_monitor.update_workspaces_globals(offset);
             target_monitor.focus_workspace(target_monitor.workspaces().len().saturating_sub(1))?;
-            target_monitor.load_focused_workspace(mouse_follows_focus)?;
+            target_monitor.load_focused_workspace(mouse_follows_focus, true)?;
         }
 
         self.focus_monitor(idx)?;
@@ -1929,7 +1936,7 @@ impl WindowManager {
         }
 
         if let Some(idx) = target_idx {
-            focused_workspace.floating_windows.focus(idx);
+            focused_workspace.focus_floating_window(idx);
             if let Some(window) = focused_workspace.floating_windows().get(idx) {
                 window.focus(mouse_follows_focus)?;
             }
@@ -2323,39 +2330,40 @@ impl WindowManager {
         for window in focused_workspace.floating_windows().iter() {
             if window.hwnd == focused_hwnd {
                 let mut rect = WindowsApi::window_rect(window.hwnd)?;
+                let safe_work_area = Window::floating_resize_safe_area(
+                    &focused_monitor_work_area,
+                    rect.right,
+                    rect.bottom,
+                );
                 match direction {
                     OperationDirection::Left => {
-                        if rect.left - delta < focused_monitor_work_area.left {
-                            rect.left = focused_monitor_work_area.left;
+                        if rect.left - delta < safe_work_area.left {
+                            rect.left = safe_work_area.left;
                         } else {
                             rect.left -= delta;
                         }
                     }
                     OperationDirection::Right => {
                         if rect.left + delta + rect.right
-                            > focused_monitor_work_area.left + focused_monitor_work_area.right
+                            > safe_work_area.left + safe_work_area.right
                         {
-                            rect.left = focused_monitor_work_area.left
-                                + focused_monitor_work_area.right
-                                - rect.right;
+                            rect.left = safe_work_area.left + safe_work_area.right - rect.right;
                         } else {
                             rect.left += delta;
                         }
                     }
                     OperationDirection::Up => {
-                        if rect.top - delta < focused_monitor_work_area.top {
-                            rect.top = focused_monitor_work_area.top;
+                        if rect.top - delta < safe_work_area.top {
+                            rect.top = safe_work_area.top;
                         } else {
                             rect.top -= delta;
                         }
                     }
                     OperationDirection::Down => {
                         if rect.top + delta + rect.bottom
-                            > focused_monitor_work_area.top + focused_monitor_work_area.bottom
+                            > safe_work_area.top + safe_work_area.bottom
                         {
-                            rect.top = focused_monitor_work_area.top
-                                + focused_monitor_work_area.bottom
-                                - rect.bottom;
+                            rect.top = safe_work_area.top + safe_work_area.bottom - rect.bottom;
                         } else {
                             rect.top += delta;
                         }
@@ -2569,9 +2577,10 @@ impl WindowManager {
         }
 
         if let Some(idx) = target_idx
-            && let Some(window) = floating_windows.get(idx)
+            && let Some(hwnd) = floating_windows.get(idx).map(|window| window.hwnd)
         {
-            window.focus(mouse_follows_focus)?;
+            self.focused_workspace_mut()?.focus_floating_window(idx);
+            Window::from(hwnd).focus(mouse_follows_focus)?;
         }
 
         Ok(())
@@ -3100,6 +3109,91 @@ impl WindowManager {
         self.update_focused_workspace(true, true)?;
 
         Ok(())
+    }
+
+    const NATIVE_MAXIMIZE_TOLERANCE: i32 = 10;
+
+    fn rect_is_close_to(lhs: &Rect, rhs: &Rect, tolerance: i32) -> bool {
+        (lhs.left - rhs.left).abs() <= tolerance
+            && (lhs.top - rhs.top).abs() <= tolerance
+            && (lhs.right - rhs.right).abs() <= tolerance
+            && (lhs.bottom - rhs.bottom).abs() <= tolerance
+    }
+
+    fn should_capture_native_maximize(&self, window: Window) -> eyre::Result<bool> {
+        let workspace = self.focused_workspace()?;
+
+        if workspace.monocle_container.is_some()
+            || workspace.maximized_window.is_some()
+            || !workspace.contains_window(window.hwnd)
+            || workspace
+                .floating_windows()
+                .iter()
+                .any(|floating| floating.hwnd == window.hwnd)
+        {
+            return Ok(false);
+        }
+
+        let Some(container_idx) = workspace.container_idx_for_window(window.hwnd) else {
+            return Ok(false);
+        };
+
+        let Some(expected_rect) = workspace.latest_layout.get(container_idx) else {
+            return Ok(false);
+        };
+
+        let actual_rect = WindowsApi::window_rect(window.hwnd)?;
+        let monitor_work_area = self.focused_monitor_work_area()?;
+
+        Ok(Self::rect_is_close_to(
+            &actual_rect,
+            &monitor_work_area,
+            Self::NATIVE_MAXIMIZE_TOLERANCE,
+        ) && !Self::rect_is_close_to(
+            &actual_rect,
+            expected_rect,
+            Self::NATIVE_MAXIMIZE_TOLERANCE,
+        ))
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub fn capture_native_maximized_window(&mut self, window: Window) -> eyre::Result<bool> {
+        let workspace = self.focused_workspace()?;
+
+        if workspace.monocle_container.is_some()
+            || workspace.maximized_window.is_some()
+            || !workspace.contains_window(window.hwnd)
+            || workspace
+                .floating_windows()
+                .iter()
+                .any(|floating| floating.hwnd == window.hwnd)
+        {
+            return Ok(false);
+        }
+
+        tracing::info!("capturing native maximize and enabling monocle");
+
+        self.focused_workspace_mut()?
+            .focus_container_by_window(window.hwnd)?;
+        self.monocle_on()?;
+
+        Ok(true)
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub fn capture_native_maximize(&mut self, window: Window) -> eyre::Result<bool> {
+        if !window.is_maximized() && !self.should_capture_native_maximize(window)? {
+            return Ok(false);
+        }
+
+        window.restore();
+
+        if self.capture_native_maximized_window(window)? {
+            self.update_focused_workspace(true, true)?;
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     #[tracing::instrument(skip(self))]
@@ -3881,7 +3975,7 @@ impl WindowManager {
             .ok_or_eyre("there is no workspace")?;
 
         monitor.focus_workspace(idx)?;
-        monitor.load_focused_workspace(mouse_follows_focus)?;
+        monitor.load_focused_workspace(mouse_follows_focus, true)?;
 
         self.update_focused_workspace(false, true)
     }
@@ -3913,7 +4007,7 @@ impl WindowManager {
             .ok_or_eyre("there is no workspace")?;
 
         monitor.focus_workspace(monitor.new_workspace_idx())?;
-        monitor.load_focused_workspace(mouse_follows_focus)?;
+        monitor.load_focused_workspace(mouse_follows_focus, true)?;
 
         self.update_focused_workspace(self.mouse_follows_focus, false)
     }
@@ -6020,6 +6114,42 @@ mod tests {
             result.is_err(),
             "Expected an error when trying to toggle monocle on a non-existent container"
         );
+    }
+
+    #[test]
+    fn test_capture_native_maximized_window_turns_on_monocle() {
+        let (mut wm, _context) = setup_window_manager();
+
+        {
+            let mut m = monitor::new(
+                0,
+                Rect::default(),
+                Rect::default(),
+                "TestMonitor".to_string(),
+                "TestDevice".to_string(),
+                "TestDeviceID".to_string(),
+                Some("TestMonitorID".to_string()),
+            );
+
+            let mut container = Container::default();
+            container.windows_mut().push_back(Window::from(1));
+            container.windows_mut().push_back(Window::from(2));
+
+            let workspace = m.focused_workspace_mut().unwrap();
+            workspace.add_container_to_back(container);
+
+            wm.monitors_mut().push_back(m);
+        }
+
+        let captured = wm.capture_native_maximized_window(Window::from(1)).unwrap();
+        assert!(captured);
+
+        let workspace = wm.focused_workspace().unwrap();
+        let monocle_container = workspace.monocle_container.as_ref().unwrap();
+
+        assert_eq!(workspace.containers().len(), 0);
+        assert_eq!(monocle_container.windows().len(), 2);
+        assert_eq!(monocle_container.focused_window(), Some(&Window::from(1)));
     }
 
     #[test]

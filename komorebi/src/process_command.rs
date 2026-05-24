@@ -276,10 +276,9 @@ impl WindowManager {
                             self.focus_container_window(window_idx)?;
                         }
                         WorkspaceWindowLocation::Floating(window_idx) => {
-                            if let Some(window) = self
-                                .focused_workspace_mut()?
-                                .floating_windows_mut()
-                                .get_mut(window_idx)
+                            let workspace = self.focused_workspace_mut()?;
+                            if workspace.focus_floating_window(window_idx)
+                                && let Some(window) = workspace.floating_windows_mut().get_mut(window_idx)
                             {
                                 window.focus(self.mouse_follows_focus)?;
                             }
@@ -289,7 +288,7 @@ impl WindowManager {
                     if needs_workspace_loading {
                         let mouse_follows_focus = self.mouse_follows_focus;
                         if let Some(monitor) = self.focused_monitor_mut() {
-                            monitor.load_focused_workspace(mouse_follows_focus)?;
+                            monitor.load_focused_workspace(mouse_follows_focus, true)?;
                         }
                     }
                 }
@@ -1251,7 +1250,7 @@ impl WindowManager {
                 for (i, monitor) in self.monitors_mut().iter_mut().enumerate() {
                     if i != focused_monitor_idx {
                         monitor.focus_workspace(workspace_idx)?;
-                        monitor.load_focused_workspace(false)?;
+                        monitor.load_focused_workspace(false, false)?;
                     }
                 }
 

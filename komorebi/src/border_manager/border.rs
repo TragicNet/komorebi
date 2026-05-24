@@ -8,6 +8,7 @@ use crate::border_manager::WindowKind;
 use crate::border_manager::window_kind_colour;
 use crate::core::BorderStyle;
 use crate::core::Rect;
+use crate::window::Window;
 use crate::windows_api;
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -82,6 +83,7 @@ pub const WM_UPDATE_BRUSHES: u32 = WM_USER + 1;
 /// movement animation. lparam carries a `Box<Rect>` ownership transfer that the
 /// receiving WndProc reclaims and applies as the new tracked rect.
 pub const WM_ANIMATE_RECT: u32 = WM_USER + 2;
+const FLOATING_DEBUG_MARGIN_ALPHA: f32 = 0.18;
 
 pub struct RenderFactory(ID2D1Factory);
 unsafe impl Sync for RenderFactory {}
@@ -166,6 +168,7 @@ unsafe fn apply_tracked_rect(border_pointer: *mut Border, rect: Rect) {
 
         render_target.BeginDraw();
         render_target.Clear(None);
+        render_floating_debug_margin(border_pointer, rect, render_target);
 
         let style = match (*border_pointer).style {
             BorderStyle::System => {
@@ -231,6 +234,7 @@ pub struct Border {
     pub brush_properties: D2D1_BRUSH_PROPERTIES,
     pub rounded_rect: D2D1_ROUNDED_RECT,
     pub brushes: HashMap<WindowKind, ID2D1SolidColorBrush>,
+    pub debug_brush: Option<ID2D1SolidColorBrush>,
     pub is_destroying: Arc<AtomicBool>,
 }
 
@@ -250,7 +254,92 @@ impl From<isize> for Border {
             brush_properties: D2D1_BRUSH_PROPERTIES::default(),
             rounded_rect: D2D1_ROUNDED_RECT::default(),
             brushes: HashMap::new(),
+            debug_brush: None,
             is_destroying: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+fn floating_debug_margin_sizes(tracking_hwnd: isize, rect: Rect) -> Option<(f32, f32)> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+
+    let hmonitor = WindowsApi::monitor_from_window(tracking_hwnd);
+    let monitor = WindowsApi::monitor(hmonitor).ok()?;
+    let safe_area = Window::floating_resize_safe_area(&monitor.work_area_size, rect.right, rect.bottom);
+    let horizontal_margin = (safe_area.left - monitor.work_area_size.left).max(0) as f32;
+    let vertical_margin = (safe_area.top - monitor.work_area_size.top).max(0) as f32;
+
+    if horizontal_margin == 0.0 && vertical_margin == 0.0 {
+        None
+    } else {
+        Some((horizontal_margin, vertical_margin))
+    }
+}
+
+unsafe fn render_floating_debug_margin(
+    border_pointer: *mut Border,
+    rect: Rect,
+    render_target: &RenderTarget,
+) {
+    let border = unsafe { &*border_pointer };
+
+    if border.window_kind != WindowKind::Floating {
+        return;
+    }
+
+    let Some(debug_brush) = border.debug_brush.as_ref() else {
+        return;
+    };
+
+    let Some((horizontal_margin, vertical_margin)) = floating_debug_margin_sizes(border.tracking_hwnd, rect) else {
+        return;
+    };
+
+    if vertical_margin > 0.0 {
+        unsafe {
+            render_target.FillRectangle(
+                &D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: rect.right as f32,
+                    bottom: vertical_margin,
+                },
+                debug_brush,
+            );
+            render_target.FillRectangle(
+                &D2D_RECT_F {
+                    left: 0.0,
+                    top: rect.bottom as f32 - vertical_margin,
+                    right: rect.right as f32,
+                    bottom: rect.bottom as f32,
+                },
+                debug_brush,
+            );
+        }
+    }
+
+    if horizontal_margin > 0.0 {
+        unsafe {
+            render_target.FillRectangle(
+                &D2D_RECT_F {
+                    left: 0.0,
+                    top: vertical_margin,
+                    right: horizontal_margin,
+                    bottom: rect.bottom as f32 - vertical_margin,
+                },
+                debug_brush,
+            );
+            render_target.FillRectangle(
+                &D2D_RECT_F {
+                    left: rect.right as f32 - horizontal_margin,
+                    top: vertical_margin,
+                    right: rect.right as f32,
+                    bottom: rect.bottom as f32 - vertical_margin,
+                },
+                debug_brush,
+            );
         }
     }
 }
@@ -299,6 +388,7 @@ impl Border {
                 brush_properties: Default::default(),
                 rounded_rect: Default::default(),
                 brushes: HashMap::new(),
+                debug_brush: None,
                 is_destroying: Arc::new(AtomicBool::new(false)),
             };
 
@@ -400,6 +490,17 @@ impl Border {
                         self.brushes.insert(window_kind, brush);
                     }
                 }
+
+                let floating = window_kind_colour(WindowKind::Floating);
+                let debug_color = D2D1_COLOR_F {
+                    r: ((floating & 0xFF) as f32) / 255.0,
+                    g: (((floating >> 8) & 0xFF) as f32) / 255.0,
+                    b: (((floating >> 16) & 0xFF) as f32) / 255.0,
+                    a: FLOATING_DEBUG_MARGIN_ALPHA,
+                };
+                self.debug_brush = render_target
+                    .CreateSolidColorBrush(&debug_color, Some(&self.brush_properties))
+                    .ok();
 
                 render_target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
@@ -613,6 +714,7 @@ impl Border {
                             if let Some(brush) = (*border_pointer).brushes.get(&window_kind) {
                                 render_target.BeginDraw();
                                 render_target.Clear(None);
+                                render_floating_debug_margin(border_pointer, rect, render_target);
 
                                 (*border_pointer).style = STYLE.load();
 
@@ -675,6 +777,7 @@ impl Border {
                     if !border_pointer.is_null() {
                         (*border_pointer).render_target = None;
                         (*border_pointer).brushes.clear();
+                        (*border_pointer).debug_brush = None;
                         SetWindowLongPtrW(window, GWLP_USERDATA, 0);
                     }
                     PostQuitMessage(0);

@@ -582,12 +582,45 @@ impl AspectRatio {
 }
 
 impl Window {
+    const FLOATING_WINDOW_RESIZE_MARGIN: i32 = 10;
+
     pub const fn hwnd(self) -> HWND {
         HWND(windows_api::as_ptr!(self.hwnd))
     }
 
+    pub fn floating_resize_safe_area(
+        work_area: &Rect,
+        window_width: i32,
+        window_height: i32,
+    ) -> Rect {
+        let mut safe_area = *work_area;
+
+        let horizontal_margin = if window_width < work_area.right {
+            ((work_area.right - window_width) / 2).min(Self::FLOATING_WINDOW_RESIZE_MARGIN)
+        } else {
+            0
+        };
+
+        let vertical_margin = if window_height < work_area.bottom {
+            ((work_area.bottom - window_height) / 2).min(Self::FLOATING_WINDOW_RESIZE_MARGIN)
+        } else {
+            0
+        };
+
+        safe_area.left += horizontal_margin;
+        safe_area.top += vertical_margin;
+        safe_area.right -= horizontal_margin * 2;
+        safe_area.bottom -= vertical_margin * 2;
+
+        safe_area
+    }
+
     pub fn move_to_area(&mut self, current_area: &Rect, target_area: &Rect) -> eyre::Result<()> {
         let current_rect = WindowsApi::window_rect(self.hwnd)?;
+        let current_area =
+            Self::floating_resize_safe_area(current_area, current_rect.right, current_rect.bottom);
+        let target_area =
+            Self::floating_resize_safe_area(target_area, current_rect.right, current_rect.bottom);
         let x_diff = target_area.left - current_area.left;
         let y_diff = target_area.top - current_area.top;
         let x_ratio = f32::abs((target_area.right as f32) / (current_area.right as f32));
@@ -611,7 +644,7 @@ impl Window {
             bottom: corrected_height,
         };
 
-        let is_maximized = &new_rect == target_area;
+        let is_maximized = new_rect == target_area;
         if is_maximized {
             windows_api::WindowsApi::unmaximize_window(self.hwnd);
             let animation_enabled = ANIMATION_ENABLED_PER_ANIMATION.lock();
@@ -666,8 +699,10 @@ impl Window {
             (current_rect.right, current_rect.bottom)
         };
 
-        let x = work_area.left + ((work_area.right - target_width) / 2);
-        let y = work_area.top + ((work_area.bottom - target_height) / 2);
+        let safe_work_area =
+            Self::floating_resize_safe_area(work_area, target_width, target_height);
+        let x = safe_work_area.left + ((safe_work_area.right - target_width) / 2);
+        let y = safe_work_area.top + ((safe_work_area.bottom - target_height) / 2);
 
         self.set_position(
             &Rect {
@@ -717,8 +752,12 @@ impl Window {
         WindowsApi::is_zoomed(self.hwnd)
     }
 
-    pub fn is_miminized(self) -> bool {
+    pub fn is_minimized(self) -> bool {
         WindowsApi::is_iconic(self.hwnd)
+    }
+
+    pub fn is_miminized(self) -> bool {
+        self.is_minimized()
     }
 
     pub fn is_visible(self) -> bool {

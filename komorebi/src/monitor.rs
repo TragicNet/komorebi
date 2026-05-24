@@ -167,13 +167,17 @@ impl Monitor {
         })
     }
 
-    pub fn load_focused_workspace(&mut self, mouse_follows_focus: bool) -> eyre::Result<()> {
+    pub fn load_focused_workspace(
+        &mut self,
+        mouse_follows_focus: bool,
+        trigger_focus: bool,
+    ) -> eyre::Result<()> {
         let focused_idx = self.focused_workspace_idx();
         let hmonitor = self.id;
         let monitor_wp = self.wallpaper.clone();
         for (i, workspace) in self.workspaces_mut().iter_mut().enumerate() {
             if i == focused_idx {
-                workspace.restore(mouse_follows_focus, hmonitor, &monitor_wp)?;
+                workspace.restore(mouse_follows_focus, trigger_focus, hmonitor, &monitor_wp)?;
             } else {
                 workspace.hide(None);
             }

@@ -22,6 +22,7 @@ pub enum WindowManagerEvent {
     Minimize(WinEvent, Window),
     Show(WinEvent, Window),
     Uncloak(WinEvent, Window),
+    LocationChange(WinEvent, Window),
     MoveResizeStart(WinEvent, Window),
     MoveResizeEnd(WinEvent, Window),
     MouseCapture(WinEvent, Window),
@@ -61,6 +62,9 @@ impl Display for WindowManagerEvent {
             Self::Uncloak(winevent, window) => {
                 write!(f, "Uncloak (WinEvent: {winevent}, Window: {window})")
             }
+            Self::LocationChange(winevent, window) => {
+                write!(f, "LocationChange (WinEvent: {winevent}, Window: {window})")
+            }
             Self::MoveResizeStart(winevent, window) => {
                 write!(
                     f,
@@ -93,6 +97,7 @@ impl WindowManagerEvent {
             | Self::Minimize(_, window)
             | Self::Show(_, window)
             | Self::Uncloak(_, window)
+            | Self::LocationChange(_, window)
             | Self::MoveResizeStart(_, window)
             | Self::MoveResizeEnd(_, window)
             | Self::MouseCapture(_, window)
@@ -116,6 +121,7 @@ impl WindowManagerEvent {
             WindowManagerEvent::Minimize(_, _) => "Minimize",
             WindowManagerEvent::Show(_, _) => "Show",
             WindowManagerEvent::Uncloak(_, _) => "Uncloak",
+            WindowManagerEvent::LocationChange(_, _) => "LocationChange",
             WindowManagerEvent::MoveResizeStart(_, _) => "MoveResizeStart",
             WindowManagerEvent::MoveResizeEnd(_, _) => "MoveResizeEnd",
             WindowManagerEvent::MouseCapture(_, _) => "MouseCapture",
@@ -135,6 +141,7 @@ impl WindowManagerEvent {
             | WindowManagerEvent::Minimize(event, _)
             | WindowManagerEvent::Show(event, _)
             | WindowManagerEvent::Uncloak(event, _)
+            | WindowManagerEvent::LocationChange(event, _)
             | WindowManagerEvent::MoveResizeStart(event, _)
             | WindowManagerEvent::MoveResizeEnd(event, _)
             | WindowManagerEvent::MouseCapture(event, _)
@@ -159,6 +166,7 @@ impl WindowManagerEvent {
             }
 
             WinEvent::ObjectUncloaked => Option::from(Self::Uncloak(winevent, window)),
+            WinEvent::ObjectLocationChange => Option::from(Self::LocationChange(winevent, window)),
 
             WinEvent::ObjectFocus | WinEvent::SystemForeground => {
                 Option::from(Self::FocusChange(winevent, window))

@@ -146,6 +146,19 @@ impl Container {
         self.remove_window_by_idx(focused_idx)
     }
 
+    pub fn insert_window_at_idx(&mut self, idx: usize, window: Window) {
+        let idx = idx.min(self.windows().len());
+        self.windows_mut().insert(idx, window);
+        self.focus_window(idx);
+        let focused_window_idx = self.focused_window_idx();
+
+        for (i, window) in self.windows().iter().enumerate() {
+            if i != focused_window_idx {
+                window.hide();
+            }
+        }
+    }
+
     pub fn add_window(&mut self, window: Window) {
         self.windows_mut().push_back(window);
         self.focus_window(self.windows().len().saturating_sub(1));
@@ -162,6 +175,40 @@ impl Container {
     pub fn focus_window(&mut self, idx: usize) {
         tracing::info!("focusing window");
         self.windows.focus(idx);
+    }
+
+    pub fn all_windows_minimized(&self) -> bool {
+        if self.windows().is_empty() {
+            return true;
+        }
+
+        let hidden_hwnds = crate::HIDDEN_HWNDS.lock();
+        let all_minimized = self.windows().iter().all(|w| {
+            if hidden_hwnds.contains(&w.hwnd) {
+                tracing::debug!(hwnd = w.hwnd, "window is already hidden by komorebi, ignoring");
+                return true;
+            }
+
+            let is_minimized = w.is_minimized();
+            let is_cloaked = w.is_cloaked().unwrap_or(false);
+            let is_visible = w.is_visible();
+
+            tracing::debug!(
+                hwnd = w.hwnd,
+                is_minimized,
+                is_cloaked,
+                is_visible,
+                "checking window state in container"
+            );
+
+            is_minimized || is_cloaked || !is_visible
+        });
+
+        if !all_minimized {
+            tracing::debug!(container_id = %self.id, "container has at least one visible window");
+        }
+
+        all_minimized
     }
 }
 

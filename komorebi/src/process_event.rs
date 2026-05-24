@@ -352,43 +352,49 @@ impl WindowManager {
                     self.update_focused_workspace(self.mouse_follows_focus, false)?;
                 }
 
-                let workspace = self.focused_workspace_mut()?;
-                let floating_window_idx = workspace
-                    .floating_windows()
-                    .iter()
-                    .position(|w| w.hwnd == window.hwnd);
+                {
+                    let workspace = self.focused_workspace_mut()?;
+                    let floating_window_idx = workspace
+                        .floating_windows()
+                        .iter()
+                        .position(|w| w.hwnd == window.hwnd);
 
-                match floating_window_idx {
-                    None => {
-                        if let Some(w) = &workspace.maximized_window
-                            && w.hwnd == window.hwnd
-                        {
-                            return Ok(());
-                        }
-
-                        if let Some(monocle) = &workspace.monocle_container {
-                            if let Some(window) = monocle.focused_window() {
-                                window.focus(false)?;
+                    match floating_window_idx {
+                        None => {
+                            if let Some(w) = &workspace.maximized_window
+                                && w.hwnd == window.hwnd
+                            {
+                                return Ok(());
                             }
-                        } else {
-                            workspace.focus_container_by_window(window.hwnd)?;
+
+                            if let Some(monocle) = &workspace.monocle_container {
+                                if let Some(window) = monocle.focused_window() {
+                                    window.focus(false)?;
+                                }
+                            } else {
+                                workspace.focus_container_by_window(window.hwnd)?;
+                            }
+
+                            workspace.layer = WorkspaceLayer::Tiling;
+
+                            if matches!(
+                                self.focused_workspace()?.layout,
+                                Layout::Default(DefaultLayout::Scrolling)
+                            ) && !self.focused_workspace()?.containers().is_empty()
+                            {
+                                self.update_focused_workspace(self.mouse_follows_focus, false)?;
+                            }
                         }
-
-                        workspace.layer = WorkspaceLayer::Tiling;
-
-                        if matches!(
-                            self.focused_workspace()?.layout,
-                            Layout::Default(DefaultLayout::Scrolling)
-                        ) && !self.focused_workspace()?.containers().is_empty()
-                        {
-                            self.update_focused_workspace(self.mouse_follows_focus, false)?;
+                        Some(idx) => {
+                            if workspace.focus_floating_window(idx) {
+                                workspace.layer = WorkspaceLayer::Floating;
+                            }
                         }
                     }
-                    Some(idx) => {
-                        if let Some(_window) = workspace.floating_windows().get(idx) {
-                            workspace.layer = WorkspaceLayer::Floating;
-                        }
-                    }
+                }
+
+                if self.capture_native_maximize(window)? {
+                    return Ok(());
                 }
             }
             WindowManagerEvent::Show(_, window)
@@ -517,10 +523,8 @@ impl WindowManager {
                                 workspace.layer = WorkspaceLayer::Floating;
                                 if center_spawned_floats {
                                     let mut floating_window = window;
-                                    floating_window.center(
-                                        &workspace.globals.work_area,
-                                        placement.should_resize(),
-                                    )?;
+                                    floating_window
+                                        .center(&workspace.globals.work_area, placement.should_resize())?;
                                 }
                                 self.update_focused_workspace(false, false)?;
                             } else {
@@ -591,6 +595,10 @@ impl WindowManager {
                 *pending_move_op = Option::from((monitor_idx, workspace_idx, window.hwnd));
             }
             WindowManagerEvent::MoveResizeEnd(_, window) => {
+                if self.capture_native_maximize(window)? {
+                    return Ok(());
+                }
+
                 // We need this because if the event ends on a different monitor,
                 // that monitor will already have been focused and updated in the state
                 let pending = *self.pending_move_op;
@@ -829,6 +837,11 @@ impl WindowManager {
                     }
                 }
             }
+            WindowManagerEvent::LocationChange(_, window) => {
+                if self.capture_native_maximize(window)? {
+                    return Ok(());
+                }
+            }
             WindowManagerEvent::MouseCapture(..)
             | WindowManagerEvent::Cloak(..)
             | WindowManagerEvent::TitleUpdate(..) => {}
@@ -974,7 +987,7 @@ impl WindowManager {
                 }
                 workspace.layer = layer;
             }
-            monitor.load_focused_workspace(mouse_follows_focus)?;
+            monitor.load_focused_workspace(mouse_follows_focus, true)?;
             monitor.update_focused_workspace(offset)?;
         }
 

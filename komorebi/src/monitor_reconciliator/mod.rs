@@ -943,7 +943,7 @@ where
 
                                 // Restore windows from new monitor and update the focused
                                 // workspace
-                                m.load_focused_workspace(mouse_follows_focus)?;
+                                m.load_focused_workspace(mouse_follows_focus, true)?;
                                 m.update_focused_workspace(offset)?;
                             }
 

@@ -47,6 +47,14 @@ use serde::Deserialize;
 use serde::Serialize;
 use uds_windows::UnixStream;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WindowRestorationState {
+    pub container_id: Option<String>,
+    pub container_idx: usize,
+    pub window_idx: usize,
+    pub layer: WorkspaceLayer,
+}
+
 #[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -94,6 +102,15 @@ pub struct Workspace {
     pub preselected_container_idx: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub promotion_swap_container_idx: Option<usize>,
+    /// Hwnd of the last focused tiling window, used to restore focus correctly on workspace switch.
+    #[serde(skip)]
+    pub last_focused_hwnd: Option<isize>,
+    /// Hwnd of the last focused floating window, used to restore floating-layer focus correctly.
+    #[serde(skip)]
+    pub last_focused_floating_hwnd: Option<isize>,
+    /// Maps window HWNDs to their last known position and layer for restoration.
+    #[serde(skip)]
+    pub restoration_indices: HashMap<isize, WindowRestorationState>,
 }
 
 #[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -150,6 +167,9 @@ impl Default for Workspace {
             wallpaper: None,
             preselected_container_idx: None,
             promotion_swap_container_idx: None,
+            last_focused_hwnd: None,
+            last_focused_floating_hwnd: None,
+            restoration_indices: HashMap::new(),
         }
     }
 }
@@ -528,6 +548,7 @@ impl Workspace {
     pub fn restore(
         &mut self,
         mouse_follows_focus: bool,
+        trigger_focus: bool,
         hmonitor: isize,
         monitor_wp: &Option<Wallpaper>,
     ) -> eyre::Result<()> {
@@ -535,11 +556,32 @@ impl Workspace {
             && let Some(window) = container.focused_window()
         {
             container.restore();
-            window.focus(mouse_follows_focus)?;
+            if trigger_focus {
+                window.focus(mouse_follows_focus)?;
+            }
             return self.apply_wallpaper(hmonitor, monitor_wp);
         }
 
+        // If we have a record of the last focused hwnd, use it to find the right container.
+        // This is more reliable than Ring.focused, which can become stale if containers are
+        // reordered or removed while the workspace is inactive.
+        if let Some(hwnd) = self.last_focused_hwnd
+            && let Some(container_idx) = self.container_idx_for_window(hwnd)
+        {
+            self.containers.focus(container_idx);
+        }
+
+        if let Some(hwnd) = self.last_focused_floating_hwnd {
+            self.focus_floating_window_by_hwnd(hwnd);
+        }
+
         let idx = self.focused_container_idx();
+        tracing::debug!(
+            "restoring workspace '{}': focused_container_idx={}, containers={}",
+            self.name.as_deref().unwrap_or("unnamed"),
+            idx,
+            self.containers().len()
+        );
         let mut to_focus = None;
 
         for (i, container) in self.containers_mut().iter_mut().enumerate() {
@@ -565,18 +607,28 @@ impl Workspace {
         // when switching to a workspace
         if let Some(window) = to_focus {
             if self.maximized_window.is_none() && matches!(self.layer, WorkspaceLayer::Tiling) {
-                window.focus(mouse_follows_focus)?;
+                if trigger_focus {
+                    window.focus(mouse_follows_focus)?;
+                }
             } else if let Some(maximized_window) = self.maximized_window {
                 maximized_window.restore();
-                maximized_window.focus(mouse_follows_focus)?;
+                if trigger_focus {
+                    maximized_window.focus(mouse_follows_focus)?;
+                }
             } else if let Some(floating_window) = self.focused_floating_window() {
-                floating_window.focus(mouse_follows_focus)?;
+                if trigger_focus {
+                    floating_window.focus(mouse_follows_focus)?;
+                }
             }
         } else if let Some(maximized_window) = self.maximized_window {
             maximized_window.restore();
-            maximized_window.focus(mouse_follows_focus)?;
+            if trigger_focus {
+                maximized_window.focus(mouse_follows_focus)?;
+            }
         } else if let Some(floating_window) = self.focused_floating_window() {
-            floating_window.focus(mouse_follows_focus)?;
+            if trigger_focus {
+                floating_window.focus(mouse_follows_focus)?;
+            }
         }
 
         self.apply_wallpaper(hmonitor, monitor_wp)
@@ -587,9 +639,47 @@ impl Workspace {
             return Ok(());
         }
 
-        // make sure we are never holding on to empty containers
-        self.containers_mut()
-            .retain(|c| c.is_preselect() || !c.windows().is_empty());
+        let mut hwnds_to_remove = vec![];
+        let hidden_hwnds = crate::HIDDEN_HWNDS.lock();
+
+        for container in self.containers() {
+            for window in container.windows() {
+                if !hidden_hwnds.contains(&window.hwnd)
+                    && (window.is_minimized() || window.is_cloaked().unwrap_or(false))
+                {
+                    hwnds_to_remove.push(window.hwnd);
+                }
+            }
+        }
+
+        if let Some(container) = &self.monocle_container {
+            for window in container.windows() {
+                if !hidden_hwnds.contains(&window.hwnd)
+                    && (window.is_minimized() || window.is_cloaked().unwrap_or(false))
+                {
+                    hwnds_to_remove.push(window.hwnd);
+                }
+            }
+        }
+
+        if let Some(window) = self.maximized_window {
+            if window.is_minimized() || window.is_cloaked().unwrap_or(false) {
+                hwnds_to_remove.push(window.hwnd);
+            }
+        }
+
+        for window in self.floating_windows() {
+            if window.is_minimized() || window.is_cloaked().unwrap_or(false) {
+                hwnds_to_remove.push(window.hwnd);
+            }
+        }
+
+        drop(hidden_hwnds);
+
+        for hwnd in hwnds_to_remove {
+            tracing::info!(hwnd, "removing minimized/cloaked window");
+            self.remove_window(hwnd)?;
+        }
 
         // Remove empty containers (ghost containers) that have no windows
         let empty_container_indices: Vec<usize> = self
@@ -665,11 +755,9 @@ impl Workspace {
                 let effective_layout_options = self.effective_layout_options();
 
                 tracing::debug!(
-                    "Workspace '{}' update() - effective_layout_options: {:?} (base: {:?}, rules: {})",
-                    self.name.as_deref().unwrap_or("unnamed"),
-                    effective_layout_options,
-                    self.layout_options,
-                    self.layout_options_rules.len(),
+                    workspace = %self.name.as_deref().unwrap_or("unnamed"),
+                    container_count = self.containers().len(),
+                    "calculating layout"
                 );
                 let mut layouts = self.layout.as_boxed_arrangement().calculate(
                     &adjusted_work_area,
@@ -868,8 +956,31 @@ impl Workspace {
         }
 
         self.focus_container(container_idx);
+        self.last_focused_hwnd = Some(hwnd);
 
         Ok(())
+    }
+
+    pub fn focus_floating_window(&mut self, idx: usize) -> bool {
+        if let Some(hwnd) = self.floating_windows().get(idx).map(|window| window.hwnd) {
+            self.floating_windows.focus(idx);
+            self.last_focused_floating_hwnd = Some(hwnd);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn focus_floating_window_by_hwnd(&mut self, hwnd: isize) -> bool {
+        if let Some(idx) = self
+            .floating_windows()
+            .iter()
+            .position(|window| window.hwnd == hwnd)
+        {
+            self.focus_floating_window(idx)
+        } else {
+            false
+        }
     }
 
     pub fn container_idx_from_current_point(&self) -> Option<usize> {
@@ -1106,6 +1217,17 @@ impl Workspace {
         border_manager::delete_border(hwnd);
 
         if self.floating_windows().iter().any(|w| w.hwnd == hwnd) {
+            if let Some(idx) = self.floating_windows().iter().position(|w| w.hwnd == hwnd) {
+                self.restoration_indices.insert(
+                    hwnd,
+                    WindowRestorationState {
+                        container_id: None,
+                        container_idx: 0,
+                        window_idx: idx,
+                        layer: WorkspaceLayer::Floating,
+                    },
+                );
+            }
             self.floating_windows_mut().retain(|w| w.hwnd != hwnd);
             return Ok(());
         }
@@ -1116,6 +1238,16 @@ impl Workspace {
                 .iter()
                 .position(|window| window.hwnd == hwnd)
         {
+            self.restoration_indices.insert(
+                hwnd,
+                WindowRestorationState {
+                    container_id: Some(container.id.clone()),
+                    container_idx: self.monocle_container_restore_idx.unwrap_or(0),
+                    window_idx,
+                    layer: WorkspaceLayer::Tiling,
+                },
+            );
+
             container
                 .remove_window_by_idx(window_idx)
                 .ok_or_eyre("there is no window")?;
@@ -1135,26 +1267,55 @@ impl Workspace {
         if let Some(window) = self.maximized_window
             && window.hwnd == hwnd
         {
+            self.restoration_indices.insert(
+                hwnd,
+                WindowRestorationState {
+                    container_id: None,
+                    container_idx: self.maximized_window_restore_idx.unwrap_or(0),
+                    window_idx: 0,
+                    layer: WorkspaceLayer::Tiling,
+                },
+            );
+
             window.unmaximize();
             self.maximized_window = None;
             self.maximized_window_restore_idx = None;
             return Ok(());
         }
 
-        let container_idx = self
-            .container_idx_for_window(hwnd)
-            .ok_or_eyre("there is no window")?;
+        let (container_id, container_idx, window_idx) = {
+            let container_idx = self
+                .container_idx_for_window(hwnd)
+                .ok_or_eyre("there is no window")?;
+
+            let container = self
+                .containers()
+                .get(container_idx)
+                .ok_or_eyre("there is no container")?;
+
+            let window_idx = container
+                .windows()
+                .iter()
+                .position(|window| window.hwnd == hwnd)
+                .ok_or_eyre("there is no window")?;
+
+            (container.id.clone(), container_idx, window_idx)
+        };
+
+        self.restoration_indices.insert(
+            hwnd,
+            WindowRestorationState {
+                container_id: Some(container_id),
+                container_idx,
+                window_idx,
+                layer: WorkspaceLayer::Tiling,
+            },
+        );
 
         let container = self
             .containers_mut()
             .get_mut(container_idx)
             .ok_or_eyre("there is no container")?;
-
-        let window_idx = container
-            .windows()
-            .iter()
-            .position(|window| window.hwnd == hwnd)
-            .ok_or_eyre("there is no window")?;
 
         container
             .remove_window_by_idx(window_idx)
@@ -1299,6 +1460,62 @@ impl Workspace {
     }
 
     pub fn new_container_for_window(&mut self, window: Window) {
+        if let Some(state) = self.restoration_indices.remove(&window.hwnd) {
+            tracing::info!(
+                hwnd = window.hwnd,
+                container_id = ?state.container_id,
+                container_idx = state.container_idx,
+                window_idx = state.window_idx,
+                layer = %state.layer,
+                "restoring window to last known position"
+            );
+
+            if matches!(state.layer, WorkspaceLayer::Floating) {
+                if state.window_idx >= self.floating_windows().len() {
+                    self.floating_windows_mut().push_back(window);
+                    self.focus_floating_window(self.floating_windows().len() - 1);
+                } else {
+                    self.floating_windows_mut().insert(state.window_idx, window);
+                    self.focus_floating_window(state.window_idx);
+                }
+                return;
+            }
+
+            // Try to find by container ID first
+            if let Some(container_id) = &state.container_id {
+                let mut found_idx = None;
+                for (i, c) in self.containers().iter().enumerate() {
+                    if c.id == *container_id {
+                        found_idx = Some(i);
+                        break;
+                    }
+                }
+
+                if let Some(idx) = found_idx {
+                    self.containers_mut()
+                        .get_mut(idx)
+                        .unwrap()
+                        .insert_window_at_idx(state.window_idx, window);
+                    self.focus_container(idx);
+                    return;
+                }
+            }
+
+            // If the container is gone (e.g. it was removed because all windows were minimized),
+            // we MUST create a new container and INSERT it at the original index to reclaim
+            // the tiling slot, rather than stacking it on whatever container is currently at that index.
+            let mut container = Container::default();
+            if let Some(id) = state.container_id {
+                container.id = id;
+            }
+            container.add_window(window);
+
+            // Cap the index to current length to avoid panics, but prefer the original position
+            let target_idx = state.container_idx.min(self.containers().len());
+            self.insert_container_at_idx(target_idx, container);
+            return;
+        }
+
         let next_idx = if let Some(idx) = self.preselected_container_idx {
             let next = idx;
             self.preselected_container_idx = None;
@@ -1827,6 +2044,16 @@ impl Workspace {
         tracing::info!("focusing container");
 
         self.containers.focus(idx);
+
+        // Eagerly sync last_focused_hwnd so workspace restoration uses the correct
+        // container even if the WinEvent for this focus change hasn't fired yet.
+        if let Some(hwnd) = self
+            .focused_container()
+            .and_then(|c| c.focused_window())
+            .map(|w| w.hwnd)
+        {
+            self.last_focused_hwnd = Some(hwnd);
+        }
     }
 
     pub fn swap_containers(&mut self, i: usize, j: usize) {
@@ -1848,7 +2075,18 @@ impl Workspace {
             None => None,
             Some(idx) => {
                 if self.floating_windows().get(idx).is_some() {
-                    self.floating_windows_mut().remove(idx)
+                    let window = self.floating_windows_mut().remove(idx);
+                    if let Some(next_idx) = self
+                        .floating_windows()
+                        .len()
+                        .checked_sub(1)
+                        .map(|last_idx| idx.min(last_idx))
+                    {
+                        self.focus_floating_window(next_idx);
+                    } else {
+                        self.last_focused_floating_hwnd = None;
+                    }
+                    window
                 } else {
                     None
                 }
@@ -2617,6 +2855,21 @@ mod tests {
             Some(&Window { hwnd: 1 })
         );
         assert_eq!(focused_container.focused_window_idx(), 1);
+    }
+
+    #[test]
+    fn test_focus_floating_window_tracks_last_focused_floating_hwnd() {
+        let mut workspace = Workspace::default();
+        workspace.floating_windows_mut().push_back(Window::from(10));
+        workspace.floating_windows_mut().push_back(Window::from(20));
+
+        assert!(workspace.focus_floating_window(1));
+        assert_eq!(workspace.focused_floating_window_idx(), 1);
+        assert_eq!(workspace.last_focused_floating_hwnd, Some(20));
+
+        assert!(workspace.focus_floating_window_by_hwnd(10));
+        assert_eq!(workspace.focused_floating_window_idx(), 0);
+        assert_eq!(workspace.last_focused_floating_hwnd, Some(10));
     }
 
     #[test]

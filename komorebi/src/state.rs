@@ -283,6 +283,9 @@ impl From<&WindowManager> for State {
                             workspace_config: None,
                             preselected_container_idx: None,
                             promotion_swap_container_idx: None,
+                            last_focused_hwnd: None,
+                            last_focused_floating_hwnd: None,
+                            restoration_indices: HashMap::new(),
                         })
                         .collect::<VecDeque<_>>();
                     ws.focus(monitor.workspaces.focused_idx());
