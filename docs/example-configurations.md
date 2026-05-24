@@ -74,6 +74,15 @@ between each of the tiled windows) for each workspace independently, you can
 also set a default for both of these values that will apply to all workspaces
 using `default_workspace_padding` and `default_container_padding`.
 
+### Cycle focus across monitors
+
+If you use multiple monitors, you can make `CycleFocusWindow` continue onto the
+next or previous monitor after reaching the first or last tiled window by
+setting `cycle_focus_across_monitors` to `true`.
+
+When enabled, `komorebi` skips workspaces that are currently in the floating
+layer or using a monocle container.
+
 ### Active window border
 
 You may have seen videos and screenshots of people using `komorebi` with a

@@ -217,8 +217,14 @@ impl MovementRenderDispatcher {
     fn animated_rect(&self, progress: f64) -> Rect {
         if self.size_changes_during_animation() {
             Rect {
-                left: self.start_rect.left.lerp(self.target_rect.left, progress, self.style),
-                top: self.start_rect.top.lerp(self.target_rect.top, progress, self.style),
+                left: self
+                    .start_rect
+                    .left
+                    .lerp(self.target_rect.left, progress, self.style),
+                top: self
+                    .start_rect
+                    .top
+                    .lerp(self.target_rect.top, progress, self.style),
                 right: self.start_rect.right,
                 bottom: self.start_rect.bottom,
             }

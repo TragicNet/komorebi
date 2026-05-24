@@ -616,60 +616,12 @@ impl Workspace {
             .unwrap_or_default();
         let border_width = self.globals.border_width;
         let border_offset = self.globals.border_offset;
-        let work_area = self.globals.work_area;
-        let window_based_work_area_offset = self.globals.window_based_work_area_offset;
-        let window_based_work_area_offset_limit = self.globals.window_based_work_area_offset_limit;
-        let mut rules_work_area_offset = None;
-
-        if !self.work_area_offset_rules.is_empty() {
-            let count = if self.monocle_container.is_some() {
-                1
-            } else {
-                self.containers().len()
-            };
-
-            for (threshold, work_area_offset_rule) in &self.work_area_offset_rules {
-                if count >= *threshold {
-                    rules_work_area_offset = Some(*work_area_offset_rule);
-                }
-            }
-        };
-
-        let work_area_offset = rules_work_area_offset
-            .or(self.work_area_offset)
-            .or(self.globals.work_area_offset);
-
-        let mut adjusted_work_area = work_area_offset.map_or_else(
-            || work_area,
-            |offset| {
-                let mut with_offset = work_area;
-                with_offset.left += offset.left;
-                with_offset.top += offset.top;
-                with_offset.right -= offset.right;
-                with_offset.bottom -= offset.bottom;
-
-                with_offset
-            },
+        let adjusted_work_area = self.adjusted_work_area(
+            self.globals.work_area,
+            workspace_padding,
+            self.globals.window_based_work_area_offset,
+            self.globals.window_based_work_area_offset_limit,
         );
-        if (self.containers().len() <= window_based_work_area_offset_limit as usize
-            || self.monocle_container.is_some() && window_based_work_area_offset_limit > 0)
-            && self.apply_window_based_work_area_offset
-        {
-            adjusted_work_area = window_based_work_area_offset.map_or_else(
-                || adjusted_work_area,
-                |offset| {
-                    let mut with_offset = adjusted_work_area;
-                    with_offset.left += offset.left;
-                    with_offset.top += offset.top;
-                    with_offset.right -= offset.right;
-                    with_offset.bottom -= offset.bottom;
-
-                    with_offset
-                },
-            );
-        }
-
-        adjusted_work_area.add_padding(workspace_padding);
 
         self.enforce_resize_constraints();
 
@@ -701,12 +653,11 @@ impl Workspace {
         let managed_maximized_window = self.maximized_window.is_some();
 
         if self.tile {
+            let monocle_area = self.monocle_area_from_work_area(adjusted_work_area);
+
             if let Some(container) = &mut self.monocle_container {
                 if let Some(window) = container.focused_window_mut() {
-                    adjusted_work_area.add_padding(container_padding);
-                    adjusted_work_area.add_padding(border_offset);
-                    adjusted_work_area.add_padding(border_width);
-                    window.set_position(&adjusted_work_area, true)?;
+                    window.set_position(&monocle_area, true)?;
                 };
             } else if let Some(window) = &mut self.maximized_window {
                 window.maximize();
@@ -806,6 +757,81 @@ impl Workspace {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn adjusted_work_area(
+        &self,
+        work_area: Rect,
+        workspace_padding: i32,
+        window_based_work_area_offset: Option<Rect>,
+        window_based_work_area_offset_limit: isize,
+    ) -> Rect {
+        let mut rules_work_area_offset = None;
+
+        if !self.work_area_offset_rules.is_empty() {
+            let count = if self.monocle_container.is_some() {
+                1
+            } else {
+                self.containers().len()
+            };
+
+            for (threshold, work_area_offset_rule) in &self.work_area_offset_rules {
+                if count >= *threshold {
+                    rules_work_area_offset = Some(*work_area_offset_rule);
+                }
+            }
+        }
+
+        let work_area_offset = rules_work_area_offset
+            .or(self.work_area_offset)
+            .or(self.globals.work_area_offset);
+
+        let mut adjusted_work_area = Self::apply_work_area_offset(work_area, work_area_offset);
+
+        if (self.containers().len() <= window_based_work_area_offset_limit as usize
+            || self.monocle_container.is_some() && window_based_work_area_offset_limit > 0)
+            && self.apply_window_based_work_area_offset
+        {
+            adjusted_work_area =
+                Self::apply_work_area_offset(adjusted_work_area, window_based_work_area_offset);
+        }
+
+        adjusted_work_area.add_padding(workspace_padding);
+        adjusted_work_area
+    }
+
+    pub(crate) fn monocle_area_from_work_area(&self, adjusted_work_area: Rect) -> Rect {
+        Self::monocle_area(
+            adjusted_work_area,
+            self.container_padding
+                .or(self.globals.container_padding)
+                .unwrap_or_default(),
+            self.globals.border_offset,
+            self.globals.border_width,
+        )
+    }
+
+    pub(crate) fn monocle_area(
+        mut adjusted_work_area: Rect,
+        container_padding: i32,
+        border_offset: i32,
+        border_width: i32,
+    ) -> Rect {
+        adjusted_work_area.add_padding(container_padding);
+        adjusted_work_area.add_padding(border_offset);
+        adjusted_work_area.add_padding(border_width);
+        adjusted_work_area
+    }
+
+    fn apply_work_area_offset(mut work_area: Rect, offset: Option<Rect>) -> Rect {
+        if let Some(offset) = offset {
+            work_area.left += offset.left;
+            work_area.top += offset.top;
+            work_area.right -= offset.right;
+            work_area.bottom -= offset.bottom;
+        }
+
+        work_area
     }
 
     pub fn container_for_window(&self, hwnd: isize) -> Option<&Container> {
@@ -2700,5 +2726,90 @@ mod tests {
             assert_eq!(visible_windows[1].unwrap().hwnd, 100);
             assert_eq!(visible_windows[2].unwrap().hwnd, 300);
         }
+    }
+
+    #[test]
+    fn test_monocle_area_uses_adjusted_workspace_geometry() {
+        let mut workspace = Workspace::default();
+        workspace.workspace_padding = Some(10);
+        workspace.container_padding = Some(20);
+        workspace.globals = WorkspaceGlobals {
+            border_width: 2,
+            border_offset: 1,
+            work_area: Rect {
+                left: 0,
+                top: 0,
+                right: 1000,
+                bottom: 800,
+            },
+            ..Default::default()
+        };
+
+        let adjusted = workspace.adjusted_work_area(
+            workspace.globals.work_area,
+            workspace.workspace_padding.unwrap(),
+            workspace.globals.window_based_work_area_offset,
+            workspace.globals.window_based_work_area_offset_limit,
+        );
+        let monocle = Workspace::monocle_area(
+            adjusted,
+            workspace.container_padding.unwrap(),
+            workspace.globals.border_offset,
+            workspace.globals.border_width,
+        );
+
+        assert_eq!(
+            monocle,
+            Rect {
+                left: 33,
+                top: 33,
+                right: 934,
+                bottom: 734,
+            }
+        );
+    }
+
+    #[test]
+    fn test_cycle_monocle_container_preserves_tiled_layouts() {
+        let mut workspace = Workspace::default();
+        workspace.latest_layout = vec![
+            Rect {
+                left: 0,
+                top: 0,
+                right: 500,
+                bottom: 800,
+            },
+            Rect {
+                left: 500,
+                top: 0,
+                right: 500,
+                bottom: 800,
+            },
+        ];
+
+        for hwnd in [1, 2] {
+            let mut container = Container::default();
+            container.windows_mut().push_back(Window::from(hwnd));
+            workspace.add_container_to_back(container);
+        }
+
+        workspace.focus_container(0);
+        workspace.new_monocle_container().unwrap();
+
+        let latest_layout = workspace.latest_layout.clone();
+
+        workspace
+            .cycle_monocle_container(CycleDirection::Next)
+            .unwrap();
+
+        assert_eq!(workspace.latest_layout, latest_layout);
+        assert_eq!(
+            workspace
+                .monocle_container
+                .as_ref()
+                .and_then(|container| container.focused_window())
+                .map(|window| window.hwnd),
+            Some(2)
+        );
     }
 }

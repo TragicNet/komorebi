@@ -87,6 +87,7 @@ pub struct WindowManager {
     pub focus_follows_mouse: Option<FocusFollowsMouseImplementation>,
     pub mouse_follows_focus: bool,
     pub focus_new_windows: bool,
+    pub cycle_focus_across_monitors: bool,
     pub hotwatch: Hotwatch,
     pub virtual_desktop_id: Option<Vec<u8>>,
     pub has_pending_raise_op: bool,
@@ -159,6 +160,7 @@ impl WindowManager {
             focus_follows_mouse: None,
             mouse_follows_focus: true,
             focus_new_windows: false,
+            cycle_focus_across_monitors: false,
             hotwatch: Hotwatch::new()?,
             has_pending_raise_op: false,
             pending_move_op: Arc::new(None),
@@ -2583,6 +2585,32 @@ impl WindowManager {
         self.handle_unmanaged_window_behaviour()?;
 
         tracing::info!("focusing container");
+
+        if self.cycle_focus_across_monitors
+            && self.monitors().len() > 1
+            && self.should_wrap_cycle_focus(direction)?
+        {
+            if let Some(target_monitor_idx) =
+                self.cycle_focus_target_monitor_idx(self.focused_monitor_idx(), direction)?
+            {
+                self.focus_monitor(target_monitor_idx)?;
+
+                if let Some(idx) = self
+                    .focused_workspace()?
+                    .containers()
+                    .len()
+                    .checked_sub(usize::from(matches!(direction, CycleDirection::Next)))
+                {
+                    self.focused_workspace_mut()?.focus_container(idx);
+                    self.focused_window_mut()?.focus(self.mouse_follows_focus)?;
+                } else {
+                    self.update_focused_workspace(self.mouse_follows_focus, true)?;
+                }
+
+                return Ok(());
+            }
+        }
+
         let mut maximize_next = false;
         let mut monocle_next = false;
 
@@ -3089,6 +3117,8 @@ impl WindowManager {
             window.hide();
         }
 
+        self.position_windows_for_monocle()?;
+
         Ok(())
     }
 
@@ -3124,10 +3154,77 @@ impl WindowManager {
             container.hide(None);
         }
 
+        self.position_windows_for_monocle()?;
+
         // borders were getting funny during cycles, can't be bothered to root cause it
         border_manager::destroy_all_borders()?;
 
         self.update_focused_workspace(true, true)
+    }
+
+    fn should_wrap_cycle_focus(&self, direction: CycleDirection) -> eyre::Result<bool> {
+        let workspace = self.focused_workspace()?;
+        if workspace.monocle_container.is_some() {
+            return Ok(false);
+        }
+
+        let len = workspace.containers().len();
+        Ok(match direction {
+            CycleDirection::Previous => workspace.focused_container_idx() == 0,
+            CycleDirection::Next => len == 0 || workspace.focused_container_idx() == len - 1,
+        })
+    }
+
+    fn cycle_focus_target_monitor_idx(
+        &self,
+        current_monitor_idx: usize,
+        direction: CycleDirection,
+    ) -> eyre::Result<Option<usize>> {
+        let monitor_count = NonZeroUsize::new(self.monitors().len())
+            .ok_or_eyre("there must be at least one monitor")?;
+        let mut next_monitor_idx = current_monitor_idx;
+
+        for _ in 1..monitor_count.get() {
+            next_monitor_idx = direction.next_idx(next_monitor_idx, monitor_count);
+
+            let workspace = self.focused_workspace_for_monitor_idx(next_monitor_idx)?;
+            if workspace.layer == WorkspaceLayer::Tiling && workspace.monocle_container.is_none() {
+                return Ok(Some(next_monitor_idx));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn position_windows_for_monocle(&self) -> eyre::Result<()> {
+        let workspace = self.focused_workspace()?;
+        let monocle_area = workspace.monocle_area_from_work_area(
+            workspace.adjusted_work_area(
+                workspace.globals.work_area,
+                workspace
+                    .workspace_padding
+                    .or(workspace.globals.workspace_padding)
+                    .unwrap_or_default(),
+                workspace.globals.window_based_work_area_offset,
+                workspace.globals.window_based_work_area_offset_limit,
+            ),
+        );
+
+        for container in workspace.containers() {
+            for window in container.windows() {
+                WindowsApi::position_window(window.hwnd, &monocle_area, false, true)?;
+            }
+        }
+
+        if let Some(window) = workspace
+            .monocle_container
+            .as_ref()
+            .and_then(|container| container.focused_window().copied())
+        {
+            WindowsApi::position_window(window.hwnd, &monocle_area, true, true)?;
+        }
+
+        Ok(())
     }
 
     #[tracing::instrument(skip(self))]
@@ -4311,6 +4408,101 @@ mod tests {
         wm.focus_container_in_cycle_direction(CycleDirection::Previous)
             .ok();
         assert_eq!(wm.focused_container_idx().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_focus_container_in_cycle_direction_skips_floating_and_monocle_monitors() {
+        let (mut wm, _test_context) = setup_window_manager();
+        wm.cycle_focus_across_monitors = true;
+
+        for monitor_idx in 0..4 {
+            let mut monitor = monitor::new(
+                monitor_idx,
+                Rect::default(),
+                Rect::default(),
+                format!("TestMonitor{monitor_idx}"),
+                format!("TestDevice{monitor_idx}"),
+                format!("TestDeviceID{monitor_idx}"),
+                Some(format!("TestMonitorID{monitor_idx}")),
+            );
+
+            let workspace = monitor.focused_workspace_mut().unwrap();
+            workspace.layer = WorkspaceLayer::Tiling;
+
+            let mut container = Container::default();
+            container
+                .windows_mut()
+                .push_back(Window::from((monitor_idx + 1) as isize));
+            workspace.add_container_to_back(container);
+            workspace.focus_container(0);
+
+            wm.monitors_mut().push_back(monitor);
+        }
+
+        wm.focus_monitor(0).unwrap();
+
+        {
+            let workspace = wm.focused_workspace_for_monitor_idx_mut(1).unwrap();
+            workspace.layer = WorkspaceLayer::Floating;
+            workspace
+                .floating_windows
+                .elements_mut()
+                .push_back(Window::from(100));
+        }
+
+        {
+            let workspace = wm.focused_workspace_for_monitor_idx_mut(2).unwrap();
+            let mut monocle_container = Container::default();
+            monocle_container.windows_mut().push_back(Window::from(200));
+            workspace.monocle_container = Some(monocle_container);
+        }
+
+        wm.focus_container_in_cycle_direction(CycleDirection::Next)
+            .unwrap();
+
+        assert_eq!(wm.focused_monitor_idx(), 3);
+        assert_eq!(wm.focused_container_idx().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_focus_container_in_cycle_direction_does_not_cross_monitors_from_monocle() {
+        let (mut wm, _test_context) = setup_window_manager();
+        wm.cycle_focus_across_monitors = true;
+
+        for monitor_idx in 0..2 {
+            let mut monitor = monitor::new(
+                monitor_idx,
+                Rect::default(),
+                Rect::default(),
+                format!("TestMonitor{monitor_idx}"),
+                format!("TestDevice{monitor_idx}"),
+                format!("TestDeviceID{monitor_idx}"),
+                Some(format!("TestMonitorID{monitor_idx}")),
+            );
+
+            let workspace = monitor.focused_workspace_mut().unwrap();
+            workspace.layer = WorkspaceLayer::Tiling;
+
+            for window_idx in 0..2 {
+                let mut container = Container::default();
+                container
+                    .windows_mut()
+                    .push_back(Window::from((monitor_idx * 10 + window_idx + 1) as isize));
+                workspace.add_container_to_back(container);
+            }
+
+            workspace.focus_container(1);
+            wm.monitors_mut().push_back(monitor);
+        }
+
+        wm.focus_monitor(0).unwrap();
+        wm.toggle_monocle().unwrap();
+
+        wm.focus_container_in_cycle_direction(CycleDirection::Next)
+            .unwrap();
+
+        assert_eq!(wm.focused_monitor_idx(), 0);
+        assert!(wm.focused_workspace().unwrap().monocle_container.is_some());
     }
 
     #[test]
