@@ -1072,6 +1072,16 @@ impl Window {
         event: Option<WindowManagerEvent>,
         debug: &mut RuleDebug,
     ) -> eyre::Result<bool> {
+        // An explicit Manage command always takes effect, bypassing all eligibility checks
+        if matches!(event, Some(WindowManagerEvent::Manage(_))) {
+            debug.is_window = true;
+            debug.has_minimum_width = true;
+            debug.has_minimum_height = true;
+            debug.has_title = true;
+            debug.should_manage = true;
+            return Ok(true);
+        }
+
         if !self.is_window() {
             return Ok(false);
         }
@@ -1185,6 +1195,12 @@ fn window_is_eligible(
         let permaignore_classes = PERMAIGNORE_CLASSES.lock();
         if permaignore_classes.contains(class) {
             debug.matches_permaignore_class = Some(class.clone());
+            tracing::debug!(
+                "unmanaged (exe: {}, title: {}, class: {}): matched permaignore class",
+                exe_name,
+                title,
+                class,
+            );
             return false;
         }
     }
@@ -1234,6 +1250,12 @@ fn window_is_eligible(
     }
 
     if should_ignore && !managed_override {
+        tracing::debug!(
+            "unmanaged (exe: {}, title: {}, class: {}): matched ignore identifier",
+            exe_name,
+            title,
+            class,
+        );
         return false;
     }
 
@@ -1319,12 +1341,12 @@ fn window_is_eligible(
         || managed_override
     {
         return true;
-    } else if let Some(event) = event {
+    } else {
         tracing::debug!(
-            "ignoring (exe: {}, title: {}, event: {})",
+            "unmanaged (exe: {}, title: {}, class: {}): does not meet window eligibility criteria (no WS_CAPTION + WS_EX_WINDOWEDGE, or layered without whitelist)",
             exe_name,
             title,
-            event
+            class,
         );
     }
 
