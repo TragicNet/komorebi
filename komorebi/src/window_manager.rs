@@ -3322,11 +3322,30 @@ impl WindowManager {
 
     #[tracing::instrument(skip(self))]
     pub fn capture_native_maximize(&mut self, window: Window) -> eyre::Result<bool> {
+        let is_captured = {
+            let workspace = self.focused_workspace()?;
+            workspace.monocle_container.is_some()
+                || workspace.maximized_window.is_some()
+        };
+
+        if is_captured && window.is_maximized() {
+            window.unmaximize();
+
+            if self.focused_workspace()?.monocle_container.is_some() {
+                self.monocle_off()?;
+            } else {
+                self.focused_workspace_mut()?.reintegrate_maximized_window()?;
+            }
+
+            self.update_focused_workspace(true, true)?;
+            return Ok(true);
+        }
+
         if !window.is_maximized() && !self.should_capture_native_maximize(window)? {
             return Ok(false);
         }
 
-        window.restore();
+        window.unmaximize();
 
         if self.capture_native_maximized_window(window)? {
             self.update_focused_workspace(true, true)?;
