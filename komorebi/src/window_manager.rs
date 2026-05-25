@@ -2604,12 +2604,15 @@ impl WindowManager {
             {
                 self.focus_monitor(target_monitor_idx)?;
 
-                if let Some(idx) = self
-                    .focused_workspace()?
-                    .containers()
-                    .len()
-                    .checked_sub(usize::from(matches!(direction, CycleDirection::Next)))
-                {
+                let idx = match direction {
+                    CycleDirection::Next => Some(0),
+                    CycleDirection::Previous => {
+                        let len = self.focused_workspace()?.containers().len();
+                        len.checked_sub(1)
+                    }
+                };
+
+                if let Some(idx) = idx {
                     self.focused_workspace_mut()?.focus_container(idx);
                     self.focused_window_mut()?.focus(self.mouse_follows_focus)?;
                 } else {
