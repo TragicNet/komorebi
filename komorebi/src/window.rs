@@ -801,7 +801,11 @@ impl Window {
         #[allow(deprecated)]
         match *hiding_behaviour {
             HidingBehaviour::Hide | HidingBehaviour::Minimize => {
-                WindowsApi::restore_window(self.hwnd);
+                // Use synchronous ShowWindow to ensure the window state (minimized, visible)
+                // is updated immediately. Async ShowWindowAsync can leave the window in a
+                // minimized state when subsequent code checks is_minimized() (IsIconic),
+                // causing workspace.update() to incorrectly remove the window.
+                WindowsApi::restore_window_sync(self.hwnd);
             }
             HidingBehaviour::Cloak => SetCloak(self.hwnd(), 1, 0),
         }

@@ -683,6 +683,15 @@ impl WindowsApi {
         Self::show_window(hwnd, SW_SHOWNOACTIVATE);
     }
 
+    /// Restores a window synchronously, bypassing the async setting.
+    /// This ensures the window state (e.g., minimized) is updated immediately
+    /// so that subsequent checks like is_minimized() return accurate results.
+    pub fn restore_window_sync(hwnd: isize) {
+        unsafe {
+            let _ = ShowWindow(HWND(as_ptr!(hwnd)), SW_SHOWNOACTIVATE);
+        };
+    }
+
     pub fn unmaximize_window(hwnd: isize) {
         Self::show_window(hwnd, SW_NORMAL);
     }
