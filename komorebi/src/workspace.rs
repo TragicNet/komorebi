@@ -568,10 +568,24 @@ impl Workspace {
         if let Some(hwnd) = self.last_focused_hwnd
             && let Some(container_idx) = self.container_idx_for_window(hwnd)
         {
+            tracing::debug!(
+                hwnd,
+                container_idx,
+                "restore: using last_focused_hwnd to focus container"
+            );
             self.containers.focus(container_idx);
+        } else if let Some(hwnd) = self.last_focused_hwnd {
+            tracing::debug!(
+                hwnd,
+                "restore: last_focused_hwnd set but window not found, falling back to ring default"
+            );
         }
 
         if let Some(hwnd) = self.last_focused_floating_hwnd {
+            tracing::debug!(
+                hwnd,
+                "restore: using last_focused_floating_hwnd"
+            );
             self.focus_floating_window_by_hwnd(hwnd);
         }
 
@@ -610,25 +624,30 @@ impl Workspace {
                 if trigger_focus {
                     window.focus(mouse_follows_focus)?;
                 }
+                self.last_focused_hwnd = Some(window.hwnd);
             } else if let Some(maximized_window) = self.maximized_window {
                 maximized_window.restore();
                 if trigger_focus {
                     maximized_window.focus(mouse_follows_focus)?;
                 }
+                self.last_focused_hwnd = Some(maximized_window.hwnd);
             } else if let Some(floating_window) = self.focused_floating_window() {
                 if trigger_focus {
                     floating_window.focus(mouse_follows_focus)?;
                 }
+                self.last_focused_hwnd = Some(floating_window.hwnd);
             }
         } else if let Some(maximized_window) = self.maximized_window {
             maximized_window.restore();
             if trigger_focus {
                 maximized_window.focus(mouse_follows_focus)?;
             }
+            self.last_focused_hwnd = Some(maximized_window.hwnd);
         } else if let Some(floating_window) = self.focused_floating_window() {
             if trigger_focus {
                 floating_window.focus(mouse_follows_focus)?;
             }
+            self.last_focused_hwnd = Some(floating_window.hwnd);
         }
 
         self.apply_wallpaper(hmonitor, monitor_wp)
@@ -956,6 +975,10 @@ impl Workspace {
         }
 
         self.focus_container(container_idx);
+        tracing::debug!(
+            hwnd,
+            "focus_container_by_window: setting last_focused_hwnd"
+        );
         self.last_focused_hwnd = Some(hwnd);
 
         Ok(())
@@ -2052,6 +2075,10 @@ impl Workspace {
             .and_then(|c| c.focused_window())
             .map(|w| w.hwnd)
         {
+            tracing::debug!(
+                hwnd,
+                "focus_container: eagerly syncing last_focused_hwnd"
+            );
             self.last_focused_hwnd = Some(hwnd);
         }
     }
