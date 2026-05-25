@@ -45,6 +45,7 @@ use crate::core::config_generation::MatchingRule;
 
 use crate::CrossBoundaryBehaviour;
 use crate::DATA_DIR;
+use crate::FLOATING_APPLICATIONS;
 use crate::HOME_DIR;
 use crate::NO_TITLEBAR;
 use crate::REGEX_IDENTIFIERS;
@@ -66,6 +67,7 @@ use crate::transparency_manager;
 use crate::window::Window;
 use crate::window_manager_event::WindowManagerEvent;
 use crate::windows_api::WindowsApi;
+use crate::windows_callbacks;
 use crate::winevent_listener;
 use crate::workspace::Workspace;
 use crate::workspace::WorkspaceLayer;
@@ -1468,6 +1470,113 @@ impl WindowManager {
         }
 
         Ok(())
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub fn restore_minimized_windows(&mut self) -> eyre::Result<()> {
+        tracing::info!("restoring minimized windows");
+
+        let mut managed_hwnds: HashSet<isize> = HashSet::new();
+
+        {
+            let monitors = self.monitors();
+            for monitor in monitors.iter() {
+                for workspace in monitor.workspaces().iter() {
+                    for c in workspace.containers() {
+                        for w in c.windows() {
+                            managed_hwnds.insert(w.hwnd);
+                        }
+                    }
+                    for w in workspace.floating_windows() {
+                        managed_hwnds.insert(w.hwnd);
+                    }
+                    if let Some(window) = workspace.maximized_window {
+                        managed_hwnds.insert(window.hwnd);
+                    }
+                    if let Some(ref container) = workspace.monocle_container {
+                        for w in container.windows() {
+                            managed_hwnds.insert(w.hwnd);
+                        }
+                    }
+                }
+            }
+        }
+
+        {
+            let ws = self.focused_workspace_mut()?;
+            let hwnds: Vec<isize> =
+                ws.restoration_indices.keys().copied().collect();
+
+            tracing::debug!("restoration_indices hwnds: {:?}", hwnds);
+
+            for &hwnd in &hwnds {
+                if !WindowsApi::is_window(hwnd) || managed_hwnds.contains(&hwnd) {
+                    ws.restoration_indices.remove(&hwnd);
+                    continue;
+                }
+                if !WindowsApi::is_iconic(hwnd) {
+                    continue;
+                }
+                WindowsApi::restore_window_sync(hwnd);
+                ws.new_container_for_window(Window::from(hwnd));
+            }
+        }
+
+        let mut untracked: Vec<isize> = Vec::new();
+        WindowsApi::enum_windows(
+            Some(windows_callbacks::enum_minimized_window),
+            &mut untracked as *mut Vec<isize> as isize,
+        )?;
+
+        {
+            let ws = self.focused_workspace_mut()?;
+            let floating_applications = FLOATING_APPLICATIONS.lock();
+
+            for &hwnd in &untracked {
+                if managed_hwnds.contains(&hwnd)
+                    || ws.restoration_indices.contains_key(&hwnd)
+                {
+                    continue;
+                }
+
+                let window = Window::from(hwnd);
+                let mut should_float = false;
+
+                if !floating_applications.is_empty() {
+                    let regex_identifiers = REGEX_IDENTIFIERS.lock();
+
+                    if let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) =
+                        (window.title(), window.exe(), window.class(), window.path())
+                    {
+                        should_float = should_act(
+                            &title,
+                            &exe_name,
+                            &class,
+                            &path,
+                            &floating_applications,
+                            &regex_identifiers,
+                        )
+                        .is_some();
+                    }
+                }
+
+                tracing::info!(
+                    "reclaiming untracked minimized window: {}",
+                    hwnd
+                );
+
+                WindowsApi::restore_window_sync(hwnd);
+
+                if should_float {
+                    ws.floating_windows_mut().push_back(window);
+                    ws.layer = WorkspaceLayer::Floating;
+                } else {
+                    ws.new_container_for_window(window);
+                }
+            }
+        }
+
+        self.update_focused_workspace(self.mouse_follows_focus, true)
     }
 
     #[tracing::instrument(skip(self))]

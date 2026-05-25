@@ -49,6 +49,25 @@ pub extern "system" fn enum_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
     true.into()
 }
 
+pub extern "system" fn enum_minimized_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let hwnds = unsafe { &mut *(lparam.0 as *mut Vec<isize>) };
+
+    let is_window = WindowsApi::is_window(hwnd.0 as isize);
+    let is_minimized = WindowsApi::is_iconic(hwnd.0 as isize);
+
+    if is_window && is_minimized {
+        let window = Window::from(hwnd);
+
+        if let Ok(should_manage) = window.should_manage(None, &mut RuleDebug::default())
+            && should_manage
+        {
+            hwnds.push(hwnd.0 as isize);
+        }
+    }
+
+    true.into()
+}
+
 pub extern "system" fn alt_tab_windows(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let windows = unsafe { &mut *(lparam.0 as *mut Vec<Window>) };
 

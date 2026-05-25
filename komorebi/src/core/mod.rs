@@ -105,6 +105,7 @@ pub enum SocketMessage {
     ForceFocus,
     Close,
     Minimize,
+    ReclaimMinimizedWindows,
     Promote,
     PromoteSwap,
     PromoteFocus,

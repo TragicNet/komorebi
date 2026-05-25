@@ -391,6 +391,9 @@ impl WindowManager {
             SocketMessage::Minimize => {
                 Window::from(WindowsApi::foreground_window()?).minimize();
             }
+            SocketMessage::ReclaimMinimizedWindows => {
+                self.restore_minimized_windows()?;
+            }
             SocketMessage::LockMonitorWorkspaceContainer(
                 monitor_idx,
                 workspace_idx,

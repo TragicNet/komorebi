@@ -1135,6 +1135,8 @@ enum SubCommand {
     CancelPreselect,
     /// Minimize the focused window
     Minimize,
+    /// Restore minimized windows and tile them on the focused workspace
+    ReclaimMinimizedWindows,
     /// Close the focused window
     Close,
     /// Forcibly focus the window at the cursor with a left mouse click
@@ -2069,6 +2071,9 @@ fn main() -> eyre::Result<()> {
         }
         SubCommand::Minimize => {
             send_message(&SocketMessage::Minimize)?;
+        }
+        SubCommand::ReclaimMinimizedWindows => {
+            send_message(&SocketMessage::ReclaimMinimizedWindows)?;
         }
         SubCommand::Promote => {
             send_message(&SocketMessage::Promote)?;
