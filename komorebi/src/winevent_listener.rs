@@ -56,7 +56,7 @@ pub fn start() {
 }
 
 fn channel() -> &'static (Sender<WindowManagerEvent>, Receiver<WindowManagerEvent>) {
-    CHANNEL.get_or_init(|| crossbeam_channel::bounded(20))
+    CHANNEL.get_or_init(|| crossbeam_channel::unbounded())
 }
 
 pub fn event_tx() -> Sender<WindowManagerEvent> {
