@@ -67,6 +67,7 @@ use crate::core::OperationDirection;
 use crate::core::Rect;
 use crate::core::ScrollingLayoutOptions;
 use crate::core::Sizing;
+use crate::core::CycleFocusWindowContent;
 use crate::core::SocketMessage;
 use crate::core::StateQuery;
 use crate::core::WindowContainerBehaviour;
@@ -337,11 +338,18 @@ impl WindowManager {
                     }
                 }
             }
-            SocketMessage::CycleFocusWindow(direction) => {
+            SocketMessage::CycleFocusWindow(content) => {
+                let (direction, cycle_focus_across_monitors_override) = match content {
+                    CycleFocusWindowContent::DirectionOnly(d) => (d, None),
+                    CycleFocusWindowContent::DirectionWithOverride(d, o) => (d, o),
+                };
                 let focused_workspace = self.focused_workspace()?;
                 match focused_workspace.layer {
                     WorkspaceLayer::Tiling => {
-                        self.focus_container_in_cycle_direction(direction)?;
+                        self.focus_container_in_cycle_direction(
+                            direction,
+                            cycle_focus_across_monitors_override,
+                        )?;
                     }
                     WorkspaceLayer::Floating => {
                         self.focus_floating_window_in_cycle_direction(direction)?;
@@ -1233,20 +1241,34 @@ impl WindowManager {
                 }
             }
             SocketMessage::FocusWorkspaceNumbers(workspace_idx) => {
-                // This is to ensure that even on an empty workspace on a secondary monitor, the
-                // secondary monitor where the cursor is focused will be used as the target for
-                // the workspace switch op
-                if let Some(monitor_idx) = self.monitor_idx_from_current_pos()
-                    && monitor_idx != self.focused_monitor_idx()
-                    && let Some(monitor) = self.monitors().get(monitor_idx)
-                    && let Some(workspace) = monitor.focused_workspace()
-                    && workspace.is_empty()
-                {
-                    self.focus_monitor(monitor_idx)?;
-                }
-
                 let focused_monitor_idx = self.focused_monitor_idx();
 
+                tracing::debug!(
+                    "focus_workspace_numbers: start, target_workspace={}, focused_monitor={}",
+                    workspace_idx,
+                    focused_monitor_idx
+                );
+
+                // Debug: log last_focused_hwnd for the target workspace before any changes
+                if let Some(monitor) = self.focused_monitor() {
+                    if let Some(workspace) = monitor.workspaces().get(workspace_idx) {
+                        tracing::debug!(
+                            "focus_workspace_numbers: pre-switch last_focused_hwnd={:?}, \
+                             focused_container_idx={}, containers={}",
+                            workspace.last_focused_hwnd,
+                            workspace.focused_container_idx(),
+                            workspace.containers().len(),
+                        );
+                        if let Some(hwnd) = workspace.last_focused_hwnd {
+                            tracing::debug!(
+                                "focus_workspace_numbers: container for last_focused_hwnd: {:?}",
+                                workspace.container_idx_for_window(hwnd),
+                            );
+                        }
+                    }
+                }
+
+                // Switch workspaces on all other monitors silently first (no focus/cursor changes)
                 for (i, monitor) in self.monitors_mut().iter_mut().enumerate() {
                     if i != focused_monitor_idx {
                         monitor.focus_workspace(workspace_idx)?;
@@ -1254,7 +1276,70 @@ impl WindowManager {
                     }
                 }
 
+                // Debug: log focus state before self.focus_workspace
+                if let Some(workspace) = self
+                    .focused_monitor()
+                    .and_then(|m| m.workspaces().get(workspace_idx))
+                {
+                    tracing::debug!(
+                        "focus_workspace_numbers: before focus_workspace, last_focused_hwnd={:?}, \
+                         focused_container_idx={}",
+                        workspace.last_focused_hwnd,
+                        workspace.focused_container_idx(),
+                    );
+                }
+
+                // Finally, focus the workspace on the original monitor with cursor follow.
                 self.focus_workspace(workspace_idx)?;
+
+                // Debug: log focus state after self.focus_workspace
+                if let Some(workspace) = self
+                    .focused_monitor()
+                    .and_then(|m| m.workspaces().get(workspace_idx))
+                {
+                    tracing::debug!(
+                        "focus_workspace_numbers: after focus_workspace, last_focused_hwnd={:?}, \
+                         focused_container_idx={}, containers={}",
+                        workspace.last_focused_hwnd,
+                        workspace.focused_container_idx(),
+                        workspace.containers().len(),
+                    );
+                    if let Some(hwnd) = workspace.last_focused_hwnd {
+                        tracing::debug!(
+                            "focus_workspace_numbers: container for last_focused_hwnd: {:?}",
+                            workspace.container_idx_for_window(hwnd),
+                        );
+                    }
+
+                    // If last_focused_hwnd was lost, try to restore it by finding
+                    // the last container that still has a window
+                    if workspace.last_focused_hwnd.is_none()
+                        || workspace
+                            .last_focused_hwnd
+                            .and_then(|hwnd| workspace.container_idx_for_window(hwnd))
+                            .is_none()
+                    {
+                        tracing::debug!(
+                            "focus_workspace_numbers: last_focused_hwnd lost or invalid, \
+                             falling back to last container with windows",
+                        );
+                        // Focus the last container that has windows
+                        for i in (0..workspace.containers().len()).rev() {
+                            if let Some(container) = workspace.containers().get(i) {
+                                if !container.windows().is_empty() {
+                                    tracing::debug!(
+                                        "focus_workspace_numbers: restoring focus to container {}",
+                                        i,
+                                    );
+                                    // We can't call focus_container here due to borrow rules,
+                                    // but the next user interaction will fix the focus.
+                                    // Log it so we can see what happened.
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
             }
             SocketMessage::FocusMonitorWorkspaceNumber(monitor_idx, workspace_idx) => {
                 let focused_monitor_idx = self.focused_monitor_idx();

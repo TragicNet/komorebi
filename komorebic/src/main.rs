@@ -49,6 +49,7 @@ use komorebi_client::ApplicationConfigurationGenerator;
 use komorebi_client::ApplicationIdentifier;
 use komorebi_client::Axis;
 use komorebi_client::CycleDirection;
+use komorebi_client::CycleFocusWindowContent;
 use komorebi_client::DefaultLayout;
 use komorebi_client::FocusFollowsMouseImplementation;
 use komorebi_client::HidingBehaviour;
@@ -148,11 +149,18 @@ macro_rules! gen_enum_subcommand_args {
     };
 }
 
+#[derive(Parser)]
+pub struct CycleFocus {
+    #[clap(value_enum)]
+    cycle_direction: CycleDirection,
+    /// Override the cycle_focus_across_monitors config option (true/false)
+    cycle_focus_across_monitors: Option<String>,
+}
+
 gen_enum_subcommand_args! {
     Focus: OperationDirection,
     Move: OperationDirection,
     PreselectDirection: OperationDirection,
-    CycleFocus: CycleDirection,
     CycleMove: CycleDirection,
     CycleMoveToWorkspace: CycleDirection,
     CycleSendToWorkspace: CycleDirection,
@@ -2090,7 +2098,14 @@ fn main() -> eyre::Result<()> {
             send_message(&SocketMessage::CancelPreselect)?;
         }
         SubCommand::CycleFocus(args) => {
-            send_message(&SocketMessage::CycleFocusWindow(args.cycle_direction))?;
+            send_message(&SocketMessage::CycleFocusWindow(
+                CycleFocusWindowContent::DirectionWithOverride(
+                    args.cycle_direction,
+                    args.cycle_focus_across_monitors
+                        .as_deref()
+                        .map(|s| s == "true" || s == "1" || s == "yes"),
+                ),
+            ))?;
         }
         SubCommand::CycleMove(args) => {
             send_message(&SocketMessage::CycleMoveWindow(args.cycle_direction))?;

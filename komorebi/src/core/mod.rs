@@ -55,6 +55,14 @@ pub mod asc;
 pub mod config_generation;
 pub mod pathext;
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum CycleFocusWindowContent {
+    DirectionOnly(CycleDirection),
+    DirectionWithOverride(CycleDirection, Option<bool>),
+}
+
 // serde_as must be before derive
 #[serde_with::serde_as]
 #[derive(Clone, Debug, Serialize, Deserialize, Display)]
@@ -66,7 +74,7 @@ pub enum SocketMessage {
     MoveWindow(OperationDirection),
     PreselectDirection(OperationDirection),
     CancelPreselect,
-    CycleFocusWindow(CycleDirection),
+    CycleFocusWindow(CycleFocusWindowContent),
     CycleMoveWindow(CycleDirection),
     StackWindow(OperationDirection),
     UnstackWindow,

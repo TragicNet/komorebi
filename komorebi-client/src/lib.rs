@@ -51,6 +51,7 @@ pub use komorebi::core::ColumnSplitWithCapacity;
 pub use komorebi::core::ColumnWidth;
 pub use komorebi::core::CustomLayout;
 pub use komorebi::core::CycleDirection;
+pub use komorebi::core::CycleFocusWindowContent;
 pub use komorebi::core::DefaultLayout;
 pub use komorebi::core::Direction;
 pub use komorebi::core::FloatingLayerBehaviour;

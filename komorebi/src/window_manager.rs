@@ -2590,12 +2590,16 @@ impl WindowManager {
     pub fn focus_container_in_cycle_direction(
         &mut self,
         direction: CycleDirection,
+        cycle_focus_across_monitors_override: Option<bool>,
     ) -> eyre::Result<()> {
         self.handle_unmanaged_window_behaviour()?;
 
         tracing::info!("focusing container");
 
-        if self.cycle_focus_across_monitors
+        let cycle_across = cycle_focus_across_monitors_override
+            .unwrap_or(self.cycle_focus_across_monitors);
+
+        if cycle_across
             && self.monitors().len() > 1
             && self.should_wrap_cycle_focus(direction)?
         {
@@ -4487,22 +4491,22 @@ mod tests {
         wm.monitors_mut().push_back(m);
 
         // container focus should be on the second container
-        wm.focus_container_in_cycle_direction(CycleDirection::Next)
+        wm.focus_container_in_cycle_direction(CycleDirection::Next, None)
             .ok();
         assert_eq!(wm.focused_container_idx().unwrap(), 1);
 
         // container focus should be on the third container
-        wm.focus_container_in_cycle_direction(CycleDirection::Next)
+        wm.focus_container_in_cycle_direction(CycleDirection::Next, None)
             .ok();
         assert_eq!(wm.focused_container_idx().unwrap(), 2);
 
         // container focus should be on the second container
-        wm.focus_container_in_cycle_direction(CycleDirection::Previous)
+        wm.focus_container_in_cycle_direction(CycleDirection::Previous, None)
             .ok();
         assert_eq!(wm.focused_container_idx().unwrap(), 1);
 
         // container focus should be on the first container
-        wm.focus_container_in_cycle_direction(CycleDirection::Previous)
+        wm.focus_container_in_cycle_direction(CycleDirection::Previous, None)
             .ok();
         assert_eq!(wm.focused_container_idx().unwrap(), 0);
     }
@@ -4554,7 +4558,7 @@ mod tests {
             workspace.monocle_container = Some(monocle_container);
         }
 
-        wm.focus_container_in_cycle_direction(CycleDirection::Next)
+        wm.focus_container_in_cycle_direction(CycleDirection::Next, None)
             .unwrap();
 
         assert_eq!(wm.focused_monitor_idx(), 3);
@@ -4595,7 +4599,7 @@ mod tests {
         wm.focus_monitor(0).unwrap();
         wm.toggle_monocle().unwrap();
 
-        wm.focus_container_in_cycle_direction(CycleDirection::Next)
+        wm.focus_container_in_cycle_direction(CycleDirection::Next, None)
             .unwrap();
 
         assert_eq!(wm.focused_monitor_idx(), 0);
