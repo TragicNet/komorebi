@@ -19,6 +19,7 @@ use komorebi_client::PathExt;
 use komorebi_client::SocketMessage;
 use komorebi_client::SubscribeOptions;
 use komorebi_client::replace_env_in_path;
+use std::fmt;
 use std::io::BufReader;
 use std::io::Read;
 use std::path::PathBuf;
@@ -28,6 +29,8 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::time::FormatTime;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Foundation::LPARAM;
 use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -118,6 +121,14 @@ fn process_hwnd() -> Option<isize> {
     }
 }
 
+struct LocalTimer;
+
+impl FormatTime for LocalTimer {
+    fn format_time(&self, w: &mut Writer<'_>) -> fmt::Result {
+        write!(w, "{}", chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z"))
+    }
+}
+
 pub enum KomorebiEvent {
     Notification(Box<komorebi_client::Notification>),
     Reconnect,
@@ -162,6 +173,7 @@ fn main() -> color_eyre::Result<()> {
     tracing::subscriber::set_global_default(
         tracing_subscriber::fmt::Subscriber::builder()
             .with_env_filter(EnvFilter::from_default_env())
+            .with_timer(LocalTimer)
             .finish(),
     )?;
 

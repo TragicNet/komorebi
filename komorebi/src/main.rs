@@ -8,6 +8,7 @@
 )]
 
 use std::env::temp_dir;
+use std::fmt;
 use std::net::Shutdown;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,6 +33,8 @@ use sysinfo::Process;
 use sysinfo::ProcessesToUpdate;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::layer::SubscriberExt;
 use uds_windows::UnixStream;
 
@@ -57,6 +60,14 @@ use komorebi::transparency_manager;
 use komorebi::window_manager::WindowManager;
 use komorebi::windows_api::WindowsApi;
 use komorebi::winevent_listener;
+
+struct LocalTimer;
+
+impl FormatTime for LocalTimer {
+    fn format_time(&self, w: &mut Writer<'_>) -> fmt::Result {
+        write!(w, "{}", chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z"))
+    }
+}
 
 fn setup(log_level: LogLevel) -> eyre::Result<(WorkerGuard, WorkerGuard)> {
     if std::env::var("RUST_LIB_BACKTRACE").is_err() {
@@ -90,16 +101,19 @@ fn setup(log_level: LogLevel) -> eyre::Result<(WorkerGuard, WorkerGuard)> {
     tracing::subscriber::set_global_default(
         tracing_subscriber::fmt::Subscriber::builder()
             .with_env_filter(EnvFilter::from_default_env())
+            .with_timer(LocalTimer)
             .finish()
             .with(
                 tracing_subscriber::fmt::Layer::default()
                     .with_writer(non_blocking)
-                    .with_ansi(false),
+                    .with_ansi(false)
+                    .with_timer(LocalTimer),
             )
             .with(
                 tracing_subscriber::fmt::Layer::default()
                     .with_writer(color_non_blocking)
-                    .with_ansi(true),
+                    .with_ansi(true)
+                    .with_timer(LocalTimer),
             ),
     )?;
 
