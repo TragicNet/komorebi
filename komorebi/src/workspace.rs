@@ -591,6 +591,21 @@ impl Workspace {
         self.containers_mut()
             .retain(|c| c.is_preselect() || !c.windows().is_empty());
 
+        // Remove empty containers (ghost containers) that have no windows
+        let empty_container_indices: Vec<usize> = self
+            .containers()
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.windows().is_empty())
+            .map(|(i, _)| i)
+            .rev()
+            .collect();
+
+        for idx in empty_container_indices {
+            tracing::info!(idx, "removing empty container");
+            self.remove_container_by_idx(idx);
+        }
+
         let container_padding = self
             .container_padding
             .or(self.globals.container_padding)
