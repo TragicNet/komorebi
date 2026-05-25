@@ -111,6 +111,9 @@ pub struct Workspace {
     /// Maps window HWNDs to their last known position and layer for restoration.
     #[serde(skip)]
     pub restoration_indices: HashMap<isize, WindowRestorationState>,
+    /// HWND of the most recently minimized window, used by reclaim-last-minimized-window.
+    #[serde(skip)]
+    pub last_minimized_hwnd: Option<isize>,
 }
 
 #[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -170,6 +173,7 @@ impl Default for Workspace {
             last_focused_hwnd: None,
             last_focused_floating_hwnd: None,
             restoration_indices: HashMap::new(),
+            last_minimized_hwnd: None,
         }
     }
 }
@@ -1252,6 +1256,7 @@ impl Workspace {
                 );
             }
             self.floating_windows_mut().retain(|w| w.hwnd != hwnd);
+            self.last_minimized_hwnd = Some(hwnd);
             return Ok(());
         }
 
@@ -1284,6 +1289,7 @@ impl Workspace {
                 c.restore();
             }
 
+            self.last_minimized_hwnd = Some(hwnd);
             return Ok(());
         }
 
@@ -1303,6 +1309,7 @@ impl Workspace {
             window.unmaximize();
             self.maximized_window = None;
             self.maximized_window_restore_idx = None;
+            self.last_minimized_hwnd = Some(hwnd);
             return Ok(());
         }
 
@@ -1354,6 +1361,7 @@ impl Workspace {
             }
         }
 
+        self.last_minimized_hwnd = Some(hwnd);
         Ok(())
     }
 

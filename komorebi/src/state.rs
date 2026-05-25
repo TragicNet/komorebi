@@ -286,6 +286,7 @@ impl From<&WindowManager> for State {
                             last_focused_hwnd: None,
                             last_focused_floating_hwnd: None,
                             restoration_indices: HashMap::new(),
+                            last_minimized_hwnd: None,
                         })
                         .collect::<VecDeque<_>>();
                     ws.focus(monitor.workspaces.focused_idx());

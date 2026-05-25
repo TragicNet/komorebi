@@ -1137,6 +1137,8 @@ enum SubCommand {
     Minimize,
     /// Restore minimized windows and tile them on the focused workspace
     ReclaimMinimizedWindows,
+    /// Restore the last minimized window to the focused workspace
+    ReclaimLastMinimizedWindow,
     /// Close the focused window
     Close,
     /// Forcibly focus the window at the cursor with a left mouse click
@@ -2074,6 +2076,9 @@ fn main() -> eyre::Result<()> {
         }
         SubCommand::ReclaimMinimizedWindows => {
             send_message(&SocketMessage::ReclaimMinimizedWindows)?;
+        }
+        SubCommand::ReclaimLastMinimizedWindow => {
+            send_message(&SocketMessage::ReclaimLastMinimizedWindow)?;
         }
         SubCommand::Promote => {
             send_message(&SocketMessage::Promote)?;

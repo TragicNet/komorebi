@@ -116,6 +116,8 @@ nav:
       - cli/preselect-direction.md
       - cli/cancel-preselect.md
       - cli/minimize.md
+      - cli/reclaim-minimized-windows.md
+      - cli/reclaim-last-minimized-window.md
       - cli/close.md
       - cli/force-focus.md
       - cli/cycle-focus.md

@@ -798,22 +798,20 @@ fn destroy_border(border: Box<Border>) -> color_eyre::Result<()> {
 
 /// Removes the border around window with `tracking_hwnd` if it exists
 pub fn delete_border(tracking_hwnd: isize) {
-    std::thread::spawn(move || {
-        let id = {
-            WINDOWS_BORDERS
-                .lock()
-                .get(&tracking_hwnd)
-                .cloned()
-                .unwrap_or_default()
-        };
+    let id = {
+        WINDOWS_BORDERS
+            .lock()
+            .get(&tracking_hwnd)
+            .cloned()
+            .unwrap_or_default()
+    };
 
-        let mut borders = BORDER_STATE.lock();
-        let mut windows_borders = WINDOWS_BORDERS.lock();
+    let mut borders = BORDER_STATE.lock();
+    let mut windows_borders = WINDOWS_BORDERS.lock();
 
-        if let Err(error) = remove_border(&id, &mut borders, &mut windows_borders) {
-            tracing::error!("Failed to delete border: {}", error);
-        }
-    });
+    if let Err(error) = remove_border(&id, &mut borders, &mut windows_borders) {
+        tracing::error!("Failed to delete border: {}", error);
+    }
 }
 
 /// Shows the border around window with `tracking_hwnd` if it exists

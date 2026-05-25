@@ -394,6 +394,9 @@ impl WindowManager {
             SocketMessage::ReclaimMinimizedWindows => {
                 self.restore_minimized_windows()?;
             }
+            SocketMessage::ReclaimLastMinimizedWindow => {
+                self.restore_last_minimized_window()?;
+            }
             SocketMessage::LockMonitorWorkspaceContainer(
                 monitor_idx,
                 workspace_idx,

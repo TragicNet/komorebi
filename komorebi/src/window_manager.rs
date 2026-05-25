@@ -1579,6 +1579,30 @@ impl WindowManager {
         self.update_focused_workspace(self.mouse_follows_focus, true)
     }
 
+    pub fn restore_last_minimized_window(&mut self) -> eyre::Result<()> {
+        tracing::info!("restoring last minimized window");
+
+        let ws = self.focused_workspace_mut()?;
+        let hwnd = match ws.last_minimized_hwnd {
+            Some(hwnd) => hwnd,
+            None => {
+                tracing::debug!("no last minimized window tracked");
+                return Ok(());
+            }
+        };
+
+        ws.last_minimized_hwnd = None;
+
+        if !WindowsApi::is_window(hwnd) || !WindowsApi::is_iconic(hwnd) {
+            ws.restoration_indices.remove(&hwnd);
+            return Ok(());
+        }
+
+        WindowsApi::restore_window_sync(hwnd);
+        ws.new_container_for_window(Window::from(hwnd));
+        self.update_focused_workspace(self.mouse_follows_focus, true)
+    }
+
     #[tracing::instrument(skip(self))]
     pub fn remove_all_accents(&mut self) -> eyre::Result<()> {
         tracing::info!("removing all window accents");
