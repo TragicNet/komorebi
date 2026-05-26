@@ -1370,7 +1370,6 @@ impl WindowManager {
                 let mouse_follows_focus = self.mouse_follows_focus;
                 let workspace = self.focused_workspace_mut()?;
 
-                let mut to_focus = None;
                 match workspace.layer {
                     WorkspaceLayer::Tiling => {
                         workspace.layer = WorkspaceLayer::Floating;
@@ -1390,6 +1389,7 @@ impl WindowManager {
                         });
                         window_idx_pairs.reverse();
 
+                        let mut to_focus = None;
                         for (i, window) in window_idx_pairs {
                             if i == focused_idx {
                                 to_focus = Some(*window);
@@ -1404,6 +1404,16 @@ impl WindowManager {
                             // on top
                             focused_window.restore();
                             focused_window.raise()?;
+                        }
+
+                        // Focus the floating window before lowering tiling windows so that
+                        // managed windows no longer have keyboard focus when lowered. This
+                        // prevents Windows from auto-focusing another visible managed window
+                        // during the lower operation, which would generate a spurious
+                        // FocusChange event that could change the container's focused window
+                        // index (cycle-stack) and undo the layer toggle.
+                        if let Some(window) = to_focus {
+                            window.focus(mouse_follows_focus)?;
                         }
 
                         for container in workspace.containers() {
@@ -1422,15 +1432,23 @@ impl WindowManager {
                         workspace.layer = WorkspaceLayer::Tiling;
 
                         if let Some(monocle) = &workspace.monocle_container {
+                            let mut to_focus = None;
                             if let Some(window) = monocle.focused_window() {
                                 to_focus = Some(*window);
                                 window.raise()?;
                             }
+
+                            // Focus the tiling window before hiding floating windows
+                            if let Some(window) = to_focus {
+                                window.focus(mouse_follows_focus)?;
+                            }
+
                             for window in workspace.floating_windows() {
                                 window.hide();
                             }
                         } else {
                             let focused_container_idx = workspace.focused_container_idx();
+                            let mut to_focus = None;
                             for (i, container) in workspace.containers_mut().iter_mut().enumerate()
                             {
                                 if let Some(window) = container.focused_window() {
@@ -1439,6 +1457,11 @@ impl WindowManager {
                                     }
                                     window.raise()?;
                                 }
+                            }
+
+                            // Focus the tiling window before lowering floating windows
+                            if let Some(window) = to_focus {
+                                window.focus(mouse_follows_focus)?;
                             }
 
                             let mut window_idx_pairs = workspace
@@ -1459,9 +1482,6 @@ impl WindowManager {
                         }
                     }
                 };
-                if let Some(window) = to_focus {
-                    window.focus(mouse_follows_focus)?;
-                }
             }
             SocketMessage::Stop => {
                 self.stop(false)?;
