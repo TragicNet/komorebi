@@ -3263,29 +3263,44 @@ impl WindowManager {
     fn should_capture_native_maximize(&self, window: Window) -> eyre::Result<bool> {
         let workspace = self.focused_workspace()?;
 
-        if workspace.monocle_container.is_some()
-            || workspace.maximized_window.is_some()
-            || !workspace.contains_window(window.hwnd)
-            || workspace
-                .floating_windows()
-                .iter()
-                .any(|floating| floating.hwnd == window.hwnd)
+        if workspace.monocle_container.is_some() {
+            tracing::debug!(hwnd = window.hwnd, "should_capture: skipped, monocle_container exists");
+            return Ok(false);
+        }
+
+        if workspace.maximized_window.is_some() {
+            tracing::debug!(hwnd = window.hwnd, "should_capture: skipped, maximized_window exists");
+            return Ok(false);
+        }
+
+        if !workspace.contains_window(window.hwnd) {
+            tracing::debug!(hwnd = window.hwnd, "should_capture: skipped, window not in workspace");
+            return Ok(false);
+        }
+
+        if workspace
+            .floating_windows()
+            .iter()
+            .any(|floating| floating.hwnd == window.hwnd)
         {
+            tracing::debug!(hwnd = window.hwnd, "should_capture: skipped, window is floating");
             return Ok(false);
         }
 
         let Some(container_idx) = workspace.container_idx_for_window(window.hwnd) else {
+            tracing::debug!(hwnd = window.hwnd, "should_capture: skipped, no container for window");
             return Ok(false);
         };
 
         let Some(expected_rect) = workspace.latest_layout.get(container_idx) else {
+            tracing::debug!(hwnd = window.hwnd, container_idx, "should_capture: skipped, no layout rect");
             return Ok(false);
         };
 
         let actual_rect = WindowsApi::window_rect(window.hwnd)?;
         let monitor_work_area = self.focused_monitor_work_area()?;
 
-        Ok(Self::rect_is_close_to(
+        let rect_match = Self::rect_is_close_to(
             &actual_rect,
             &monitor_work_area,
             Self::NATIVE_MAXIMIZE_TOLERANCE,
@@ -3293,21 +3308,46 @@ impl WindowManager {
             &actual_rect,
             expected_rect,
             Self::NATIVE_MAXIMIZE_TOLERANCE,
-        ))
+        );
+
+        tracing::debug!(
+            hwnd = window.hwnd,
+            container_idx,
+            actual = ?actual_rect,
+            expected = ?expected_rect,
+            work_area = ?monitor_work_area,
+            rect_match,
+            "should_capture: result"
+        );
+
+        Ok(rect_match)
     }
 
     #[tracing::instrument(skip(self))]
     pub fn capture_native_maximized_window(&mut self, window: Window) -> eyre::Result<bool> {
         let workspace = self.focused_workspace()?;
 
-        if workspace.monocle_container.is_some()
-            || workspace.maximized_window.is_some()
-            || !workspace.contains_window(window.hwnd)
-            || workspace
-                .floating_windows()
-                .iter()
-                .any(|floating| floating.hwnd == window.hwnd)
+        if workspace.monocle_container.is_some() {
+            tracing::debug!(hwnd = window.hwnd, "capture: rejected, monocle active");
+            return Ok(false);
+        }
+
+        if workspace.maximized_window.is_some() {
+            tracing::debug!(hwnd = window.hwnd, "capture: rejected, maximized window exists");
+            return Ok(false);
+        }
+
+        if !workspace.contains_window(window.hwnd) {
+            tracing::debug!(hwnd = window.hwnd, "capture: rejected, window not in workspace");
+            return Ok(false);
+        }
+
+        if workspace
+            .floating_windows()
+            .iter()
+            .any(|floating| floating.hwnd == window.hwnd)
         {
+            tracing::debug!(hwnd = window.hwnd, "capture: rejected, window is floating");
             return Ok(false);
         }
 
@@ -3317,31 +3357,64 @@ impl WindowManager {
             .focus_container_by_window(window.hwnd)?;
         self.monocle_on()?;
 
+        let workspace = self.focused_workspace()?;
+        tracing::info!(
+            hwnd = window.hwnd,
+            monocle_active = workspace.monocle_container.is_some(),
+            containers_len = workspace.containers().len(),
+            focused_idx = workspace.focused_container_idx(),
+            "capture: monocle enabled"
+        );
+
         Ok(true)
     }
 
     #[tracing::instrument(skip(self))]
     pub fn capture_native_maximize(&mut self, window: Window) -> eyre::Result<bool> {
-        let is_captured = {
+        let (is_captured, has_monocle, has_maximized) = {
             let workspace = self.focused_workspace()?;
-            workspace.monocle_container.is_some()
-                || workspace.maximized_window.is_some()
+            let mc = workspace.monocle_container.is_some();
+            let mw = workspace.maximized_window.is_some();
+            (mc || mw, mc, mw)
         };
+        let is_maxed = window.is_maximized();
 
-        if is_captured && window.is_maximized() {
+        tracing::info!(
+            hwnd = window.hwnd,
+            is_captured,
+            has_monocle,
+            has_maximized,
+            is_maxed,
+            "capture_native_maximize: entry"
+        );
+
+        if is_captured && is_maxed {
             window.unmaximize();
 
             if self.focused_workspace()?.monocle_container.is_some() {
+                tracing::info!("capture: uncapturing via monocle_off");
                 self.monocle_off()?;
             } else {
-                self.focused_workspace_mut()?.reintegrate_maximized_window()?;
+                tracing::info!("capture: uncapturing via reintegrate_maximized_window");
+                self.focused_workspace_mut()?
+                    .reintegrate_maximized_window()?;
             }
 
             self.update_focused_workspace(true, true)?;
+            let ws = self.focused_workspace()?;
+            tracing::info!(
+                hwnd = window.hwnd,
+                monocle_active = ws.monocle_container.is_some(),
+                max_window = ws.maximized_window.is_some(),
+                containers_len = ws.containers().len(),
+                focused_idx = ws.focused_container_idx(),
+                "capture: uncapture done"
+            );
             return Ok(true);
         }
 
-        if !window.is_maximized() && !self.should_capture_native_maximize(window)? {
+        if !is_maxed && !self.should_capture_native_maximize(window)? {
+            tracing::debug!(hwnd = window.hwnd, "capture: skipping, not maximized and should_capture=false");
             return Ok(false);
         }
 
@@ -3349,15 +3422,62 @@ impl WindowManager {
 
         if self.capture_native_maximized_window(window)? {
             self.update_focused_workspace(true, true)?;
+            let ws = self.focused_workspace()?;
+            tracing::info!(
+                hwnd = window.hwnd,
+                monocle_active = ws.monocle_container.is_some(),
+                max_window = ws.maximized_window.is_some(),
+                containers_len = ws.containers().len(),
+                focused_idx = ws.focused_container_idx(),
+                "capture: capture done"
+            );
             return Ok(true);
         }
 
+        tracing::info!(hwnd = window.hwnd, "capture: capture_native_maximized_window returned false");
         Ok(false)
+    }
+
+    fn log_workspace_state(&self, label: &str) {
+        if let Ok(ws) = self.focused_workspace() {
+            let container_state: Vec<String> = ws
+                .containers()
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let focus = c.focused_window().map(|w| w.hwnd).unwrap_or(0);
+                    format!(
+                        "[{}] {} ({}w, focused_hwnd={})",
+                        i,
+                        c.id,
+                        c.windows().len(),
+                        focus
+                    )
+                })
+                .collect();
+            let mc_str = ws.monocle_container.as_ref().map(|c| {
+                let focus = c.focused_window().map(|w| w.hwnd).unwrap_or(0);
+                format!("{} ({}w, focused_hwnd={})", c.id, c.windows().len(), focus)
+            });
+            let mw_str = ws
+                .maximized_window
+                .map(|w| format!("hwnd={}", w.hwnd));
+            tracing::info!(
+                label,
+                containers = %container_state.join(" | "),
+                monocle = %mc_str.unwrap_or_else(|| "None".into()),
+                maximized = %mw_str.unwrap_or_else(|| "None".into()),
+                focused_idx = ws.focused_container_idx(),
+                containers_len = ws.containers().len(),
+                "workspace state"
+            );
+        }
     }
 
     #[tracing::instrument(skip(self))]
     pub fn monocle_on(&mut self) -> eyre::Result<()> {
         tracing::info!("enabling monocle");
+        self.log_workspace_state("before monocle_on");
 
         let workspace = self.focused_workspace_mut()?;
         workspace.new_monocle_container()?;
@@ -3372,12 +3492,15 @@ impl WindowManager {
 
         self.position_windows_for_monocle()?;
 
+        self.log_workspace_state("after monocle_on");
+
         Ok(())
     }
 
     #[tracing::instrument(skip(self))]
     pub fn monocle_off(&mut self) -> eyre::Result<()> {
         tracing::info!("disabling monocle");
+        self.log_workspace_state("before monocle_off");
 
         let workspace = self.focused_workspace_mut()?;
 
@@ -3389,7 +3512,11 @@ impl WindowManager {
             window.restore();
         }
 
-        workspace.reintegrate_monocle_container()
+        workspace.reintegrate_monocle_container()?;
+
+        self.log_workspace_state("after monocle_off");
+
+        Ok(())
     }
 
     #[tracing::instrument(skip(self))]

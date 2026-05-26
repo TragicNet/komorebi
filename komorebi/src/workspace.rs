@@ -1893,6 +1893,12 @@ impl Workspace {
     pub fn new_monocle_container(&mut self) -> eyre::Result<()> {
         let focused_idx = self.focused_container_idx();
 
+        tracing::debug!(
+            focused_idx,
+            containers_before = self.containers().len(),
+            "new_monocle_container: entry"
+        );
+
         // we shouldn't use remove_container_by_idx here because it doesn't make sense for
         // monocle and maximized toggles which take over the whole screen before being reinserted
         // at the same index to respect locked container indexes
@@ -1905,9 +1911,33 @@ impl Workspace {
         // inevitably reintegrated, it would be weird if it doesn't go back to the dimensions
         // it had before
 
+        let container_id = container.id.clone();
         self.monocle_container = Option::from(container);
         self.monocle_container_restore_idx = Option::from(focused_idx);
-        self.focus_previous_container();
+
+        // Clamp focused index after removal to keep it valid and pointing to the
+        // next container in the remaining list (vs focus_previous_container which
+        // moved focus away unnecessarily, corrupting internal state after cycles)
+        if self.focused_container_idx() >= self.containers().len() {
+            let last = self.containers().len().saturating_sub(1);
+            tracing::debug!("new_monocle_container: clamping focused_idx to {}", last);
+            self.focus_container(last);
+        }
+
+        let mc_windows = self
+            .monocle_container
+            .as_ref()
+            .map(|c| c.windows().len())
+            .unwrap_or(0);
+        tracing::debug!(
+            container_id = %container_id,
+            focused_idx,
+            restore_idx = focused_idx,
+            clamped_focused = self.focused_container_idx(),
+            containers_after = self.containers().len(),
+            mc_windows,
+            "new_monocle_container: done"
+        );
 
         self.monocle_container
             .as_mut()
@@ -1927,10 +1957,24 @@ impl Workspace {
             .as_ref()
             .ok_or_eyre("there is no monocle container")?;
 
+        let container_id = container.id.clone();
         let container = container.clone();
+
+        tracing::debug!(
+            container_id = %container_id,
+            restore_idx,
+            containers_before = self.containers().len(),
+            "reintegrate_monocle_container: entry"
+        );
+
         if restore_idx >= self.containers().len() {
             self.containers_mut()
                 .resize(restore_idx, Container::default());
+            tracing::debug!(
+                restore_idx,
+                containers_after_resize = self.containers().len(),
+                "reintegrate_monocle_container: resized containers"
+            );
         }
 
         // we shouldn't use insert_container_at_index here because it doesn't make sense for
@@ -1944,6 +1988,13 @@ impl Workspace {
 
         self.monocle_container = None;
         self.monocle_container_restore_idx = None;
+
+        tracing::debug!(
+            container_id = %container_id,
+            containers_after = self.containers().len(),
+            focused_idx = self.focused_container_idx(),
+            "reintegrate_monocle_container: done"
+        );
 
         Ok(())
     }
