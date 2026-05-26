@@ -1463,24 +1463,20 @@ impl WindowManager {
                     WorkspaceLayer::Floating => {
                         workspace.layer = WorkspaceLayer::Tiling;
 
-                        if workspace.monocle_container.is_some() {
-                            let monocle_focused = workspace
-                                .monocle_container
-                                .as_ref()
-                                .and_then(|m| m.focused_window())
-                                .copied();
-
-                            if let Some(window) = monocle_focused {
+                        if let Some(monocle) = &workspace.monocle_container {
+                            let mut to_focus = None;
+                            if let Some(window) = monocle.focused_window() {
+                                to_focus = Some(*window);
                                 window.raise()?;
+                            }
+
+                            // Focus the tiling window before hiding floating windows
+                            if let Some(window) = to_focus {
                                 window.focus(mouse_follows_focus)?;
                             }
 
                             for window in workspace.floating_windows() {
                                 window.hide();
-                            }
-
-                            if let Some(container) = &mut workspace.monocle_container {
-                                container.load_focused_window();
                             }
                         } else {
                             let focused_container_idx = workspace.focused_container_idx();
