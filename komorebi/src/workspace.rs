@@ -609,7 +609,7 @@ impl Workspace {
                 to_focus = Option::from(*window);
             }
 
-            container.restore();
+            container.load_focused_window();
         }
 
         if let Some(container) = self.focused_container_mut() {

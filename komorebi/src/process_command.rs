@@ -1368,10 +1368,18 @@ impl WindowManager {
             }
             SocketMessage::ToggleWorkspaceLayer => {
                 let mouse_follows_focus = self.mouse_follows_focus;
+
+                // Optimistically set the layer ignore count before borrowing workspace
+                self.layer_ignore_count = 2;
+
                 let workspace = self.focused_workspace_mut()?;
 
                 match workspace.layer {
                     WorkspaceLayer::Tiling => {
+                        tracing::info!(
+                            "suppressing FocusChange layer reversion for next events"
+                        );
+
                         workspace.layer = WorkspaceLayer::Floating;
 
                         let focused_idx = workspace.focused_floating_window_idx();
@@ -1422,6 +1430,10 @@ impl WindowManager {
 
                         for container in workspace.containers() {
                             if let Some(window) = container.focused_window() {
+                                tracing::info!(
+                                    hwnd = window.hwnd,
+                                    "Tiling->Floating: lowering focused container window",
+                                );
                                 window.lower()?;
                             }
                         }
@@ -1429,8 +1441,24 @@ impl WindowManager {
                         if let Some(monocle) = &workspace.monocle_container
                             && let Some(window) = monocle.focused_window()
                         {
+                            tracing::info!(
+                                hwnd = window.hwnd,
+                                "Tiling->Floating: lowering monocle window",
+                            );
                             window.lower()?;
                         }
+
+                        let container_windows = workspace
+                            .containers()
+                            .iter()
+                            .flat_map(|c| c.windows())
+                            .count();
+                        let floating_count = workspace.floating_windows().len();
+                        tracing::info!(
+                            container_windows,
+                            floating_count,
+                            "Tiling->Floating: post-toggle workspace state",
+                        );
                     }
                     WorkspaceLayer::Floating => {
                         workspace.layer = WorkspaceLayer::Tiling;
@@ -1461,6 +1489,10 @@ impl WindowManager {
                                     }
                                     window.raise()?;
                                 }
+                            }
+
+                            for container in workspace.containers_mut().iter_mut() {
+                                container.load_focused_window();
                             }
 
                             // Focus the tiling window before lowering floating windows

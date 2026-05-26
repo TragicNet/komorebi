@@ -394,6 +394,8 @@ impl WindowManager {
                     self.update_focused_workspace(self.mouse_follows_focus, false)?;
                 }
 
+                let suppress_layer = self.layer_ignore_count > 0;
+
                 {
                     let workspace = self.focused_workspace_mut()?;
                     let floating_window_idx = workspace
@@ -413,15 +415,20 @@ impl WindowManager {
                                 if let Some(window) = monocle.focused_window() {
                                     window.focus(false)?;
                                 }
+                                workspace.layer = WorkspaceLayer::Tiling;
+                            } else if suppress_layer {
+                                tracing::info!(
+                                    hwnd = window.hwnd,
+                                    "FocusChange: suppressing layer change for tiling window after toggle",
+                                );
                             } else {
                                 tracing::debug!(
                                     hwnd = window.hwnd,
                                     "FocusChange: updating last_focused_hwnd on current workspace"
                                 );
                                 workspace.focus_container_by_window(window.hwnd)?;
+                                workspace.layer = WorkspaceLayer::Tiling;
                             }
-
-                            workspace.layer = WorkspaceLayer::Tiling;
 
                             if matches!(
                                 self.focused_workspace()?.layout,
@@ -437,6 +444,11 @@ impl WindowManager {
                             }
                         }
                     }
+                }
+
+                // Consume one count so that the counter eventually reaches 0
+                if self.layer_ignore_count > 0 {
+                    self.layer_ignore_count -= 1;
                 }
 
                 if self.capture_native_maximize(window)? {
@@ -561,6 +573,7 @@ impl WindowManager {
                                     // Float rule placement
                                     behaviour.float_rule_placement
                                 };
+
                                 // Center floating windows according to the proper placement if not
                                 // on a floating workspace
                                 let center_spawned_floats =
@@ -958,7 +971,12 @@ impl WindowManager {
     ) -> color_eyre::Result<()> {
         let (m_idx, ws_idx) = reconciliation_pair;
 
-        tracing::debug!("performing reconciliation");
+        tracing::info!(
+            hwnd = window.hwnd,
+            m_idx,
+            ws_idx,
+            "performing reconciliation",
+        );
         self.focus_monitor(m_idx)?;
         let mouse_follows_focus = self.mouse_follows_focus;
         let offset = self.work_area_offset;

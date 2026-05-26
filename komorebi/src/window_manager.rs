@@ -96,6 +96,10 @@ pub struct WindowManager {
     pub pending_move_op: Arc<Option<(usize, usize, isize)>>,
     pub already_moved_window_handles: Arc<Mutex<HashSet<isize>>>,
     pub uncloack_to_ignore: usize,
+    /// Counter to skip FocusChanges from reverting workspace.layer after a
+    /// user-initiated toggle. Decremented on each FocusChange; layer changes
+    /// are suppressed while > 0.
+    pub layer_ignore_count: usize,
     /// Maps each known window hwnd to the (monitor, workspace) index pair managing it
     pub known_hwnds: HashMap<isize, (usize, usize)>,
 }
@@ -168,6 +172,7 @@ impl WindowManager {
             pending_move_op: Arc::new(None),
             already_moved_window_handles: Arc::new(Mutex::new(HashSet::new())),
             uncloack_to_ignore: 0,
+            layer_ignore_count: 0,
             known_hwnds: HashMap::new(),
         })
     }
