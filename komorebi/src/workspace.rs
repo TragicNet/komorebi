@@ -556,13 +556,23 @@ impl Workspace {
         hmonitor: isize,
         monitor_wp: &Option<Wallpaper>,
     ) -> eyre::Result<()> {
-        if let Some(container) = &self.monocle_container
-            && let Some(window) = container.focused_window()
-        {
-            container.restore();
-            if trigger_focus {
-                window.focus(mouse_follows_focus)?;
+        if self.monocle_container.is_some() {
+            let focused_window = self
+                .monocle_container
+                .as_ref()
+                .and_then(|c| c.focused_window())
+                .copied();
+
+            if let Some(container) = &mut self.monocle_container {
+                container.load_focused_window();
             }
+
+            if let Some(window) = focused_window {
+                if trigger_focus {
+                    window.focus(mouse_follows_focus)?;
+                }
+            }
+
             return self.apply_wallpaper(hmonitor, monitor_wp);
         }
 
