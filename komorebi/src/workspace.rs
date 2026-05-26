@@ -769,12 +769,15 @@ impl Workspace {
             let monocle_area = self.monocle_area_from_work_area(adjusted_work_area);
 
             if let Some(container) = &mut self.monocle_container {
+                tracing::debug!("update: positioning monocle container window");
                 if let Some(window) = container.focused_window_mut() {
                     window.set_position(&monocle_area, true)?;
                 };
             } else if let Some(window) = &mut self.maximized_window {
+                tracing::debug!("update: maximizing captured window");
                 window.maximize();
             } else if !self.containers().is_empty() {
+                tracing::debug!("update: entering tiling branch");
                 let effective_layout_options = self.effective_layout_options();
 
                 tracing::debug!(
@@ -840,8 +843,13 @@ impl Workspace {
                                 // If a window has been unmaximized via toggle-maximize, this block
                                 // will make sure that it is unmaximized via restore_window
                                 if window.is_maximized() && !managed_maximized_window {
+                                    tracing::debug!(hwnd = window.hwnd, "update: restoring maximized window before tiling");
                                     WindowsApi::restore_window(window.hwnd);
                                 }
+                            }
+                            let current_rect = WindowsApi::window_rect(window.hwnd).unwrap_or_default();
+                            if current_rect != *layout {
+                                tracing::debug!(hwnd = window.hwnd, old = ?current_rect, new = ?layout, "update: repositioning window");
                             }
                             window.set_position(layout, false)?;
                         }

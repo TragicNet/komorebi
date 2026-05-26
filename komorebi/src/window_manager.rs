@@ -3516,6 +3516,14 @@ impl WindowManager {
 
         self.log_workspace_state("after monocle_off");
 
+        // Retile explicitly after monocle exit so the reintegrated window
+        // returns from its full-screen monocle position to the correct
+        // tiled layout rect.  Calling update_focused_workspace here (rather
+        // than relying only on callers) ensures the workspace globals are
+        // refreshed and update() runs the tiling branch, which calls
+        // set_position on every container window.
+        self.update_focused_workspace(true, true)?;
+
         Ok(())
     }
 
