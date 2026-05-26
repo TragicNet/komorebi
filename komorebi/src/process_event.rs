@@ -971,12 +971,7 @@ impl WindowManager {
     ) -> color_eyre::Result<()> {
         let (m_idx, ws_idx) = reconciliation_pair;
 
-        tracing::info!(
-            hwnd = window.hwnd,
-            m_idx,
-            ws_idx,
-            "performing reconciliation",
-        );
+        tracing::debug!("performing reconciliation");
         self.focus_monitor(m_idx)?;
         let mouse_follows_focus = self.mouse_follows_focus;
         let offset = self.work_area_offset;
