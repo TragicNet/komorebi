@@ -1412,8 +1412,12 @@ impl WindowManager {
                         // during the lower operation, which would generate a spurious
                         // FocusChange event that could change the container's focused window
                         // index (cycle-stack) and undo the layer toggle.
+                        // If there are no floating windows to focus, focus the desktop
+                        // instead so that lowering does not trigger an auto-focus.
                         if let Some(window) = to_focus {
                             window.focus(mouse_follows_focus)?;
+                        } else {
+                            WindowsApi::raise_and_focus_window(WindowsApi::desktop_window()?)?;
                         }
 
                         for container in workspace.containers() {
