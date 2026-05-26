@@ -939,36 +939,7 @@ impl WindowManager {
         let mut needs_reconciliation = None;
 
         if let Some((m_idx, ws_idx)) = self.known_hwnds.get(&window.hwnd) {
-            if (*m_idx, *ws_idx) == focused_pair {
-                if let Some(target_workspace) = self
-                    .monitors()
-                    .get(*m_idx)
-                    .and_then(|m| m.workspaces().get(*ws_idx))
-                {
-                    if let Some(monocle_with_window) = target_workspace
-                        .monocle_container
-                        .as_ref()
-                        .and_then(|m| m.contains_window(window.hwnd).then_some(m))
-                    {
-                        if monocle_with_window.focused_window() != Some(&window) {
-                            tracing::debug!("Needs reconciliation within a monocled stack");
-                            needs_reconciliation = Some((*m_idx, *ws_idx));
-                        }
-                    } else {
-                        let c_idx = target_workspace.container_idx_for_window(window.hwnd);
-
-                        if let Some(target_container) =
-                            c_idx.and_then(|c_idx| target_workspace.containers().get(c_idx))
-                            && target_container.focused_window() != Some(&window)
-                        {
-                            tracing::debug!(
-                                "Needs reconciliation within a stack on the focused workspace"
-                            );
-                            needs_reconciliation = Some((*m_idx, *ws_idx));
-                        }
-                    }
-                }
-            } else {
+            if (*m_idx, *ws_idx) != focused_pair {
                 tracing::debug!("Needs reconciliation for a different monitor/workspace pair");
                 needs_reconciliation = Some((*m_idx, *ws_idx));
             }
