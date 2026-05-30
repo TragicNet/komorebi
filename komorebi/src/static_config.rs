@@ -41,7 +41,10 @@ use crate::animation::ANIMATION_ENABLED_PER_ANIMATION;
 use crate::animation::ANIMATION_FPS;
 use crate::animation::ANIMATION_STYLE_GLOBAL;
 use crate::animation::ANIMATION_STYLE_PER_ANIMATION;
+use crate::animation::DEFAULT_ANIMATION_DURATION;
+use crate::animation::DEFAULT_ANIMATION_ENABLED;
 use crate::animation::DEFAULT_ANIMATION_FPS;
+use crate::animation::DEFAULT_ANIMATION_STYLE;
 use crate::animation::DEFAULT_GHOST_MOVEMENT;
 use crate::animation::GHOST_MOVEMENT_ENABLED;
 use crate::animation::PerAnimationPrefixConfig;
@@ -102,6 +105,7 @@ use crossbeam_channel::Receiver;
 use hotwatch::EventKind;
 use hotwatch::Hotwatch;
 use komorebi_themes::colour::Colour;
+use komorebi_themes::colour::Rgb;
 use parking_lot::Mutex;
 use regex::Regex;
 use serde::Deserialize;
@@ -993,28 +997,40 @@ impl StaticConfig {
             .floating_window_aspect_ratio
             .unwrap_or(AspectRatio::Predefined(PredefinedAspectRatio::Standard));
 
-        if let Some(monitor_index_preferences) = &self.monitor_index_preferences {
+        {
             let mut preferences = MONITOR_INDEX_PREFERENCES.lock();
-            preferences.clone_from(monitor_index_preferences);
+            if let Some(monitor_index_preferences) = &self.monitor_index_preferences {
+                preferences.clone_from(monitor_index_preferences);
+            } else {
+                preferences.clear();
+            }
         }
 
-        if let Some(display_index_preferences) = &self.display_index_preferences {
+        {
             let mut preferences = DISPLAY_INDEX_PREFERENCES.write();
-            preferences.clone_from(display_index_preferences);
+            if let Some(display_index_preferences) = &self.display_index_preferences {
+                preferences.clone_from(display_index_preferences);
+            } else {
+                preferences.clear();
+            }
         }
 
-        if let Some(behaviour) = self.window_hiding_behaviour {
+        {
             let mut window_hiding_behaviour = HIDING_BEHAVIOUR.lock();
-            *window_hiding_behaviour = behaviour;
+            *window_hiding_behaviour = self
+                .window_hiding_behaviour
+                .unwrap_or(HidingBehaviour::Cloak);
         }
 
-        if let Some(height) = self.minimum_window_height {
-            window::MINIMUM_HEIGHT.store(height, Ordering::SeqCst);
-        }
+        window::MINIMUM_HEIGHT.store(
+            self.minimum_window_height.unwrap_or(0),
+            Ordering::SeqCst,
+        );
 
-        if let Some(width) = self.minimum_window_width {
-            window::MINIMUM_WIDTH.store(width, Ordering::SeqCst);
-        }
+        window::MINIMUM_WIDTH.store(
+            self.minimum_window_width.unwrap_or(0),
+            Ordering::SeqCst,
+        );
 
         if let Some(animations) = &self.animation {
             match &animations.enabled {
@@ -1065,15 +1081,26 @@ impl StaticConfig {
                 // never trigger this path, so the thread is never created.
                 crate::animation::ghost::prewarm();
             }
+        } else {
+            ANIMATION_ENABLED_GLOBAL.store(DEFAULT_ANIMATION_ENABLED, Ordering::SeqCst);
+            ANIMATION_ENABLED_PER_ANIMATION.lock().clear();
+            *ANIMATION_STYLE_GLOBAL.lock() = DEFAULT_ANIMATION_STYLE;
+            ANIMATION_STYLE_PER_ANIMATION.lock().clear();
+            ANIMATION_DURATION_GLOBAL.store(DEFAULT_ANIMATION_DURATION, Ordering::SeqCst);
+            ANIMATION_DURATION_PER_ANIMATION.lock().clear();
+            ANIMATION_FPS.store(DEFAULT_ANIMATION_FPS, Ordering::SeqCst);
+            GHOST_MOVEMENT_ENABLED.store(DEFAULT_GHOST_MOVEMENT, Ordering::SeqCst);
         }
 
-        if let Some(container) = self.default_container_padding {
-            DEFAULT_CONTAINER_PADDING.store(container, Ordering::SeqCst);
-        }
+        DEFAULT_CONTAINER_PADDING.store(
+            self.default_container_padding.unwrap_or(10),
+            Ordering::SeqCst,
+        );
 
-        if let Some(workspace) = self.default_workspace_padding {
-            DEFAULT_WORKSPACE_PADDING.store(workspace, Ordering::SeqCst);
-        }
+        DEFAULT_WORKSPACE_PADDING.store(
+            self.default_workspace_padding.unwrap_or(10),
+            Ordering::SeqCst,
+        );
 
         if let Some(defaults) = &self.layout_defaults {
             *LAYOUT_DEFAULTS.lock() = defaults.clone();
@@ -1081,17 +1108,20 @@ impl StaticConfig {
             LAYOUT_DEFAULTS.lock().clear();
         }
 
-        if let Some(border_width) = self.border_width {
-            border_manager::BORDER_WIDTH.store(border_width, Ordering::SeqCst);
-        }
+        border_manager::BORDER_WIDTH.store(
+            self.border_width.unwrap_or(8),
+            Ordering::SeqCst,
+        );
 
-        if let Some(border_offset) = self.border_offset {
-            border_manager::BORDER_OFFSET.store(border_offset, Ordering::SeqCst);
-        }
+        border_manager::BORDER_OFFSET.store(
+            self.border_offset.unwrap_or(-1),
+            Ordering::SeqCst,
+        );
 
-        if let Some(border_enabled) = self.border {
-            border_manager::BORDER_ENABLED.store(border_enabled, Ordering::SeqCst);
-        }
+        border_manager::BORDER_ENABLED.store(
+            self.border.unwrap_or(true),
+            Ordering::SeqCst,
+        );
 
         if let Some(colours) = &self.border_colours {
             if let Some(single) = colours.single {
@@ -1118,6 +1148,19 @@ impl StaticConfig {
                 border_manager::UNFOCUSED_LOCKED
                     .store(u32::from(unfocused_locked), Ordering::SeqCst);
             }
+        } else {
+            border_manager::FOCUSED
+                .store(u32::from(Colour::Rgb(Rgb::new(66, 165, 245))), Ordering::SeqCst);
+            border_manager::STACK
+                .store(u32::from(Colour::Rgb(Rgb::new(0, 165, 66))), Ordering::SeqCst);
+            border_manager::MONOCLE
+                .store(u32::from(Colour::Rgb(Rgb::new(255, 51, 153))), Ordering::SeqCst);
+            border_manager::FLOATING
+                .store(u32::from(Colour::Rgb(Rgb::new(245, 245, 165))), Ordering::SeqCst);
+            border_manager::UNFOCUSED
+                .store(u32::from(Colour::Rgb(Rgb::new(128, 128, 128))), Ordering::SeqCst);
+            border_manager::UNFOCUSED_LOCKED
+                .store(u32::from(Colour::Rgb(Rgb::new(158, 8, 8))), Ordering::SeqCst);
         }
 
         STYLE.store(self.border_style.unwrap_or_default());
@@ -1145,14 +1188,15 @@ impl StaticConfig {
             border_manager::send_notification(None);
         }
 
-        if let Some(transparency_enabled) = self.transparency {
-            transparency_manager::TRANSPARENCY_ENABLED
-                .store(transparency_enabled, Ordering::SeqCst);
-        }
+        transparency_manager::TRANSPARENCY_ENABLED.store(
+            self.transparency.unwrap_or(false),
+            Ordering::SeqCst,
+        );
 
-        if let Some(transparency_alpha) = self.transparency_alpha {
-            transparency_manager::TRANSPARENCY_ALPHA.store(transparency_alpha, Ordering::SeqCst);
-        }
+        transparency_manager::TRANSPARENCY_ALPHA.store(
+            self.transparency_alpha.unwrap_or(200),
+            Ordering::SeqCst,
+        );
 
         let mut ignore_identifiers = IGNORE_IDENTIFIERS.lock();
         let mut regex_identifiers = REGEX_IDENTIFIERS.lock();
@@ -1166,18 +1210,22 @@ impl StaticConfig {
         let mut floating_applications = FLOATING_APPLICATIONS.lock();
         let mut no_titlebar_applications = NO_TITLEBAR.lock();
 
+        ignore_identifiers.clear();
         if let Some(rules) = &mut self.ignore_rules {
             populate_rules(rules, &mut ignore_identifiers, &mut regex_identifiers)?;
         }
 
+        floating_applications.clear();
         if let Some(rules) = &mut self.floating_applications {
             populate_rules(rules, &mut floating_applications, &mut regex_identifiers)?;
         }
 
+        manage_identifiers.clear();
         if let Some(rules) = &mut self.manage_rules {
             populate_rules(rules, &mut manage_identifiers, &mut regex_identifiers)?;
         }
 
+        object_name_change_identifiers.clear();
         if let Some(rules) = &mut self.object_name_change_applications {
             populate_rules(
                 rules,
@@ -1186,6 +1234,7 @@ impl StaticConfig {
             )?;
         }
 
+        object_name_change_title_ignore_list.clear();
         if let Some(regexes) = &mut self.object_name_change_title_ignore_list {
             let mut updated = vec![];
             for r in regexes {
@@ -1197,10 +1246,12 @@ impl StaticConfig {
             *object_name_change_title_ignore_list = updated;
         }
 
+        layered_identifiers.clear();
         if let Some(rules) = &mut self.layered_applications {
             populate_rules(rules, &mut layered_identifiers, &mut regex_identifiers)?;
         }
 
+        tray_and_multi_window_identifiers.clear();
         if let Some(rules) = &mut self.tray_and_multi_window_applications {
             populate_rules(
                 rules,
@@ -1209,10 +1260,12 @@ impl StaticConfig {
             )?;
         }
 
+        transparency_blacklist.clear();
         if let Some(rules) = &mut self.transparency_ignore_rules {
             populate_rules(rules, &mut transparency_blacklist, &mut regex_identifiers)?;
         }
 
+        slow_application_identifiers.clear();
         if let Some(rules) = &mut self.slow_application_identifiers {
             populate_rules(
                 rules,
@@ -1221,6 +1274,7 @@ impl StaticConfig {
             )?;
         }
 
+        no_titlebar_applications.clear();
         if let Some(rules) = &mut self.remove_titlebar_applications {
             populate_rules(rules, &mut no_titlebar_applications, &mut regex_identifiers)?;
         }
@@ -1228,37 +1282,68 @@ impl StaticConfig {
         if let Some(stackbar) = &self.stackbar {
             if let Some(height) = &stackbar.height {
                 STACKBAR_TAB_HEIGHT.store(*height, Ordering::SeqCst);
+            } else {
+                STACKBAR_TAB_HEIGHT.store(40, Ordering::SeqCst);
             }
 
             if let Some(label) = &stackbar.label {
                 STACKBAR_LABEL.store(*label);
+            } else {
+                STACKBAR_LABEL.store(StackbarLabel::Title);
             }
 
             if let Some(mode) = &stackbar.mode {
                 STACKBAR_MODE.store(*mode);
+            } else {
+                STACKBAR_MODE.store(StackbarMode::Never);
             }
 
             #[allow(clippy::assigning_clones)]
             if let Some(tabs) = &stackbar.tabs {
                 if let Some(background) = &tabs.background {
                     STACKBAR_TAB_BACKGROUND_COLOUR.store((*background).into(), Ordering::SeqCst);
+                } else {
+                    STACKBAR_TAB_BACKGROUND_COLOUR.store(3355443, Ordering::SeqCst);
                 }
 
                 if let Some(colour) = &tabs.focused_text {
                     STACKBAR_FOCUSED_TEXT_COLOUR.store((*colour).into(), Ordering::SeqCst);
+                } else {
+                    STACKBAR_FOCUSED_TEXT_COLOUR.store(16777215, Ordering::SeqCst);
                 }
 
                 if let Some(colour) = &tabs.unfocused_text {
                     STACKBAR_UNFOCUSED_TEXT_COLOUR.store((*colour).into(), Ordering::SeqCst);
+                } else {
+                    STACKBAR_UNFOCUSED_TEXT_COLOUR.store(11776947, Ordering::SeqCst);
                 }
 
                 if let Some(width) = &tabs.width {
                     STACKBAR_TAB_WIDTH.store(*width, Ordering::SeqCst);
+                } else {
+                    STACKBAR_TAB_WIDTH.store(200, Ordering::SeqCst);
                 }
 
                 STACKBAR_FONT_SIZE.store(tabs.font_size.unwrap_or(0), Ordering::SeqCst);
                 *STACKBAR_FONT_FAMILY.lock() = tabs.font_family.clone();
+            } else {
+                STACKBAR_TAB_BACKGROUND_COLOUR.store(3355443, Ordering::SeqCst);
+                STACKBAR_FOCUSED_TEXT_COLOUR.store(16777215, Ordering::SeqCst);
+                STACKBAR_UNFOCUSED_TEXT_COLOUR.store(11776947, Ordering::SeqCst);
+                STACKBAR_TAB_WIDTH.store(200, Ordering::SeqCst);
+                STACKBAR_FONT_SIZE.store(0, Ordering::SeqCst);
+                *STACKBAR_FONT_FAMILY.lock() = None;
             }
+        } else {
+            STACKBAR_TAB_HEIGHT.store(40, Ordering::SeqCst);
+            STACKBAR_LABEL.store(StackbarLabel::Title);
+            STACKBAR_MODE.store(StackbarMode::Never);
+            STACKBAR_TAB_BACKGROUND_COLOUR.store(3355443, Ordering::SeqCst);
+            STACKBAR_FOCUSED_TEXT_COLOUR.store(16777215, Ordering::SeqCst);
+            STACKBAR_UNFOCUSED_TEXT_COLOUR.store(11776947, Ordering::SeqCst);
+            STACKBAR_TAB_WIDTH.store(200, Ordering::SeqCst);
+            STACKBAR_FONT_SIZE.store(0, Ordering::SeqCst);
+            *STACKBAR_FONT_FAMILY.lock() = None;
         }
 
         if let Some(theme) = &self.theme {
@@ -1298,9 +1383,10 @@ impl StaticConfig {
             }
         }
 
-        if let Some(behaviour) = self.window_handling_behaviour {
-            WINDOW_HANDLING_BEHAVIOUR.store(behaviour);
-        }
+        WINDOW_HANDLING_BEHAVIOUR.store(
+            self.window_handling_behaviour
+                .unwrap_or(WindowHandlingBehaviour::Sync),
+        );
 
         Ok(())
     }
@@ -1769,9 +1855,10 @@ impl StaticConfig {
 
         wm.enforce_workspace_rules()?;
 
-        if let Some(border_enabled) = value.border {
-            border_manager::BORDER_ENABLED.store(border_enabled, Ordering::SeqCst);
-        }
+        border_manager::BORDER_ENABLED.store(
+            value.border.unwrap_or(true),
+            Ordering::SeqCst,
+        );
 
         wm.window_management_behaviour.current_behaviour =
             value.window_container_behaviour.unwrap_or_default();
