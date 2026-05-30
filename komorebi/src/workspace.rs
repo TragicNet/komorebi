@@ -1301,6 +1301,13 @@ impl Workspace {
                     window_idx - 1
                 };
                 container.focus_window(focus_idx);
+                for (i, w) in container.windows().iter().enumerate() {
+                    if i == focus_idx {
+                        w.restore();
+                    } else {
+                        w.hide();
+                    }
+                }
             }
 
             self.last_minimized_hwnd = Some(hwnd);
