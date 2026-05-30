@@ -259,15 +259,24 @@ impl WindowManager {
                 if self.focused_workspace()?.contains_window(window.hwnd) {
                     self.focused_workspace_mut()?.remove_window(window.hwnd)?;
 
-                    if self.keep_monocle_on_window_close
+                    let keep_monocle = self.keep_monocle_on_window_close
                         && self
                             .focused_workspace()?
                             .monocle_container
                             .as_ref()
-                            .is_some_and(|m| !m.windows().is_empty())
-                    {
+                            .is_some_and(|m| !m.windows().is_empty());
+
+                    if keep_monocle {
                         self.update_focused_workspace(true, true)?;
                     } else {
+                        // Restore tiling containers when not keeping monocle
+                        if let Some(monocle) = &self.focused_workspace()?.monocle_container {
+                            if !monocle.windows().is_empty() {
+                                for c in self.focused_workspace()?.containers() {
+                                    c.restore();
+                                }
+                            }
+                        }
                         self.update_focused_workspace(false, false)?;
                     }
 
