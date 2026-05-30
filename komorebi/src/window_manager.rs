@@ -2765,17 +2765,15 @@ impl WindowManager {
             }
         }
 
+        if self.focused_workspace_mut()?.monocle_container.is_some() {
+            return self.cycle_monocle(direction);
+        }
+
         let mut maximize_next = false;
-        let mut monocle_next = false;
 
         if self.focused_workspace_mut()?.maximized_window.is_some() {
             maximize_next = true;
             self.unmaximize_window()?;
-        }
-
-        if self.focused_workspace_mut()?.monocle_container.is_some() {
-            monocle_next = true;
-            self.monocle_off()?;
         }
 
         let workspace = self.focused_workspace_mut()?;
@@ -2788,8 +2786,6 @@ impl WindowManager {
 
         if maximize_next {
             self.toggle_maximize()?;
-        } else if monocle_next {
-            self.toggle_monocle()?;
         } else {
             self.focused_window_mut()?.focus(self.mouse_follows_focus)?;
         }
