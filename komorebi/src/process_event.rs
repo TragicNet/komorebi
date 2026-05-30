@@ -586,6 +586,9 @@ impl WindowManager {
                                         .center(&workspace.globals.work_area, placement.should_resize())?;
                                 }
                                 self.update_focused_workspace(false, false)?;
+                            } else if let Some(monocle) = &mut workspace.monocle_container {
+                                monocle.add_window(window);
+                                workspace.layer = WorkspaceLayer::Tiling;
                             } else {
                                 match behaviour.current_behaviour {
                                     WindowContainerBehaviour::Create => {
@@ -605,7 +608,9 @@ impl WindowManager {
                                 }
                             }
 
-                            if self.focus_new_windows
+                            if monocle_container.is_some() {
+                                self.update_focused_workspace(true, true)?;
+                            } else if self.focus_new_windows
                                 || (self.focused_workspace()?.containers().len() == 1
                                     && self.focused_workspace()?.floating_windows().is_empty())
                                 || (self.focused_workspace()?.containers().is_empty()
