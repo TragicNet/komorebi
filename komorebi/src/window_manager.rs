@@ -1294,7 +1294,7 @@ impl WindowManager {
                             }
                         }
 
-                        WindowsApi::position_window(window.hwnd, &rect, false, true)?;
+                        WindowsApi::position_window(window.hwnd, &rect, false, true, false)?;
                         if mouse_follows_focus {
                             WindowsApi::center_cursor_in_rect(&rect)?;
                         }
@@ -2510,7 +2510,7 @@ impl WindowManager {
                     }
                 }
 
-                WindowsApi::position_window(window.hwnd, &rect, false, true)?;
+                WindowsApi::position_window(window.hwnd, &rect, false, true, false)?;
                 if mouse_follows_focus {
                     WindowsApi::center_cursor_in_rect(&rect)?;
                 }
@@ -3244,12 +3244,17 @@ impl WindowManager {
         self.handle_unmanaged_window_behaviour()?;
 
         let workspace = self.focused_workspace()?;
-        match workspace.monocle_container {
-            None => self.monocle_on()?,
-            Some(_) => self.monocle_off()?,
+        let turning_on = workspace.monocle_container.is_none();
+        let _ = workspace;
+
+        match turning_on {
+            true => self.monocle_on()?,
+            false => self.monocle_off()?,
         }
 
-        self.update_focused_workspace(true, true)?;
+        if turning_on {
+            self.update_focused_workspace(true, true)?;
+        }
 
         Ok(())
     }
@@ -3505,27 +3510,30 @@ impl WindowManager {
         tracing::info!("disabling monocle");
         self.log_workspace_state("before monocle_off");
 
-        let workspace = self.focused_workspace_mut()?;
-
-        for container in workspace.containers_mut() {
-            container.restore();
+        // Reintegrate the monocle container first while all other windows
+        // are still hidden, then retile (positions windows to tiled rects
+        // silently since they are hidden), and finally restore windows so
+        // they appear at the correct position without visual flash.
+        {
+            let workspace = self.focused_workspace_mut()?;
+            workspace.reintegrate_monocle_container()?;
         }
-
-        for window in workspace.floating_windows_mut() {
-            window.restore();
-        }
-
-        workspace.reintegrate_monocle_container()?;
 
         self.log_workspace_state("after monocle_off");
 
-        // Retile explicitly after monocle exit so the reintegrated window
-        // returns from its full-screen monocle position to the correct
-        // tiled layout rect.  Calling update_focused_workspace here (rather
-        // than relying only on callers) ensures the workspace globals are
-        // refreshed and update() runs the tiling branch, which calls
-        // set_position on every container window.
         self.update_focused_workspace(true, true)?;
+
+        {
+            let workspace = self.focused_workspace_mut()?;
+
+            for container in workspace.containers_mut() {
+                container.restore();
+            }
+
+            for window in workspace.floating_windows_mut() {
+                window.restore();
+            }
+        }
 
         Ok(())
     }
@@ -3603,7 +3611,7 @@ impl WindowManager {
 
         for container in workspace.containers() {
             for window in container.windows() {
-                WindowsApi::position_window(window.hwnd, &monocle_area, false, true)?;
+                WindowsApi::position_window(window.hwnd, &monocle_area, false, true, true)?;
             }
         }
 
@@ -3612,7 +3620,7 @@ impl WindowManager {
             .as_ref()
             .and_then(|container| container.focused_window().copied())
         {
-            WindowsApi::position_window(window.hwnd, &monocle_area, true, true)?;
+            WindowsApi::position_window(window.hwnd, &monocle_area, true, true, true)?;
         }
 
         Ok(())

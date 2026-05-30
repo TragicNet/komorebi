@@ -309,7 +309,7 @@ impl RenderDispatcher for MovementRenderDispatcher {
 
             if !is_chromium && !size_changes {
                 if let Err(error) =
-                    WindowsApi::position_window(self.hwnd, &self.target_rect, self.top, false)
+                    WindowsApi::position_window(self.hwnd, &self.target_rect, self.top, false, false)
                 {
                     tracing::warn!(
                         "ghost movement: failed to pre-position hwnd {}: {error}",
@@ -378,7 +378,7 @@ impl RenderDispatcher for MovementRenderDispatcher {
         // still cloaked at start_rect and needs to be moved here. For the
         // legacy non-ghost path this is the original final reposition.
         if !pre_painted {
-            WindowsApi::position_window(self.hwnd, &self.target_rect, self.top, false)?;
+            WindowsApi::position_window(self.hwnd, &self.target_rect, self.top, false, false)?;
         }
 
         // Uncloak BEFORE crossfade so the real window's first post-resize
@@ -451,7 +451,7 @@ impl RenderDispatcher for MovementRenderDispatcher {
         // down the ghost. Mirrors post_render but uses last_animated_rect.
         let target = *self.last_animated_rect.lock();
 
-        if let Err(error) = WindowsApi::position_window(self.hwnd, &target, false, false) {
+        if let Err(error) = WindowsApi::position_window(self.hwnd, &target, false, false, false) {
             tracing::warn!(
                 "ghost movement cancel: failed to snap hwnd {} to last rect: {error}",
                 self.hwnd
@@ -744,7 +744,7 @@ impl Window {
 
             AnimationEngine::animate(render_dispatcher, duration)
         } else {
-            WindowsApi::position_window(self.hwnd, layout, top, true)
+            WindowsApi::position_window(self.hwnd, layout, top, true, false)
         }
     }
 

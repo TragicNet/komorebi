@@ -186,7 +186,7 @@ impl Stackbar {
 
         // Async causes the stackbar to disappear or flicker because we modify it right after,
         // so we have to do a synchronous call
-        WindowsApi::position_window(self.hwnd, &layout, false, false)?;
+        WindowsApi::position_window(self.hwnd, &layout, false, false, false)?;
 
         unsafe {
             let hdc = GetDC(Option::from(self.hwnd()));

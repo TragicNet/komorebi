@@ -482,18 +482,30 @@ impl WindowsApi {
     /// position window resizes the target window to the given layout, adjusting
     /// the layout to account for any window shadow borders (the window painted
     /// region will match layout on completion).
+    ///
+    /// When `silent` is `true`, the resize is performed with flags that suppress
+    /// visual redraw (NOREDRAW, DEFERERASE) and preserve client area contents
+    /// (omitting NO_COPY_BITS). Use this to avoid flashing when the window will
+    /// be repositioned again shortly (e.g. during a monocle transition).
     pub fn position_window(
         hwnd: isize,
         layout: &Rect,
         top: bool,
         with_async_window_pos: bool,
+        silent: bool,
     ) -> eyre::Result<()> {
         let hwnd = HWND(as_ptr!(hwnd));
 
         let mut flags = SetWindowPosition::NO_ACTIVATE
-            | SetWindowPosition::NO_SEND_CHANGING
-            | SetWindowPosition::NO_COPY_BITS
-            | SetWindowPosition::FRAME_CHANGED;
+            | SetWindowPosition::NO_SEND_CHANGING;
+
+        if silent {
+            flags |= SetWindowPosition::NO_REDRAW
+                | SetWindowPosition::DEFER_ERASE;
+        } else {
+            flags |= SetWindowPosition::NO_COPY_BITS
+                | SetWindowPosition::FRAME_CHANGED;
+        }
 
         // If the request is to place the window on top, then HWND_TOP will take
         // effect, otherwise pass NO_Z_ORDER that will cause set_window_pos to
