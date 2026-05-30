@@ -250,6 +250,7 @@ pub static DEFAULT_RESIZE_DELTA: i32 = 50;
 pub static DEFAULT_MOUSE_FOLLOWS_FOCUS: bool = true;
 pub static DEFAULT_FOCUS_NEW_WINDOWS: bool = false;
 pub static DEFAULT_CYCLE_FOCUS_ACROSS_MONITORS: bool = false;
+pub static DEFAULT_KEEP_MONOCLE_ON_WINDOW_CLOSE: bool = true;
 pub static INITIAL_CONFIGURATION_LOADED: AtomicBool = AtomicBool::new(false);
 pub static CUSTOM_FFM: AtomicBool = AtomicBool::new(false);
 pub static SESSION_ID: AtomicU32 = AtomicU32::new(0);

@@ -1291,10 +1291,16 @@ impl Workspace {
             if container.windows().is_empty() {
                 self.monocle_container = None;
                 self.monocle_container_restore_idx = None;
-            }
-
-            for c in self.containers() {
-                c.restore();
+                for c in self.containers() {
+                    c.restore();
+                }
+            } else {
+                let focus_idx = if window_idx == 0 {
+                    container.windows().len() - 1
+                } else {
+                    window_idx - 1
+                };
+                container.focus_window(focus_idx);
             }
 
             self.last_minimized_hwnd = Some(hwnd);

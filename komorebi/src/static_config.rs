@@ -5,6 +5,7 @@ use crate::DATA_DIR;
 use crate::DEFAULT_CONTAINER_PADDING;
 use crate::DEFAULT_CYCLE_FOCUS_ACROSS_MONITORS;
 use crate::DEFAULT_FOCUS_NEW_WINDOWS;
+use crate::DEFAULT_KEEP_MONOCLE_ON_WINDOW_CLOSE;
 use crate::DEFAULT_MOUSE_FOLLOWS_FOCUS;
 use crate::DEFAULT_RESIZE_DELTA;
 use crate::DEFAULT_WORKSPACE_PADDING;
@@ -559,6 +560,10 @@ pub struct StaticConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = DEFAULT_CYCLE_FOCUS_ACROSS_MONITORS)))]
     pub cycle_focus_across_monitors: Option<bool>,
+    /// Keep monocle mode active when a window is closed and there are still windows remaining
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(extend("default" = DEFAULT_KEEP_MONOCLE_ON_WINDOW_CLOSE)))]
+    pub keep_monocle_on_window_close: Option<bool>,
     /// Path to applications.json from komorebi-application-specific-configurations
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_specific_configuration_path: Option<AppSpecificConfigurationPath>,
@@ -913,6 +918,7 @@ impl From<&WindowManager> for StaticConfig {
             mouse_follows_focus: Option::from(value.mouse_follows_focus),
             focus_new_windows: Option::from(value.focus_new_windows),
             cycle_focus_across_monitors: Option::from(value.cycle_focus_across_monitors),
+            keep_monocle_on_window_close: Option::from(value.keep_monocle_on_window_close),
             app_specific_configuration_path: None,
             border_width: Option::from(border_manager::BORDER_WIDTH.load(Ordering::SeqCst)),
             border_offset: Option::from(border_manager::BORDER_OFFSET.load(Ordering::SeqCst)),
@@ -1381,6 +1387,9 @@ impl StaticConfig {
             cycle_focus_across_monitors: value
                 .cycle_focus_across_monitors
                 .unwrap_or(DEFAULT_CYCLE_FOCUS_ACROSS_MONITORS),
+            keep_monocle_on_window_close: value
+                .keep_monocle_on_window_close
+                .unwrap_or(DEFAULT_KEEP_MONOCLE_ON_WINDOW_CLOSE),
             hotwatch: Hotwatch::new()?,
             has_pending_raise_op: false,
             pending_move_op: Arc::new(None),
@@ -1792,6 +1801,9 @@ impl StaticConfig {
         wm.cycle_focus_across_monitors = value
             .cycle_focus_across_monitors
             .unwrap_or(DEFAULT_CYCLE_FOCUS_ACROSS_MONITORS);
+        wm.keep_monocle_on_window_close = value
+            .keep_monocle_on_window_close
+            .unwrap_or(DEFAULT_KEEP_MONOCLE_ON_WINDOW_CLOSE);
         wm.work_area_offset = value.global_work_area_offset;
         #[allow(deprecated)]
         {

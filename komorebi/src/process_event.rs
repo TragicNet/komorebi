@@ -258,7 +258,18 @@ impl WindowManager {
             WindowManagerEvent::Destroy(_, window) | WindowManagerEvent::Unmanage(window) => {
                 if self.focused_workspace()?.contains_window(window.hwnd) {
                     self.focused_workspace_mut()?.remove_window(window.hwnd)?;
-                    self.update_focused_workspace(false, false)?;
+
+                    if self.keep_monocle_on_window_close
+                        && self
+                            .focused_workspace()?
+                            .monocle_container
+                            .as_ref()
+                            .is_some_and(|m| !m.windows().is_empty())
+                    {
+                        self.update_focused_workspace(true, true)?;
+                    } else {
+                        self.update_focused_workspace(false, false)?;
+                    }
 
                     let mut already_moved_window_handles = self.already_moved_window_handles.lock();
 
