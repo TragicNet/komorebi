@@ -28,6 +28,7 @@ use color_eyre::eyre::bail;
 use fs_tail::TailedFile;
 use komorebi_client::AppSpecificConfigurationPath;
 use komorebi_client::ApplicationSpecificConfiguration;
+use komorebi_client::send_batch;
 use komorebi_client::send_message;
 use komorebi_client::send_query;
 use lazy_static::lazy_static;
@@ -840,6 +841,9 @@ struct Start {
     /// Do not attempt to auto-apply a dumped state temp file from a previously running instance of komorebi
     #[clap(long)]
     clean_state: bool,
+    /// Unminimize and tile all minimized windows on startup, maintaining their original workspace positions and stacks
+    #[clap(long)]
+    include_minimized_windows: bool,
 }
 
 #[derive(Parser)]
@@ -2522,6 +2526,26 @@ fn main() -> eyre::Result<()> {
                 }
 
                 return Ok(());
+            }
+
+            if args.include_minimized_windows {
+                // Send all commands in order over a single connection
+                let mut retries = 5;
+                while retries > 0 {
+                    if send_batch(
+                        vec![
+                            SocketMessage::ReclaimMinimizedWindows,
+                            SocketMessage::EnforceWorkspaceRules,
+                            SocketMessage::Retile,
+                        ],
+                    )
+                    .is_ok()
+                    {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    retries -= 1;
+                }
             }
 
             if args.whkd {
