@@ -58,7 +58,7 @@ copy:
     just copy-targets komorebic komorebic-no-console komorebi komorebi-bar komorebi-gui komorebi-shortcuts
 
 run target:
-    cargo +stable run --bin {{ target }} --locked --no-default-features
+    cargo +stable run --bin {{ target }} --locked --no-default-features --profile dev-fast
 
 warn target $RUST_LOG="warn":
     just run {{ target }}
@@ -73,7 +73,17 @@ trace target $RUST_LOG="trace":
     just run {{ target }}
 
 deadlock $RUST_LOG="trace":
-    cargo +stable run --bin komorebi --locked --no-default-features --features deadlock_detection
+    cargo +stable run --bin komorebi --locked --no-default-features --profile dev-fast --features deadlock_detection
+
+dev:
+    -komorebic stop
+    cargo +stable build --bin komorebi --locked --no-default-features --profile release-fast
+    .\target\release-fast\komorebi.exe
+
+devrel:
+    -komorebic stop
+    cargo +stable build --bin komorebi --locked --release --no-default-features
+    .\target\release\komorebi.exe
 
 docgen starlight:
     rm {{ starlight }}/src/data/cli/windows/*.md
@@ -108,5 +118,5 @@ depgen:
     cargo deny list --format json | jq 'del(.unlicensed)' > dependencies.json
 
 procdump:
-    cargo build --bin komorebi
-    .\procdump.exe -ma -e -x . .\target\debug\komorebi.exe
+    cargo build --bin komorebi --no-default-features --profile dev-fast
+    .\procdump.exe -ma -e -x . .\target\dev-fast\komorebi.exe

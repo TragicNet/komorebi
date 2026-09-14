@@ -2,15 +2,15 @@
 
 resolver = "2"
 members = [
-  "komorebi",
-  "komorebi-client",
-  "komorebi-gui",
-  "komorebi-layouts",
-  "komorebic",
-  "komorebic-no-console",
-  "komorebi-bar",
-  "komorebi-themes",
-  "komorebi-shortcuts",
+    "komorebi",
+    "komorebi-client",
+    "komorebi-gui",
+    "komorebi-layouts",
+    "komorebic",
+    "komorebic-no-console",
+    "komorebi-bar",
+    "komorebi-themes",
+    "komorebi-shortcuts",
 ]
 
 [workspace.dependencies]
@@ -49,32 +49,32 @@ which = "8"
 [workspace.dependencies.windows]
 version = "0.62"
 features = [
-  "Foundation_Numerics",
-  "Win32_Devices",
-  "Win32_Devices_Display",
-  "Win32_System_Com",
-  "Win32_UI_Shell_Common",           # for IObjectArray
-  "Win32_Foundation",
-  "Win32_Globalization",
-  "Win32_Graphics_Dwm",
-  "Win32_Graphics_Gdi",
-  "Win32_Graphics_Direct2D",
-  "Win32_Graphics_Direct2D_Common",
-  "Win32_Graphics_Dxgi_Common",
-  "Win32_System_LibraryLoader",
-  "Win32_System_Power",
-  "Win32_System_RemoteDesktop",
-  "Win32_System_Threading",
-  "Win32_UI_Accessibility",
-  "Win32_UI_HiDpi",
-  "Win32_UI_Input_KeyboardAndMouse",
-  "Win32_UI_Shell",
-  "Win32_UI_Shell_Common",
-  "Win32_UI_WindowsAndMessaging",
-  "Win32_System_SystemServices",
-  "Win32_System_WindowsProgramming",
-  "Media",
-  "Media_Control",
+    "Foundation_Numerics",
+    "Win32_Devices",
+    "Win32_Devices_Display",
+    "Win32_System_Com",
+    "Win32_UI_Shell_Common",           # for IObjectArray
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Power",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+    "Win32_UI_Accessibility",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_SystemServices",
+    "Win32_System_WindowsProgramming",
+    "Media",
+    "Media_Control",
 ]
 
 [profile.release-opt]
@@ -83,6 +83,21 @@ lto = true
 panic = "abort"
 codegen-units = 1
 strip = true
+
+[profile.dev-fast]
+inherits = "dev"
+opt-level = 1
+debug = 1
+incremental = true
+
+[profile.dev-fast.package."*"]
+opt-level = 3
+
+[profile.release-fast]
+inherits = "release"
+incremental = true
+codegen-units = 256
+debug = 1
 
 [workspace.metadata.crane]
 name = "komorebi-workspace"
