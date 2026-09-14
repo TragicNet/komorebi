@@ -17,12 +17,15 @@ use crate::DEFAULT_CONTAINER_PADDING;
 use crate::DEFAULT_WORKSPACE_PADDING;
 use crate::DefaultLayout;
 use crate::FloatingLayerBehaviour;
+use crate::LOWER_IGNORED_WINDOWS_ON_FOCUS;
 use crate::Layout;
 use crate::OperationDirection;
 use crate::Wallpaper;
+use crate::Window;
 use crate::WindowsApi;
 use crate::container::Container;
 use crate::ring::Ring;
+use crate::windows_callbacks;
 use crate::workspace::Workspace;
 use crate::workspace::WorkspaceGlobals;
 use crate::workspace::WorkspaceLayer;
@@ -183,7 +186,103 @@ impl Monitor {
             }
         }
 
+        // Demote ignored windows (e.g. fullscreen borderless windows or desktop
+        // widgets) on this monitor below the managed windows of the newly focused
+        // workspace so that they never visually occlude the tiling or floating
+        // base layer. Skipped when the ignored windows have been manually raised
+        // above managed or there are no managed windows to cover.
+        self.lower_ignored_windows_on_focus()?;
+
         Ok(())
+    }
+
+    /// Enumerates the ignored (unmanaged) windows currently visible on this
+    /// monitor that look like regular application windows, fullscreen coverage
+    /// windows or desktop widgets. System shell surfaces (taskbar, desktop) and
+    /// tool/dialog windows are excluded so that they are never moved by the
+    /// ignored window layer.
+    #[tracing::instrument(skip(self))]
+    pub fn ignored_windows(&self) -> Vec<Window> {
+        let mut windows: Vec<Window> = vec![];
+        if WindowsApi::enum_windows(
+            Some(windows_callbacks::enum_ignored_window),
+            &mut windows as *mut Vec<Window> as isize,
+        )
+        .is_err()
+        {
+            tracing::warn!("could not enumerate ignored windows");
+            return vec![];
+        }
+
+        let monitor_id = self.id;
+
+        windows
+            .into_iter()
+            .filter(|window| {
+                if WindowsApi::monitor_from_window(window.hwnd) != monitor_id {
+                    return false;
+                }
+
+                let is_normal = window.is_normal_application_window();
+                let is_fullscreen = !is_normal && window.is_fullscreen();
+                let is_widget = !is_normal && !is_fullscreen && window.is_widget_window();
+
+                if is_normal || is_fullscreen || is_widget {
+                    tracing::debug!(
+                        hwnd = window.hwnd,
+                        exe = window.exe().unwrap_or_default(),
+                        title = window.title().unwrap_or_default(),
+                        is_normal_application_window = is_normal,
+                        is_fullscreen = is_fullscreen,
+                        is_widget_window = is_widget,
+                        "ignored window layer candidate on monitor"
+                    );
+                }
+
+                is_normal || is_fullscreen || is_widget
+            })
+            .collect()
+    }
+
+    /// Lower every ignored window on this monitor below the managed windows, so
+    /// that unmanaged windows (e.g. desktop widgets or fullscreen games) never
+    /// visually occlude the tiling or floating base layer.
+    pub fn lower_ignored_windows(&self) -> eyre::Result<()> {
+        for window in self.ignored_windows() {
+            if let Err(error) = window.lower() {
+                tracing::warn!(
+                    hwnd = window.hwnd,
+                    exe = window.exe().unwrap_or_default(),
+                    title = window.title().unwrap_or_default(),
+                    "could not lower ignored window: {error}"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// When `LOWER_IGNORED_WINDOWS_ON_FOCUS` is enabled, lower ignored windows
+    /// on this monitor below the managed windows of the newly focused workspace.
+    /// This prevents unmanaged fullscreen windows (e.g. games) and desktop
+    /// widgets from occluding tiled windows when switching workspaces.
+    ///
+    /// Lowering is skipped for empty workspaces so that focusing a workspace
+    /// without any managed windows still shows the ignored windows on top, and
+    /// it respects the manual `ignored_windows_above_managed` layer toggle.
+    fn lower_ignored_windows_on_focus(&self) -> eyre::Result<()> {
+        if !LOWER_IGNORED_WINDOWS_ON_FOCUS.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        let Some(workspace) = self.focused_workspace() else {
+            return Ok(());
+        };
+        if workspace.is_empty() || workspace.ignored_windows_above_managed {
+            return Ok(());
+        }
+
+        self.lower_ignored_windows()
     }
 
     /// Updates the `globals` field of all workspaces

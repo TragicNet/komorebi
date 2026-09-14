@@ -47,7 +47,6 @@ use crate::CrossBoundaryBehaviour;
 use crate::DATA_DIR;
 use crate::FLOATING_APPLICATIONS;
 use crate::HOME_DIR;
-use crate::LOWER_IGNORED_WINDOWS_ON_FOCUS;
 use crate::NO_TITLEBAR;
 use crate::REGEX_IDENTIFIERS;
 use crate::SUBSCRIPTION_SOCKETS;
@@ -1653,34 +1652,13 @@ impl WindowManager {
     /// Enumerates the ignored (unmanaged) windows currently visible on the focused
     /// monitor that look like regular application windows or desktop widgets.
     /// System shell surfaces (taskbar, desktop) and tool/dialog windows are
-    /// excluded so that they are never moved by the ignored window layer toggle.
+    /// excluded so that they are never moved by the ignored window layer.
     #[tracing::instrument(skip(self))]
     pub fn ignored_windows(&self) -> Vec<Window> {
-        let mut windows: Vec<Window> = vec![];
-        if WindowsApi::enum_windows(
-            Some(windows_callbacks::enum_ignored_window),
-            &mut windows as *mut Vec<Window> as isize,
-        )
-        .is_err()
-        {
-            tracing::warn!("could not enumerate ignored windows");
-            return vec![];
+        match self.focused_monitor() {
+            Some(monitor) => monitor.ignored_windows(),
+            None => vec![],
         }
-
-        let focused_monitor_id = match self.focused_monitor() {
-            Some(monitor) => monitor.id,
-            None => return vec![],
-        };
-
-        windows
-            .into_iter()
-            .filter(|window| {
-                WindowsApi::monitor_from_window(window.hwnd) == focused_monitor_id
-                    && (window.is_normal_application_window()
-                        || window.is_fullscreen()
-                        || window.is_widget_window())
-            })
-            .collect()
     }
 
     /// Check for an existing wallpaper definition on the workspace/monitor index pair and apply it
@@ -2914,7 +2892,13 @@ impl WindowManager {
 
         let current_idx = container.focused_window_idx();
         let next_idx = direction.next_idx(current_idx, len);
-        container.windows_mut().swap(current_idx, next_idx);
+
+        let window = container
+            .windows_mut()
+            .remove(current_idx)
+            .ok_or_eyre("there is no window at the focused index")?;
+
+        container.insert_window_at_idx(next_idx, window);
 
         container.focus_window(next_idx);
         container.load_focused_window();
@@ -4318,8 +4302,6 @@ impl WindowManager {
 
         self.update_focused_workspace(false, true)?;
 
-        self.lower_ignored_windows_on_focus()?;
-
         Ok(())
     }
 
@@ -4327,32 +4309,11 @@ impl WindowManager {
     /// windows, so that unmanaged windows (e.g. desktop widgets or fullscreen
     /// games) never visually occlude the tiling or floating base layer.
     pub fn lower_ignored_windows(&self) -> eyre::Result<()> {
-        for window in self.ignored_windows() {
-            window.lower()?;
-        }
+        let monitor = self
+            .focused_monitor()
+            .ok_or_eyre("there is no focused monitor")?;
 
-        Ok(())
-    }
-
-    /// When `LOWER_IGNORED_WINDOWS_ON_FOCUS` is enabled, lower ignored windows
-    /// on the focused monitor below the managed windows of the newly focused
-    /// workspace. This prevents unmanaged fullscreen windows (e.g. games) from
-    /// occluding tiled windows when switching workspaces.
-    ///
-    /// Lowering is skipped for empty workspaces so that focusing a workspace
-    /// without any managed windows still shows the ignored windows on top, and
-    /// it respects the manual `ignored_windows_above_managed` layer toggle.
-    fn lower_ignored_windows_on_focus(&self) -> eyre::Result<()> {
-        if !LOWER_IGNORED_WINDOWS_ON_FOCUS.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-
-        let workspace = self.focused_workspace()?;
-        if workspace.is_empty() || workspace.ignored_windows_above_managed {
-            return Ok(());
-        }
-
-        self.lower_ignored_windows()
+        monitor.lower_ignored_windows()
     }
 
     #[tracing::instrument(skip(self))]
@@ -5476,38 +5437,41 @@ mod tests {
             wm.monitors_mut().push_back(m);
         }
 
-        // Cycle to the next window
-        wm.cycle_container_window_index_in_direction(CycleDirection::Next)
-            .ok();
-
-        {
-            // Should be on Window 1
+        fn assert_stack_state(wm: &mut crate::WindowManager, expected: &[isize], focused: usize) {
             let workspace = wm.focused_workspace_mut().unwrap();
             let container = workspace.focused_container_mut().unwrap();
-            assert_eq!(container.focused_window_idx(), 1);
+            let order: Vec<isize> = container.windows().iter().map(|w| w.hwnd).collect();
+            assert_eq!(order, expected);
+            assert_eq!(container.focused_window_idx(), focused);
         }
 
-        // Cycle to the next window
+        // Moving next should move only the focused window one index and focus it
         wm.cycle_container_window_index_in_direction(CycleDirection::Next)
             .ok();
+        assert_stack_state(&mut wm, &[1, 0, 2], 1);
 
-        {
-            // Should be on Window 2
-            let workspace = wm.focused_workspace_mut().unwrap();
-            let container = workspace.focused_container_mut().unwrap();
-            assert_eq!(container.focused_window_idx(), 2);
-        }
+        wm.cycle_container_window_index_in_direction(CycleDirection::Next)
+            .ok();
+        assert_stack_state(&mut wm, &[1, 2, 0], 2);
 
-        // Cycle to the Previous window
+        // Moving previous should move only the focused window one index and focus it
         wm.cycle_container_window_index_in_direction(CycleDirection::Previous)
             .ok();
+        assert_stack_state(&mut wm, &[1, 0, 2], 1);
 
-        {
-            // Should be on Window 1
-            let workspace = wm.focused_workspace_mut().unwrap();
-            let container = workspace.focused_container_mut().unwrap();
-            assert_eq!(container.focused_window_idx(), 1);
-        }
+        wm.cycle_container_window_index_in_direction(CycleDirection::Previous)
+            .ok();
+        assert_stack_state(&mut wm, &[0, 1, 2], 0);
+
+        // Moving previous from the front should wrap to the back without scrambling the ring
+        wm.cycle_container_window_index_in_direction(CycleDirection::Previous)
+            .ok();
+        assert_stack_state(&mut wm, &[1, 2, 0], 2);
+
+        // Moving next from the back should wrap to the front without scrambling the ring
+        wm.cycle_container_window_index_in_direction(CycleDirection::Next)
+            .ok();
+        assert_stack_state(&mut wm, &[0, 1, 2], 0);
     }
 
     #[test]

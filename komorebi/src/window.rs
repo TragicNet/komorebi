@@ -1118,8 +1118,8 @@ impl Window {
         };
         let window_left = window_rect.left;
         let window_top = window_rect.top;
-        let window_right = window_left + window_rect.right;
-        let window_bottom = window_top + window_rect.bottom;
+        let window_right = window_rect.right;
+        let window_bottom = window_rect.bottom;
 
         window_left <= monitor_rect.left + EDGE_TOLERANCE
             && window_top <= monitor_rect.top + EDGE_TOLERANCE
