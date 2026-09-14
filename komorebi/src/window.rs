@@ -63,6 +63,7 @@ use std::time::Duration;
 use strum::Display;
 use strum::EnumString;
 use windows::Win32::Foundation::HWND;
+use windows::Win32::Graphics::Gdi::HMONITOR;
 
 pub static MINIMUM_WIDTH: AtomicI32 = AtomicI32::new(0);
 pub static MINIMUM_HEIGHT: AtomicI32 = AtomicI32::new(0);
@@ -1078,6 +1079,52 @@ impl Window {
         } else {
             false
         }
+    }
+
+    /// Checks whether this window looks like a desktop widget or meter, i.e. a
+    /// layered toolwindow popup without a caption or window edge (e.g. Rainmeter
+    /// meters). Such windows are unmanaged and hover on top of the desktop, so
+    /// they need to be considered by the ignored window layer to prevent them
+    /// from visually occluding tiled windows.
+    pub fn is_widget_window(self) -> bool {
+        if let (Ok(style), Ok(ex_style)) = (self.style(), self.ex_style()) {
+            !style.contains(WindowStyle::CAPTION)
+                && ex_style.contains(ExtendedWindowStyle::LAYERED)
+                && ex_style.contains(ExtendedWindowStyle::TOOLWINDOW)
+        } else {
+            false
+        }
+    }
+
+    /// Checks whether this window covers the entire monitor it is displayed on,
+    /// within a small pixel tolerance. Fullscreen borderless windows (common for
+    /// games) typically drop the caption and window edge styles while still
+    /// covering the whole monitor, so they fail `is_normal_application_window`
+    /// even though they visibly occlude the desktop. Used to include such
+    /// windows in the ignored window layer.
+    pub fn is_fullscreen(self) -> bool {
+        const EDGE_TOLERANCE: i32 = 8;
+
+        let hmonitor = HMONITOR(windows_api::as_ptr!(WindowsApi::monitor_from_window(
+            self.hwnd
+        )));
+        let Ok(monitor_info) = WindowsApi::monitor_info_w(hmonitor) else {
+            return false;
+        };
+        let monitor_rect = monitor_info.monitorInfo.rcMonitor;
+
+        let Ok(window_rect) = WindowsApi::window_rect(self.hwnd) else {
+            return false;
+        };
+        let window_left = window_rect.left;
+        let window_top = window_rect.top;
+        let window_right = window_left + window_rect.right;
+        let window_bottom = window_top + window_rect.bottom;
+
+        window_left <= monitor_rect.left + EDGE_TOLERANCE
+            && window_top <= monitor_rect.top + EDGE_TOLERANCE
+            && window_right >= monitor_rect.right - EDGE_TOLERANCE
+            && window_bottom >= monitor_rect.bottom - EDGE_TOLERANCE
     }
 
     #[tracing::instrument(fields(exe, title), skip(debug))]

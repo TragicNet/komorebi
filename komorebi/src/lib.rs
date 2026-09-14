@@ -257,6 +257,8 @@ pub static SESSION_ID: AtomicU32 = AtomicU32::new(0);
 
 pub static REMOVE_TITLEBARS: AtomicBool = AtomicBool::new(false);
 
+pub static LOWER_IGNORED_WINDOWS_ON_FOCUS: AtomicBool = AtomicBool::new(false);
+
 pub static SLOW_APPLICATION_COMPENSATION_TIME: AtomicU64 = AtomicU64::new(20);
 
 pub static WINDOW_HANDLING_BEHAVIOUR: AtomicCell<WindowHandlingBehaviour> =

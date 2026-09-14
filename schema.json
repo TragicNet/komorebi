@@ -143,6 +143,14 @@
       ],
       "default": "Swap"
     },
+    "cycle_focus_across_monitors": {
+      "description": "Allow CycleFocusWindow to cross monitor boundaries when reaching the first or last tiled\nwindow. Workspaces in floating mode or with a monocle container are skipped.",
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "default": false
+    },
     "default_container_padding": {
       "description": "Global default container padding",
       "type": [
@@ -261,6 +269,14 @@
       ],
       "deprecated": true
     },
+    "focus_new_windows": {
+      "description": "Focus new windows immediately when they are added to a workspace",
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "default": false
+    },
     "global_work_area_offset": {
       "description": "Global work area (space used for tiling) offset",
       "anyOf": [
@@ -294,6 +310,14 @@
       ],
       "deprecated": true
     },
+    "keep_monocle_on_window_close": {
+      "description": "Keep monocle mode active when a window is closed and there are still windows remaining",
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "default": true
+    },
     "layered_applications": {
       "description": "Identify applications that have the `WS_EX_LAYERED` extended window style",
       "type": [
@@ -313,6 +337,14 @@
       "additionalProperties": {
         "$ref": "#/$defs/LayoutDefaultEntry"
       }
+    },
+    "lower_ignored_windows_on_focus": {
+      "description": "Whether to lower ignored windows below managed windows when focusing a\nworkspace. Enabled windows like fullscreen borderless games will no\nlonger occlude tiled windows when switching workspaces.",
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "default": false
     },
     "manage_rules": {
       "description": "Individual window force-manage rules",
@@ -362,6 +394,18 @@
       "items": {
         "$ref": "#/$defs/MonitorConfig"
       }
+    },
+    "monocle_focus_behaviour": {
+      "description": "Determine what happens when focusing in a direction while a monocle container is active",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MonocleFocusBehaviour"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "NoOp"
     },
     "mouse_follows_focus": {
       "description": "Enable or disable mouse follows focus",
@@ -784,7 +828,7 @@
             "boolean",
             "null"
           ],
-          "default": true
+          "default": false
         },
         "style": {
           "description": "Set the animation style",
@@ -3555,6 +3599,21 @@
       },
       "required": [
         "workspaces"
+      ]
+    },
+    "MonocleFocusBehaviour": {
+      "description": "Behaviour when focusing in a direction while a monocle container is active",
+      "oneOf": [
+        {
+          "description": "Cycle the monocle container to the next/previous container in the workspace",
+          "type": "string",
+          "const": "Cycle"
+        },
+        {
+          "description": "Do nothing, allowing focus to fall through to cross-monitor logic",
+          "type": "string",
+          "const": "NoOp"
+        }
       ]
     },
     "MoveBehaviour": {

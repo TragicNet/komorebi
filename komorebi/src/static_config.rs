@@ -17,6 +17,7 @@ use crate::HIDING_BEHAVIOUR;
 use crate::IGNORE_IDENTIFIERS;
 use crate::LAYERED_WHITELIST;
 use crate::LAYOUT_DEFAULTS;
+use crate::LOWER_IGNORED_WINDOWS_ON_FOCUS;
 use crate::MANAGE_IDENTIFIERS;
 use crate::MONITOR_INDEX_PREFERENCES;
 use crate::NO_TITLEBAR;
@@ -701,6 +702,12 @@ pub struct StaticConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = WindowHandlingBehaviour::Sync)))]
     pub window_handling_behaviour: Option<WindowHandlingBehaviour>,
+    /// Whether to lower ignored windows below managed windows when focusing a
+    /// workspace. Enabled windows like fullscreen borderless games will no
+    /// longer occlude tiled windows when switching workspaces.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(extend("default" = LOWER_IGNORED_WINDOWS_ON_FOCUS)))]
+    pub lower_ignored_windows_on_focus: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -986,6 +993,9 @@ impl From<&WindowManager> for StaticConfig {
             remove_titlebar_applications: Option::from(NO_TITLEBAR.lock().clone()),
             floating_window_aspect_ratio: Option::from(*FLOATING_WINDOW_TOGGLE_ASPECT_RATIO.lock()),
             window_handling_behaviour: Option::from(WINDOW_HANDLING_BEHAVIOUR.load()),
+            lower_ignored_windows_on_focus: Option::from(
+                LOWER_IGNORED_WINDOWS_ON_FOCUS.load(Ordering::SeqCst),
+            ),
         }
     }
 }
@@ -1386,6 +1396,11 @@ impl StaticConfig {
         WINDOW_HANDLING_BEHAVIOUR.store(
             self.window_handling_behaviour
                 .unwrap_or(WindowHandlingBehaviour::Sync),
+        );
+
+        LOWER_IGNORED_WINDOWS_ON_FOCUS.store(
+            self.lower_ignored_windows_on_focus.unwrap_or(false),
+            Ordering::SeqCst,
         );
 
         Ok(())

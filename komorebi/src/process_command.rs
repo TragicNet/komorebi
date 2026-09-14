@@ -1374,6 +1374,13 @@ impl WindowManager {
 
                 let workspace = self.focused_workspace_mut()?;
 
+                // When toggling the workspace layer, demote any ignored windows
+                // (e.g. desktop widgets) so they never sit above the tiled base
+                // layer. Skipped when the ignored windows have been manually
+                // raised above managed or there are no managed windows to cover.
+                let must_lower_ignored =
+                    !workspace.ignored_windows_above_managed && !workspace.is_empty();
+
                 match workspace.layer {
                     WorkspaceLayer::Tiling => {
                         tracing::info!(
@@ -1489,6 +1496,11 @@ impl WindowManager {
                         );
                     }
                 };
+
+                if must_lower_ignored {
+                    tracing::info!("lowering ignored windows below managed windows");
+                    self.lower_ignored_windows()?;
+                }
             }
             SocketMessage::ToggleIgnoredWindowLayer => {
                 let ignored_windows = self.ignored_windows();
