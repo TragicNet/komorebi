@@ -94,6 +94,10 @@ pub struct Workspace {
     #[serde(skip)]
     pub globals: WorkspaceGlobals,
     pub layer: WorkspaceLayer,
+    /// When true, ignored/unmanaged windows on this workspace's monitor are raised
+    /// above managed windows; when false they are lowered below the base layer.
+    #[serde(default)]
+    pub ignored_windows_above_managed: bool,
     pub floating_layer_behaviour: Option<FloatingLayerBehaviour>,
     pub wallpaper: Option<Wallpaper>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -164,6 +168,7 @@ impl Default for Workspace {
             window_container_behaviour_rules: None,
             float_override: None,
             layer: Default::default(),
+            ignored_windows_above_managed: false,
             floating_layer_behaviour: Default::default(),
             globals: Default::default(),
             workspace_config: None,

@@ -1382,6 +1382,9 @@ impl WindowManager {
 
                         workspace.layer = WorkspaceLayer::Floating;
 
+                        // Show the floating overlay on top of the intact base layer. The base
+                        // (tiling) layer is never lowered or hidden, so it remains fully
+                        // visible underneath the raised floating windows.
                         let focused_idx = workspace.focused_floating_window_idx();
                         let mut window_idx_pairs = workspace
                             .floating_windows_mut()
@@ -1414,30 +1417,18 @@ impl WindowManager {
                             focused_window.raise()?;
                         }
 
-                        // Focus the floating window before lowering tiling windows so that
-                        // managed windows no longer have keyboard focus when lowered. This
-                        // prevents Windows from auto-focusing another visible managed window
-                        // during the lower operation, which would generate a spurious
-                        // FocusChange event that could change the container's focused window
-                        // index (cycle-stack) and undo the layer toggle.
                         // If there are no floating windows to focus, focus the desktop
-                        // instead so that lowering does not trigger an auto-focus.
+                        // instead so that lowering the monocle window does not trigger an
+                        // auto-focus.
                         if let Some(window) = to_focus {
                             window.focus(mouse_follows_focus)?;
                         } else {
                             WindowsApi::raise_and_focus_window(WindowsApi::desktop_window()?)?;
                         }
 
-                        for container in workspace.containers() {
-                            if let Some(window) = container.focused_window() {
-                                tracing::info!(
-                                    hwnd = window.hwnd,
-                                    "Tiling->Floating: lowering focused container window",
-                                );
-                                window.lower()?;
-                            }
-                        }
-
+                        // Only the monocle window (fullscreen) needs to be lowered so the
+                        // floating overlay can sit above it; every other base window keeps its
+                        // position.
                         if let Some(monocle) = &workspace.monocle_container
                             && let Some(window) = monocle.focused_window()
                         {
@@ -1447,77 +1438,88 @@ impl WindowManager {
                             );
                             window.lower()?;
                         }
-
-                        let container_windows = workspace
-                            .containers()
-                            .iter()
-                            .flat_map(|c| c.windows())
-                            .count();
-                        let floating_count = workspace.floating_windows().len();
-                        tracing::info!(
-                            container_windows,
-                            floating_count,
-                            "Tiling->Floating: post-toggle workspace state",
-                        );
                     }
                     WorkspaceLayer::Floating => {
                         workspace.layer = WorkspaceLayer::Tiling;
 
+                        // The base layer was never moved during the toggle, so it needs no
+                        // restoration. Focus the tiling window before lowering the floating
+                        // overlay so that managed windows no longer have keyboard focus while
+                        // the lowers are performed. This prevents Windows from auto-focusing
+                        // and reverting the layer.
                         if let Some(monocle) = &workspace.monocle_container {
-                            let mut to_focus = None;
                             if let Some(window) = monocle.focused_window() {
-                                to_focus = Some(*window);
                                 window.raise()?;
-                            }
-
-                            // Focus the tiling window before hiding floating windows
-                            if let Some(window) = to_focus {
                                 window.focus(mouse_follows_focus)?;
                             }
-
-                            for window in workspace.floating_windows() {
-                                window.hide();
-                            }
-                        } else {
-                            let focused_container_idx = workspace.focused_container_idx();
-                            let mut to_focus = None;
-                            for (i, container) in workspace.containers_mut().iter_mut().enumerate()
-                            {
-                                if let Some(window) = container.focused_window() {
-                                    if i == focused_container_idx {
-                                        to_focus = Some(*window);
-                                    }
-                                    window.raise()?;
-                                }
-                            }
-
-                            for container in workspace.containers_mut().iter_mut() {
-                                container.load_focused_window();
-                            }
-
-                            // Focus the tiling window before lowering floating windows
-                            if let Some(window) = to_focus {
-                                window.focus(mouse_follows_focus)?;
-                            }
-
-                            let mut window_idx_pairs = workspace
-                                .floating_windows_mut()
-                                .make_contiguous()
-                                .iter()
-                                .collect::<Vec<_>>();
-
-                            // Sort by window area
-                            window_idx_pairs.sort_by_key(|w| {
-                                let rect = WindowsApi::window_rect(w.hwnd).unwrap_or_default();
-                                rect.right * rect.bottom
-                            });
-
-                            for window in window_idx_pairs {
-                                window.lower()?;
-                            }
+                        } else if let Some(window) = workspace
+                            .focused_container()
+                            .and_then(|container| container.focused_window())
+                        {
+                            window.focus(mouse_follows_focus)?;
                         }
+
+                        // Lower the floating windows below the intact base layer. Sorting by
+                        // area means the largest floating windows end up on the bottom of the
+                        // z-order.
+                        let mut window_idx_pairs = workspace
+                            .floating_windows_mut()
+                            .make_contiguous()
+                            .iter()
+                            .collect::<Vec<_>>();
+
+                        // Sort by window area
+                        window_idx_pairs.sort_by_key(|w| {
+                            let rect = WindowsApi::window_rect(w.hwnd).unwrap_or_default();
+                            rect.right * rect.bottom
+                        });
+
+                        for window in window_idx_pairs {
+                            window.lower()?;
+                        }
+
+                        tracing::info!(
+                            container_windows = workspace
+                                .containers()
+                                .iter()
+                                .flat_map(|c| c.windows())
+                                .count(),
+                            floating_count = workspace.floating_windows().len(),
+                            "Floating->Tiling: post-toggle workspace state",
+                        );
                     }
                 };
+            }
+            SocketMessage::ToggleIgnoredWindowLayer => {
+                let ignored_windows = self.ignored_windows();
+                let workspace = self.focused_workspace_mut()?;
+
+                workspace.ignored_windows_above_managed = !workspace.ignored_windows_above_managed;
+
+                if workspace.ignored_windows_above_managed {
+                    tracing::info!(
+                        ignored_windows = ignored_windows.len(),
+                        "raising ignored windows above managed windows"
+                    );
+                    // EnumWindows enumerates in top-to-bottom z-order; raising bottom-to-top
+                    // preserves each ignored window's relative stacking with the current
+                    // topmost window ending up on top.
+                    for window in ignored_windows.iter().rev() {
+                        window.restore();
+                        window.raise()?;
+                    }
+                } else {
+                    tracing::info!(
+                        ignored_windows = ignored_windows.len(),
+                        "lowering ignored windows below managed windows"
+                    );
+                    // Lowering top-to-bottom moves each window to the very bottom, ending
+                    // with all ignored windows below the base layer in their original
+                    // relative order.
+                    for window in ignored_windows {
+                        window.lower()?;
+                    }
+                }
             }
             SocketMessage::Stop => {
                 self.stop(false)?;

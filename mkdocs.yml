@@ -202,6 +202,7 @@ nav:
       - cli/toggle-workspace-window-container-behaviour.md
       - cli/toggle-workspace-float-override.md
       - cli/toggle-workspace-layer.md
+      - cli/toggle-ignored-window-layer.md
       - cli/toggle-pause.md
       - cli/toggle-tiling.md
       - cli/toggle-float.md

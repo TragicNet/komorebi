@@ -191,6 +191,7 @@ pub enum SocketMessage {
     ClearWorkspaceLayoutRules(usize, usize),
     ClearNamedWorkspaceLayoutRules(String),
     ToggleWorkspaceLayer,
+    ToggleIgnoredWindowLayer,
     // Configuration
     ReloadConfiguration,
     ReplaceConfiguration(#[serde_as(as = "ResolvedPathBuf")] PathBuf),

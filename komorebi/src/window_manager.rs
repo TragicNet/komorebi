@@ -1649,6 +1649,37 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Enumerates the ignored (unmanaged) windows currently visible on the focused
+    /// monitor that look like regular application windows. System shell surfaces
+    /// (taskbar, desktop) and tool/dialog windows are excluded so that they are
+    /// never moved by the ignored window layer toggle.
+    #[tracing::instrument(skip(self))]
+    pub fn ignored_windows(&self) -> Vec<Window> {
+        let mut windows: Vec<Window> = vec![];
+        if WindowsApi::enum_windows(
+            Some(windows_callbacks::enum_ignored_window),
+            &mut windows as *mut Vec<Window> as isize,
+        )
+        .is_err()
+        {
+            tracing::warn!("could not enumerate ignored windows");
+            return vec![];
+        }
+
+        let focused_monitor_id = match self.focused_monitor() {
+            Some(monitor) => monitor.id,
+            None => return vec![],
+        };
+
+        windows
+            .into_iter()
+            .filter(|window| {
+                WindowsApi::monitor_from_window(window.hwnd) == focused_monitor_id
+                    && window.is_normal_application_window()
+            })
+            .collect()
+    }
+
     /// Check for an existing wallpaper definition on the workspace/monitor index pair and apply it
     /// if it exists
     #[tracing::instrument(skip(self))]

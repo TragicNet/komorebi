@@ -277,6 +277,7 @@ impl From<&WindowManager> for State {
                                 .clone(),
                             float_override: workspace.float_override,
                             layer: workspace.layer,
+                            ignored_windows_above_managed: workspace.ignored_windows_above_managed,
                             floating_layer_behaviour: workspace.floating_layer_behaviour,
                             globals: workspace.globals,
                             wallpaper: workspace.wallpaper.clone(),

@@ -1400,6 +1400,9 @@ enum SubCommand {
     ToggleWorkspaceFloatOverride,
     /// Toggle between the Tiling and Floating layers on the focused workspace
     ToggleWorkspaceLayer,
+    /// Toggle ignored (unmanaged) windows on the focused monitor above or below the managed
+    /// windows
+    ToggleIgnoredWindowLayer,
     /// Toggle the paused state for all window tiling
     TogglePause,
     /// Toggle window tiling on the focused workspace
@@ -3300,6 +3303,9 @@ if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
         }
         SubCommand::ToggleWorkspaceLayer => {
             send_message(&SocketMessage::ToggleWorkspaceLayer)?;
+        }
+        SubCommand::ToggleIgnoredWindowLayer => {
+            send_message(&SocketMessage::ToggleIgnoredWindowLayer)?;
         }
         SubCommand::WindowHidingBehaviour(args) => {
             send_message(&SocketMessage::WindowHidingBehaviour(args.hiding_behaviour))?;

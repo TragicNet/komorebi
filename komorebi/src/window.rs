@@ -1066,6 +1066,20 @@ impl Window {
         Ok(())
     }
 
+    /// Checks whether this window looks like a regular application window
+    /// (caption + window edge, not a tool/dialog frame window). Used to filter the
+    /// ignored windows that are eligible to be moved by the ignored window layer.
+    pub fn is_normal_application_window(self) -> bool {
+        if let (Ok(style), Ok(ex_style)) = (self.style(), self.ex_style()) {
+            style.contains(WindowStyle::CAPTION)
+                && ex_style.contains(ExtendedWindowStyle::WINDOWEDGE)
+                && !ex_style.contains(ExtendedWindowStyle::DLGMODALFRAME)
+                && !ex_style.contains(ExtendedWindowStyle::TOOLWINDOW)
+        } else {
+            false
+        }
+    }
+
     #[tracing::instrument(fields(exe, title), skip(debug))]
     pub fn should_manage(
         self,
