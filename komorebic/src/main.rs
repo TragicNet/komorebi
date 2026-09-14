@@ -1487,6 +1487,8 @@ enum SubCommand {
     ClearAllWorkspaceRules,
     /// Enforce all workspace rules, including initial workspace rules that have already been applied
     EnforceWorkspaceRules,
+    /// Enforce all stack rules, grouping tiled windows into their configured stacks
+    EnforceStackRules,
     /// Identify an application that sends EVENT_OBJECT_NAMECHANGE on launch
     #[clap(arg_required_else_help = true)]
     IdentifyObjectNameChangeApplication(IdentifyObjectNameChangeApplication),
@@ -2977,6 +2979,9 @@ if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
         }
         SubCommand::EnforceWorkspaceRules => {
             send_message(&SocketMessage::EnforceWorkspaceRules)?;
+        }
+        SubCommand::EnforceStackRules => {
+            send_message(&SocketMessage::EnforceStackRules)?;
         }
         SubCommand::Stack(args) => {
             send_message(&SocketMessage::StackWindow(args.operation_direction))?;

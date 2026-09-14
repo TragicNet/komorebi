@@ -773,6 +773,30 @@ impl WindowManager {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self), level = "debug")]
+    pub fn enforce_stack_rules(&mut self) -> eyre::Result<()> {
+        let offset = self.work_area_offset;
+        let mut monitors_to_update = HashSet::new();
+
+        for (i, monitor) in self.monitors_mut().iter_mut().enumerate() {
+            for workspace in monitor.workspaces_mut() {
+                if !workspace.stack_rules.is_empty() {
+                    workspace.restack()?;
+                    monitors_to_update.insert(i);
+                }
+            }
+        }
+
+        for monitor_idx in monitors_to_update {
+            if let Some(monitor) = self.monitors_mut().get_mut(monitor_idx) {
+                monitor.load_focused_workspace(false, false)?;
+                monitor.update_focused_workspace(offset)?;
+            }
+        }
+
+        Ok(())
+    }
+
     #[tracing::instrument(skip(self))]
     pub fn retile_all(&mut self, preserve_resize_dimensions: bool) -> eyre::Result<()> {
         let offset = self.work_area_offset;

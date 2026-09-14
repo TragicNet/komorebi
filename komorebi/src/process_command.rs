@@ -563,6 +563,7 @@ impl WindowManager {
                 }
                 self.enforce_workspace_rules()?;
             }
+            SocketMessage::EnforceStackRules => self.enforce_stack_rules()?,
             SocketMessage::ManageRule(identifier, ref id) => {
                 let mut manage_identifiers = MANAGE_IDENTIFIERS.lock();
 

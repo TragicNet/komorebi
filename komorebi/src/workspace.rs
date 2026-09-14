@@ -30,6 +30,7 @@ use crate::core::LayoutDefaultEntry;
 use crate::core::LayoutOptions;
 use crate::core::OperationDirection;
 use crate::core::Rect;
+use crate::core::config_generation::MatchingRule;
 use crate::lockable_sequence::LockableSequence;
 use crate::ring::Ring;
 use crate::should_act;
@@ -43,6 +44,7 @@ use color_eyre::eyre;
 use color_eyre::eyre::OptionExt;
 use komorebi_themes::Base16ColourPalette;
 use komorebi_themes::KomorebiThemeCustom as Custom;
+use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
 use uds_windows::UnixStream;
@@ -90,6 +92,9 @@ pub struct Workspace {
     pub apply_window_based_work_area_offset: bool,
     pub window_container_behaviour: Option<WindowContainerBehaviour>,
     pub window_container_behaviour_rules: Option<Vec<(usize, WindowContainerBehaviour)>>,
+    /// Stack rules; each inner array defines a stack that matching windows are grouped into
+    #[serde(default)]
+    pub stack_rules: Vec<Vec<MatchingRule>>,
     pub float_override: Option<bool>,
     #[serde(skip)]
     pub globals: WorkspaceGlobals,
@@ -166,6 +171,7 @@ impl Default for Workspace {
             apply_window_based_work_area_offset: true,
             window_container_behaviour: None,
             window_container_behaviour_rules: None,
+            stack_rules: vec![],
             float_override: None,
             layer: Default::default(),
             ignored_windows_above_managed: false,
@@ -241,6 +247,30 @@ fn resolve_threshold_match(
         .rev()
         .find(|(threshold, _)| container_count >= *threshold)
         .map(|(_, opts)| *opts)
+}
+
+pub(crate) fn window_identifiers_match_stack(
+    title: &str,
+    exe_name: &str,
+    class: &str,
+    path: &str,
+    stack: &[MatchingRule],
+    regex_identifiers: &HashMap<String, Regex>,
+) -> bool {
+    should_act(title, exe_name, class, path, stack, regex_identifiers).is_some()
+}
+
+pub(crate) fn stack_idx_for_identifiers(
+    title: &str,
+    exe_name: &str,
+    class: &str,
+    path: &str,
+    stack_rules: &[Vec<MatchingRule>],
+    regex_identifiers: &HashMap<String, Regex>,
+) -> Option<usize> {
+    stack_rules.iter().position(|stack| {
+        window_identifiers_match_stack(title, exe_name, class, path, stack, regex_identifiers)
+    })
 }
 
 impl Workspace {
@@ -330,6 +360,9 @@ impl Workspace {
         }
 
         self.float_override = config.float_override;
+
+        self.stack_rules = config.stack_rules.clone().unwrap_or_default();
+
         self.layout_flip = config.layout_flip;
         self.floating_layer_behaviour = config.floating_layer_behaviour;
         self.wallpaper = config.wallpaper.clone();
@@ -1588,6 +1621,146 @@ impl Workspace {
         container.add_window(window);
 
         self.insert_container_at_idx(next_idx, container);
+    }
+
+    fn stack_idx_for_window(&self, window: &Window) -> Option<usize> {
+        let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) =
+            (window.title(), window.exe(), window.class(), window.path())
+        else {
+            return None;
+        };
+
+        let regex_identifiers = REGEX_IDENTIFIERS.lock();
+        stack_idx_for_identifiers(
+            &title,
+            &exe_name,
+            &class,
+            &path,
+            &self.stack_rules,
+            &regex_identifiers,
+        )
+    }
+
+    /// Returns the index of the container holding the most windows that match the given stack.
+    /// Ties favour the lowest index so that a stable stack home is chosen.
+    fn container_idx_for_stack(&self, stack_idx: usize) -> Option<usize> {
+        let stack = self.stack_rules.get(stack_idx)?;
+        let regex_identifiers = REGEX_IDENTIFIERS.lock();
+
+        let mut best: Option<(usize, usize)> = None;
+        for (idx, container) in self.containers().iter().enumerate() {
+            let matches = container
+                .windows()
+                .iter()
+                .filter(|w| {
+                    let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) = (
+                        w.title(),
+                        w.exe(),
+                        w.class(),
+                        w.path(),
+                    ) else {
+                        return false;
+                    };
+
+                    window_identifiers_match_stack(
+                        &title,
+                        &exe_name,
+                        &class,
+                        &path,
+                        stack,
+                        &regex_identifiers,
+                    )
+                })
+                .count();
+
+            if matches > 0 && best.is_none_or(|(_, count)| matches > count) {
+                best = Option::from((idx, matches));
+            }
+        }
+
+        best.map(|(idx, _)| idx)
+    }
+
+    pub fn container_idx_by_id(&self, id: &str) -> Option<usize> {
+        self.containers().iter().position(|c| c.id == id)
+    }
+
+    /// Groups tiled windows into stacks based on this workspace's `stack_rules`.
+    /// Each inner array of rules defines a stack; matching windows are moved into a single
+    /// container for that stack. Windows that match no rule keep their own container.
+    pub fn restack(&mut self) -> eyre::Result<()> {
+        if self.stack_rules.is_empty() || self.containers().is_empty() {
+            return Ok(());
+        }
+
+        let tiled_windows: Vec<(usize, Window)> = self
+            .containers()
+            .iter()
+            .enumerate()
+            .flat_map(|(idx, container)| container.windows().iter().map(move |w| (idx, *w)))
+            .collect();
+
+        // Map each matched stack index to its chosen home container id
+        let mut targets: HashMap<usize, String> = HashMap::new();
+        let mut ops: Vec<(isize, String, String)> = Vec::new();
+
+        for (origin_container_idx, window) in tiled_windows {
+            let Some(stack_idx) = self.stack_idx_for_window(&window) else {
+                continue;
+            };
+
+            let target_id = match targets.get(&stack_idx) {
+                Some(id) => id.clone(),
+                None => {
+                    let Some(target_idx) = self.container_idx_for_stack(stack_idx) else {
+                        continue;
+                    };
+                    let id = self.containers()[target_idx].id.clone();
+                    targets.insert(stack_idx, id.clone());
+                    id
+                }
+            };
+
+            let origin_id = self.containers()[origin_container_idx].id.clone();
+            if origin_id != target_id {
+                ops.push((window.hwnd, origin_id, target_id));
+            }
+        }
+
+        for (hwnd, origin_id, target_id) in ops {
+            let Some(origin_idx) = self.container_idx_by_id(&origin_id) else {
+                tracing::warn!(hwnd, "origin container for restack not found");
+                continue;
+            };
+
+            if !self.containers()[origin_idx].contains_window(hwnd) {
+                continue;
+            }
+
+            let window_idx = self.containers()[origin_idx]
+                .idx_for_window(hwnd)
+                .expect("window should be present in origin container");
+            let window = self.containers_mut()[origin_idx]
+                .remove_window_by_idx(window_idx)
+                .expect("window should be present in origin container");
+
+            if self.containers()[origin_idx].windows().is_empty() {
+                self.remove_container_by_idx(origin_idx);
+            }
+
+            let Some(target_idx) = self.container_idx_by_id(&target_id) else {
+                tracing::warn!(hwnd, "target container for restack not found; creating a new container");
+                let mut container = Container::default();
+                container.add_window(window);
+                self.insert_container_at_idx(origin_idx.min(self.containers().len()), container);
+                continue;
+            };
+
+            self.containers_mut()[target_idx].add_window(window);
+            self.focus_container(target_idx);
+        }
+
+        Ok(())
     }
 
     pub fn new_floating_window(&mut self) -> eyre::Result<()> {
@@ -3176,5 +3349,193 @@ mod tests {
                 .map(|window| window.hwnd),
             Some(2)
         );
+    }
+
+    fn simple_rule(
+        kind: crate::core::ApplicationIdentifier,
+        id: &str,
+        strategy: crate::core::config_generation::MatchingStrategy,
+    ) -> MatchingRule {
+        MatchingRule::Simple(crate::core::config_generation::IdWithIdentifier {
+            kind,
+            id: id.to_string(),
+            matching_strategy: Some(strategy),
+        })
+    }
+
+    #[test]
+    fn test_stack_idx_for_identifiers_exe_basic() {
+        let stack_rules = vec![vec![
+            simple_rule(
+                crate::core::ApplicationIdentifier::Exe,
+                "firefox.exe",
+                crate::core::config_generation::MatchingStrategy::Equals,
+            ),
+            simple_rule(
+                crate::core::ApplicationIdentifier::Exe,
+                "chrome.exe",
+                crate::core::config_generation::MatchingStrategy::Equals,
+            ),
+        ]];
+        let regex_identifiers = HashMap::new();
+
+        assert_eq!(
+            stack_idx_for_identifiers(
+                "Firefox",
+                "firefox.exe",
+                "MozillaWindowClass",
+                "C:\\Program Files\\Firefox\\firefox.exe",
+                &stack_rules,
+                &regex_identifiers,
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            stack_idx_for_identifiers(
+                "Chrome",
+                "chrome.exe",
+                "Chrome_WidgetWin_1",
+                "C:\\Program Files\\Google\\Chrome\\chrome.exe",
+                &stack_rules,
+                &regex_identifiers,
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            stack_idx_for_identifiers(
+                "Notepad",
+                "notepad.exe",
+                "Notepad",
+                "C:\\Windows\\notepad.exe",
+                &stack_rules,
+                &regex_identifiers,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_stack_idx_for_identifiers_any_rule_in_stack() {
+        let stack_rules = vec![vec![
+            simple_rule(
+                crate::core::ApplicationIdentifier::Exe,
+                "firefox.exe",
+                crate::core::config_generation::MatchingStrategy::Equals,
+            ),
+            simple_rule(
+                crate::core::ApplicationIdentifier::Title,
+                "Mozilla Firefox",
+                crate::core::config_generation::MatchingStrategy::Contains,
+            ),
+        ]];
+        let regex_identifiers = HashMap::new();
+
+        let by_exe = stack_idx_for_identifiers(
+            "Some window",
+            "firefox.exe",
+            "MozillaWindowClass",
+            "",
+            &stack_rules,
+            &regex_identifiers,
+        );
+        let by_title = stack_idx_for_identifiers(
+            "This is a Mozilla Firefox window",
+            "other.exe",
+            "OtherClass",
+            "",
+            &stack_rules,
+            &regex_identifiers,
+        );
+
+        assert_eq!(by_exe, Some(0));
+        assert_eq!(by_title, Some(0));
+    }
+
+    #[test]
+    fn test_stack_idx_for_identifiers_regex_title() {
+        let pattern = "^Terminal - .*";
+        let stack_rules = vec![vec![simple_rule(
+            crate::core::ApplicationIdentifier::Title,
+            pattern,
+            crate::core::config_generation::MatchingStrategy::Regex,
+        )]];
+        let regex_identifiers =
+            HashMap::from([(pattern.to_string(), Regex::new(pattern).unwrap())]);
+
+        let matches = stack_idx_for_identifiers(
+            "Terminal - komorebi",
+            "terminal.exe",
+            "TerminalClass",
+            "",
+            &stack_rules,
+            &regex_identifiers,
+        );
+        let no_match = stack_idx_for_identifiers(
+            "Firefox",
+            "firefox.exe",
+            "MozillaWindowClass",
+            "",
+            &stack_rules,
+            &regex_identifiers,
+        );
+
+        assert_eq!(matches, Some(0));
+        assert_eq!(no_match, None);
+    }
+
+    #[test]
+    fn test_stack_idx_for_identifiers_first_stack_wins() {
+        let stack_rules = vec![
+            vec![simple_rule(
+                crate::core::ApplicationIdentifier::Title,
+                "Alpha",
+                crate::core::config_generation::MatchingStrategy::Equals,
+            )],
+            vec![simple_rule(
+                crate::core::ApplicationIdentifier::Title,
+                "Alpha",
+                crate::core::config_generation::MatchingStrategy::Equals,
+            )],
+        ];
+        let regex_identifiers = HashMap::new();
+
+        assert_eq!(
+            stack_idx_for_identifiers(
+                "Alpha",
+                "alpha.exe",
+                "AlphaClass",
+                "",
+                &stack_rules,
+                &regex_identifiers,
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn test_window_identifiers_match_stack_no_match() {
+        let stack = vec![simple_rule(
+            crate::core::ApplicationIdentifier::Exe,
+            "firefox.exe",
+            crate::core::config_generation::MatchingStrategy::Equals,
+        )];
+        let regex_identifiers = HashMap::new();
+
+        assert!(!window_identifiers_match_stack(
+            "Notepad",
+            "notepad.exe",
+            "Notepad",
+            "",
+            &stack,
+            &regex_identifiers,
+        ));
+        assert!(window_identifiers_match_stack(
+            "Firefox",
+            "firefox.exe",
+            "MozillaWindowClass",
+            "",
+            &stack,
+            &regex_identifiers,
+        ));
     }
 }

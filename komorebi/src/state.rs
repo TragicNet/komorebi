@@ -275,6 +275,7 @@ impl From<&WindowManager> for State {
                             window_container_behaviour_rules: workspace
                                 .window_container_behaviour_rules
                                 .clone(),
+                            stack_rules: workspace.stack_rules.clone(),
                             float_override: workspace.float_override,
                             layer: workspace.layer,
                             ignored_windows_above_managed: workspace.ignored_windows_above_managed,

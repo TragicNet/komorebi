@@ -262,6 +262,9 @@ pub struct WorkspaceConfig {
     /// Permanent workspace application rules
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_rules: Option<Vec<MatchingRule>>,
+    /// Stack rules; each inner array defines a stack that matching windows are grouped into
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stack_rules: Option<Vec<Vec<MatchingRule>>>,
     /// Workspace specific work area offset
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_area_offset: Option<Rect>,
@@ -387,6 +390,7 @@ impl From<&Workspace> for WorkspaceConfig {
                 .workspace_config
                 .as_ref()
                 .and_then(|c| c.workspace_rules.clone()),
+            stack_rules: (!value.stack_rules.is_empty()).then_some(value.stack_rules.clone()),
             work_area_offset_rules,
             work_area_offset: value.work_area_offset,
             apply_window_based_work_area_offset: Some(value.apply_window_based_work_area_offset),
@@ -1639,6 +1643,14 @@ impl StaticConfig {
                             });
                         }
                     }
+
+                    if let Some(stack_rules) = &ws.stack_rules {
+                        for stack in stack_rules {
+                            for r in stack {
+                                register_workspace_rule_regex(r, &mut regex_identifiers)?;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1698,6 +1710,7 @@ impl StaticConfig {
         }
 
         wm.enforce_workspace_rules()?;
+        wm.enforce_stack_rules()?;
 
         if value.border == Some(true) {
             border_manager::BORDER_ENABLED.store(true, Ordering::SeqCst);
@@ -1810,6 +1823,14 @@ impl StaticConfig {
                             });
                         }
                     }
+
+                    if let Some(stack_rules) = &ws.stack_rules {
+                        for stack in stack_rules {
+                            for r in stack {
+                                register_workspace_rule_regex(r, &mut regex_identifiers)?;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1869,6 +1890,7 @@ impl StaticConfig {
         }
 
         wm.enforce_workspace_rules()?;
+        wm.enforce_stack_rules()?;
 
         border_manager::BORDER_ENABLED.store(
             value.border.unwrap_or(true),

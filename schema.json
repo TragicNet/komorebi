@@ -4351,6 +4351,19 @@
           "description": "Name",
           "type": "string"
         },
+        "stack_rules": {
+          "description": "Stack rules; each inner array defines a stack that matching windows are grouped into",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/MatchingRule"
+            }
+          }
+        },
         "tile": {
           "description": "Enable or disable tiling for the workspace",
           "type": [

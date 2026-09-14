@@ -239,6 +239,7 @@ pub enum SocketMessage {
     ClearNamedWorkspaceRules(String),
     ClearAllWorkspaceRules,
     EnforceWorkspaceRules,
+    EnforceStackRules,
     SessionFloatRule,
     SessionFloatRules,
     ClearSessionFloatRules,
