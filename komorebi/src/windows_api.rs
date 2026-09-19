@@ -578,6 +578,29 @@ impl WindowsApi {
         )
     }
 
+    /// Raise the window to the top of the Z order like [`raise_window`], but
+    /// applied synchronously regardless of `WINDOW_HANDLING_BEHAVIOUR` (the
+    /// `ASYNC_WINDOW_POS` flag is never set).
+    ///
+    /// Use for z-order operations whose relative ordering matters: when they
+    /// return, the window is guaranteed to be above every window in front of it
+    /// at that point in time, instead of the ordering being left to the message
+    /// queues of the individual window threads.
+    pub fn raise_window_sync(hwnd: isize) -> eyre::Result<()> {
+        let flags = SetWindowPosition::NO_MOVE
+            | SetWindowPosition::NO_SIZE
+            | SetWindowPosition::NO_ACTIVATE
+            | SetWindowPosition::SHOW_WINDOW;
+
+        let position = HWND_TOP;
+        Self::set_window_pos(
+            HWND(as_ptr!(hwnd)),
+            &Rect::default(),
+            position,
+            flags.bits(),
+        )
+    }
+
     /// Lower the window to the bottom of the Z order, but do not activate or focus
     /// it.
     pub fn lower_window(hwnd: isize) -> eyre::Result<()> {
@@ -592,6 +615,29 @@ impl WindowsApi {
         ) {
             flags |= SetWindowPosition::ASYNC_WINDOW_POS;
         }
+
+        let position = HWND_BOTTOM;
+        Self::set_window_pos(
+            HWND(as_ptr!(hwnd)),
+            &Rect::default(),
+            position,
+            flags.bits(),
+        )
+    }
+
+    /// Lower the window to the bottom of the Z order like [`lower_window`], but
+    /// applied synchronously regardless of `WINDOW_HANDLING_BEHAVIOUR` (the
+    /// `ASYNC_WINDOW_POS` flag is never set).
+    ///
+    /// Use for z-order operations whose relative ordering matters: when they
+    /// return, the window is guaranteed to be below every window behind it at
+    /// that point in time, instead of the ordering being left to the message
+    /// queues of the individual window threads.
+    pub fn lower_window_sync(hwnd: isize) -> eyre::Result<()> {
+        let flags = SetWindowPosition::NO_MOVE
+            | SetWindowPosition::NO_SIZE
+            | SetWindowPosition::NO_ACTIVATE
+            | SetWindowPosition::SHOW_WINDOW;
 
         let position = HWND_BOTTOM;
         Self::set_window_pos(

@@ -1923,6 +1923,7 @@ impl WindowManager {
         if let Some(window) = floating_window {
             target_workspace.floating_windows_mut().push_back(window);
             target_workspace.layer = WorkspaceLayer::Floating;
+            target_workspace.layer_lock = false;
             Window::from(window.hwnd)
                 .move_to_area(&current_area, &target_monitor.work_area_size)?;
         } else if let Some(container) = container {
@@ -1933,6 +1934,7 @@ impl WindowManager {
                 .collect::<Vec<_>>();
 
             target_workspace.layer = WorkspaceLayer::Tiling;
+            target_workspace.layer_lock = false;
 
             if let Some(direction) = move_direction {
                 target_monitor.add_container_with_direction(container, workspace_idx, direction)?;
@@ -2282,7 +2284,9 @@ impl WindowManager {
                     window.focus(self.mouse_follows_focus)?;
                 }
             } else {
-                ws.layer = WorkspaceLayer::Tiling;
+                if !ws.layer_lock {
+                    ws.layer = WorkspaceLayer::Tiling;
+                }
                 if let Ok(focused_window) = self.focused_window() {
                     focused_window.focus(self.mouse_follows_focus)?;
                 }
@@ -2505,7 +2509,9 @@ impl WindowManager {
                     window.focus(self.mouse_follows_focus)?;
                 }
             } else {
-                ws.layer = WorkspaceLayer::Tiling;
+                if !ws.layer_lock {
+                    ws.layer = WorkspaceLayer::Tiling;
+                }
                 if let Ok(focused_window) = self.focused_window() {
                     focused_window.focus(self.mouse_follows_focus)?;
                 }

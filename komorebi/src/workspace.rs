@@ -104,6 +104,11 @@ pub struct Workspace {
     #[serde(skip)]
     pub globals: WorkspaceGlobals,
     pub layer: WorkspaceLayer,
+    /// When true, this workspace keeps its layer regardless of which window
+    /// gains focus. Set by toggle-workspace-layer (Tiling->Floating) and
+    /// cleared by toggling back; transient, defaults false.
+    #[serde(default)]
+    pub layer_lock: bool,
     /// When true, ignored/unmanaged windows on this workspace's monitor are raised
     /// above managed windows; when false they are lowered below the base layer.
     #[serde(default)]
@@ -180,6 +185,7 @@ impl Default for Workspace {
             stack_rules: vec![],
             float_override: None,
             layer: Default::default(),
+            layer_lock: false,
             ignored_windows_above_managed: false,
             floating_layer_behaviour: Default::default(),
             globals: Default::default(),

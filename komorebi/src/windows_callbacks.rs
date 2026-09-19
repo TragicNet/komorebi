@@ -88,6 +88,28 @@ pub extern "system" fn enum_ignored_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
     true.into()
 }
 
+pub extern "system" fn enum_status_bar(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let windows = unsafe { &mut *(lparam.0 as *mut Vec<Window>) };
+
+    let window = Window::from(hwnd);
+    let is_visible = WindowsApi::is_window_visible(window.hwnd);
+    let is_window = WindowsApi::is_window(window.hwnd);
+    let is_minimized = WindowsApi::is_iconic(window.hwnd);
+
+    if is_visible
+        && is_window
+        && !is_minimized
+        && window
+            .exe()
+            .map(|exe| exe.contains("komorebi-bar"))
+            .unwrap_or(false)
+    {
+        windows.push(window);
+    }
+
+    true.into()
+}
+
 pub extern "system" fn alt_tab_windows(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let windows = unsafe { &mut *(lparam.0 as *mut Vec<Window>) };
 

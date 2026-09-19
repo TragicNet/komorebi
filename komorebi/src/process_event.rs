@@ -437,7 +437,9 @@ impl WindowManager {
                                 if let Some(window) = monocle.focused_window() {
                                     window.focus(false)?;
                                 }
-                                workspace.layer = WorkspaceLayer::Tiling;
+                                if !workspace.layer_lock {
+                                    workspace.layer = WorkspaceLayer::Tiling;
+                                }
                             } else if suppress_layer {
                                 tracing::info!(
                                     hwnd = window.hwnd,
@@ -449,7 +451,14 @@ impl WindowManager {
                                     "FocusChange: updating last_focused_hwnd on current workspace"
                                 );
                                 workspace.focus_container_by_window(window.hwnd)?;
-                                workspace.layer = WorkspaceLayer::Tiling;
+                                if workspace.layer_lock {
+                                    tracing::info!(
+                                        hwnd = window.hwnd,
+                                        "FocusChange: workspace layer locked, keeping layer after toggle",
+                                    );
+                                } else {
+                                    workspace.layer = WorkspaceLayer::Tiling;
+                                }
                             }
 
                             if matches!(
@@ -637,12 +646,16 @@ impl WindowManager {
                                 self.update_focused_workspace(false, false)?;
                             } else if let Some(monocle) = &mut workspace.monocle_container {
                                 monocle.add_window(window);
-                                workspace.layer = WorkspaceLayer::Tiling;
+                                if !workspace.layer_lock {
+                                    workspace.layer = WorkspaceLayer::Tiling;
+                                }
                             } else {
                                 match behaviour.current_behaviour {
                                     WindowContainerBehaviour::Create => {
                                         workspace.new_container_for_window(window);
-                                        workspace.layer = WorkspaceLayer::Tiling;
+                                        if !workspace.layer_lock {
+                                            workspace.layer = WorkspaceLayer::Tiling;
+                                        }
                                         self.update_focused_workspace(false, false)?;
                                     }
                                     WindowContainerBehaviour::Append => {
@@ -650,7 +663,9 @@ impl WindowManager {
                                             .focused_container_mut()
                                             .ok_or_eyre("there is no focused container")?
                                             .add_window(window);
-                                        workspace.layer = WorkspaceLayer::Tiling;
+                                        if !workspace.layer_lock {
+                                            workspace.layer = WorkspaceLayer::Tiling;
+                                        }
                                         self.update_focused_workspace(true, false)?;
                                         stackbar_manager::send_notification();
                                     }
@@ -1067,7 +1082,9 @@ impl WindowManager {
                     }
                     workspace.focus_container_by_window(window.hwnd)?;
                 }
-                workspace.layer = layer;
+                if !workspace.layer_lock {
+                    workspace.layer = layer;
+                }
             }
             monitor.load_focused_workspace(mouse_follows_focus, true)?;
             monitor.update_focused_workspace(offset)?;

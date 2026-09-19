@@ -877,6 +877,23 @@ impl Window {
         self.restore_with_border(true);
     }
 
+    /// Hides the window by DWM cloaking (DWMWA_CLOAK), regardless of the
+    /// configured `window_hiding_behaviour`, and without tracking the window as
+    /// programmatically hidden. Used for ignored fullscreen windows and status
+    /// bars that must never be minimized (e.g. a borderless game or a bar on a
+    /// workspace where the game is being played): cloaking removes the window
+    /// from the DWM presentation without changing its state, so the app cannot
+    /// react to a minimize/restore round trip.
+    pub fn cloak_hide(self) {
+        SetCloak(self.hwnd(), 1, 2);
+    }
+
+    /// Unhides a window previously hidden with `cloak_hide`, regardless of the
+    /// configured `window_hiding_behaviour`.
+    pub fn cloak_restore(self) {
+        SetCloak(self.hwnd(), 1, 0);
+    }
+
     pub fn minimize(self) {
         let exe = self.exe().unwrap_or_default();
         if !exe.contains("komorebi-bar") {
@@ -1113,6 +1130,17 @@ impl Window {
         Ok(())
     }
 
+    /// Raise the window to the top of the Z order like [`Window::raise`], but
+    /// applied synchronously regardless of `WINDOW_HANDLING_BEHAVIOUR`.
+    /// Also raises the border attached to this window, if any.
+    pub fn raise_sync(self) -> eyre::Result<()> {
+        WindowsApi::raise_window_sync(self.hwnd)?;
+        if let Some(border_info) = crate::border_manager::window_border(self.hwnd) {
+            WindowsApi::raise_window_sync(border_info.border_hwnd)?;
+        }
+        Ok(())
+    }
+
     /// Lower the window to the bottom of the Z order, but do not activate or focus
     /// it.
     /// It also checks if there is a border attached to this window and if it is
@@ -1121,6 +1149,17 @@ impl Window {
         WindowsApi::lower_window(self.hwnd)?;
         if let Some(border_info) = crate::border_manager::window_border(self.hwnd) {
             WindowsApi::lower_window(border_info.border_hwnd)?;
+        }
+        Ok(())
+    }
+
+    /// Lower the window to the bottom of the Z order like [`Window::lower`], but
+    /// applied synchronously regardless of `WINDOW_HANDLING_BEHAVIOUR`.
+    /// Also lowers the border attached to this window, if any.
+    pub fn lower_sync(self) -> eyre::Result<()> {
+        WindowsApi::lower_window_sync(self.hwnd)?;
+        if let Some(border_info) = crate::border_manager::window_border(self.hwnd) {
+            WindowsApi::lower_window_sync(border_info.border_hwnd)?;
         }
         Ok(())
     }
