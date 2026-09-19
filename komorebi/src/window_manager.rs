@@ -97,10 +97,6 @@ pub struct WindowManager {
     pub pending_move_op: Arc<Option<(usize, usize, isize)>>,
     pub already_moved_window_handles: Arc<Mutex<HashSet<isize>>>,
     pub uncloack_to_ignore: usize,
-    /// Counter to skip FocusChanges from reverting workspace.layer after a
-    /// user-initiated toggle. Decremented on each FocusChange; layer changes
-    /// are suppressed while > 0.
-    pub layer_ignore_count: usize,
     /// Maps each known window hwnd to the (monitor, workspace) index pair managing it
     pub known_hwnds: HashMap<isize, (usize, usize)>,
 }
@@ -174,7 +170,6 @@ impl WindowManager {
             pending_move_op: Arc::new(None),
             already_moved_window_handles: Arc::new(Mutex::new(HashSet::new())),
             uncloack_to_ignore: 0,
-            layer_ignore_count: 0,
             known_hwnds: HashMap::new(),
         })
     }
@@ -2787,40 +2782,83 @@ impl WindowManager {
         direction: CycleDirection,
     ) -> eyre::Result<()> {
         let mouse_follows_focus = self.mouse_follows_focus;
-        let focused_workspace = self.focused_workspace()?;
 
-        let floating_windows = focused_workspace.floating_windows();
-        let len = floating_windows.len();
+        let pins = self
+            .focused_monitor()
+            .ok_or_eyre("there is no monitor")?
+            .pinned_windows();
+        let own_floats = self
+            .focused_workspace()?
+            .floating_windows()
+            .iter()
+            .copied()
+            .collect::<Vec<Window>>();
+        let pool = Self::floating_cycle_pool(&pins, &own_floats);
 
-        let mut target_idx = None;
-
-        if len > 1 {
-            let focused_hwnd = WindowsApi::foreground_window()?;
-
-            for (idx, window) in floating_windows.iter().enumerate() {
-                if window.hwnd == focused_hwnd {
-                    target_idx = Some(match direction {
-                        CycleDirection::Previous => (idx + len - 1) % len,
-                        CycleDirection::Next => (idx + 1) % len,
-                    });
-
-                    break;
-                }
-            }
-
-            if target_idx.is_none() {
-                target_idx = Some(0);
-            }
+        if pool.is_empty() {
+            return Ok(());
         }
 
-        if let Some(idx) = target_idx
-            && let Some(hwnd) = floating_windows.get(idx).map(|window| window.hwnd)
+        let len = pool.len();
+        let focused_hwnd = WindowsApi::foreground_window()?;
+        let remembered_hwnd = self.focused_workspace()?.last_focused_cycle_window_hwnd;
+
+        let current_idx = pool
+            .iter()
+            .position(|hwnd| *hwnd == focused_hwnd)
+            .or_else(|| {
+                remembered_hwnd.and_then(|hwnd| pool.iter().position(|h| *h == hwnd))
+            });
+
+        let target_idx = match current_idx {
+            Some(idx) if len > 1 => match direction {
+                CycleDirection::Previous => (idx + len - 1) % len,
+                CycleDirection::Next => (idx + 1) % len,
+            },
+            Some(_) => 0,
+            None => match direction {
+                CycleDirection::Previous => len - 1,
+                CycleDirection::Next => 0,
+            },
+        };
+
+        let target_hwnd = pool[target_idx];
+
+        // Remember the position on the current workspace before any
+        // FocusChange-driven workspace switch can happen, so this workspace
+        // resumes cycling from this window whenever it is revisited.
+        self.focused_workspace_mut()?.last_focused_cycle_window_hwnd = Some(target_hwnd);
+
+        if let Some(idx) = self
+            .focused_workspace()?
+            .floating_windows()
+            .iter()
+            .position(|window| window.hwnd == target_hwnd)
         {
             self.focused_workspace_mut()?.focus_floating_window(idx);
-            Window::from(hwnd).focus(mouse_follows_focus)?;
         }
 
+        Window::from(target_hwnd).focus(mouse_follows_focus)?;
+
         Ok(())
+    }
+
+    /// Builds the floating cycle-focus pool: the monitor-wide pinned floating
+    /// windows first (browser pinned-tab order), followed by the workspace's
+    /// own floating windows, deduplicated by HWND.
+    fn floating_cycle_pool(pins: &[Window], own_floats: &[Window]) -> Vec<isize> {
+        let mut pool: Vec<isize> = Vec::with_capacity(pins.len() + own_floats.len());
+        for window in pins {
+            if !pool.contains(&window.hwnd) {
+                pool.push(window.hwnd);
+            }
+        }
+        for window in own_floats {
+            if !pool.contains(&window.hwnd) {
+                pool.push(window.hwnd);
+            }
+        }
+        pool
     }
 
     #[tracing::instrument(skip(self))]
@@ -4873,6 +4911,42 @@ mod tests {
             let current_monitor_size = wm.focused_monitor_size().unwrap();
             assert_eq!(current_monitor_size, Rect::default());
         }
+    }
+
+    #[test]
+    fn test_floating_cycle_pool_pins_first_then_own_floats() {
+        let pins = [Window::from(1), Window::from(2)];
+        let own_floats = [Window::from(3), Window::from(4)];
+        assert_eq!(
+            WindowManager::floating_cycle_pool(&pins, &own_floats),
+            vec![1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn test_floating_cycle_pool_deduplicates_own_floats_in_pins() {
+        let pins = [Window::from(1), Window::from(2)];
+        let own_floats = [Window::from(2), Window::from(3)];
+        assert_eq!(
+            WindowManager::floating_cycle_pool(&pins, &own_floats),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn test_floating_cycle_pool_own_pinned_window_stays_at_pin_position() {
+        let pins = [Window::from(2)];
+        let own_floats = [Window::from(2), Window::from(3)];
+        assert_eq!(WindowManager::floating_cycle_pool(&pins, &own_floats), vec![2, 3]);
+    }
+
+    #[test]
+    fn test_floating_cycle_pool_empty_cases() {
+        assert!(WindowManager::floating_cycle_pool(&[], &[]).is_empty());
+        let pins = [Window::from(7)];
+        assert_eq!(WindowManager::floating_cycle_pool(&pins, &[]), vec![7]);
+        let floats = [Window::from(8)];
+        assert_eq!(WindowManager::floating_cycle_pool(&[], &floats), vec![8]);
     }
 
     #[test]

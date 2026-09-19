@@ -102,7 +102,9 @@ use windows::Win32::UI::WindowsAndMessaging::GetWindowTextW;
 use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 use windows::Win32::UI::WindowsAndMessaging::HDEVNOTIFY;
 use windows::Win32::UI::WindowsAndMessaging::HWND_BOTTOM;
+use windows::Win32::UI::WindowsAndMessaging::HWND_NOTOPMOST;
 use windows::Win32::UI::WindowsAndMessaging::HWND_TOP;
+use windows::Win32::UI::WindowsAndMessaging::HWND_TOPMOST;
 use windows::Win32::UI::WindowsAndMessaging::IsIconic;
 use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
@@ -597,6 +599,39 @@ impl WindowsApi {
             HWND(as_ptr!(hwnd)),
             &Rect::default(),
             position,
+            flags.bits(),
+        )
+    }
+
+    /// Raise the window above the currently active (foreground) window without
+    /// activating or focusing it, applied synchronously regardless of
+    /// `WINDOW_HANDLING_BEHAVIOUR`.
+    ///
+    /// The foreground window is always re-asserted to the top of the Z order,
+    /// so a plain [`raise_window_sync`] is not enough to display a window above
+    /// the active one. This momentarily places the window in the TopMost band
+    /// (which is rendered above the active window even without focus) and then
+    /// removes the TopMost state again, leaving the window at the top of the
+    /// normal band above the previously-active window. The TopMost state is
+    /// transient: clearing it immediately means it is not left "sticky", and
+    /// any owned windows that briefly inherited it (TopMost is viral) drop back
+    /// out of the TopMost band together with it.
+    pub fn raise_window_above_active(hwnd: isize) -> eyre::Result<()> {
+        let flags = SetWindowPosition::NO_MOVE
+            | SetWindowPosition::NO_SIZE
+            | SetWindowPosition::NO_ACTIVATE
+            | SetWindowPosition::SHOW_WINDOW;
+
+        Self::set_window_pos(
+            HWND(as_ptr!(hwnd)),
+            &Rect::default(),
+            HWND_TOPMOST,
+            flags.bits(),
+        )?;
+        Self::set_window_pos(
+            HWND(as_ptr!(hwnd)),
+            &Rect::default(),
+            HWND_NOTOPMOST,
             flags.bits(),
         )
     }

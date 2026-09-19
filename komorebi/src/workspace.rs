@@ -127,6 +127,12 @@ pub struct Workspace {
     /// Hwnd of the last focused floating window, used to restore floating-layer focus correctly.
     #[serde(skip)]
     pub last_focused_floating_hwnd: Option<isize>,
+    /// Hwnd of the last window focused via the floating cycle-focus command,
+    /// remembered per workspace. May be an own floating window or a pinned
+    /// window that lives on another workspace; used so cycle-focus continues
+    /// from the remembered position when returning to this workspace.
+    #[serde(skip)]
+    pub last_focused_cycle_window_hwnd: Option<isize>,
     /// Maps window HWNDs to their last known position and layer for restoration.
     #[serde(skip)]
     pub restoration_indices: HashMap<isize, WindowRestorationState>,
@@ -195,6 +201,7 @@ impl Default for Workspace {
             promotion_swap_container_idx: None,
             last_focused_hwnd: None,
             last_focused_floating_hwnd: None,
+            last_focused_cycle_window_hwnd: None,
             restoration_indices: HashMap::new(),
             last_minimized_hwnd: None,
         }
@@ -1159,6 +1166,7 @@ impl Workspace {
         if let Some(hwnd) = self.floating_windows().get(idx).map(|window| window.hwnd) {
             self.floating_windows.focus(idx);
             self.last_focused_floating_hwnd = Some(hwnd);
+            self.last_focused_cycle_window_hwnd = Some(hwnd);
             true
         } else {
             false

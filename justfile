@@ -85,6 +85,14 @@ devrel:
     cargo +stable build --bin komorebi --locked --release --no-default-features
     .\target\release\komorebi.exe
 
+devrel-masir:
+    -komorebic stop
+    cargo +stable build --bin komorebi --locked --release --no-default-features
+    Start-Process -FilePath ".\target\release\komorebi.exe" -NoNewWindow
+    Start-Sleep -Seconds 3
+    Stop-Process -Name masir
+    Start-Process -FilePath "$env:USERPROFILE\.cargo\bin\masir.exe" -ArgumentList "--no-raise" -WindowStyle Hidden
+
 docgen starlight:
     rm {{ starlight }}/src/data/cli/windows/*.md
     cargo run --package komorebic -- docgen --output {{ starlight }}/src/data/cli/windows

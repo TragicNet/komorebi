@@ -415,8 +415,23 @@ impl WindowManager {
                     self.update_focused_workspace(self.mouse_follows_focus, false)?;
                 }
 
-                let suppress_layer = self.layer_ignore_count > 0;
                 let previous_layer = self.focused_workspace()?.layer;
+
+                // A window pinned across this monitor's workspaces belongs to the
+                // Floating overlay even when it lives on another workspace: focusing
+                // it while the layer is Floating must not be treated as a tiling
+                // window, so no container focus or layer flip is performed.
+                let is_pinned_overlay = previous_layer == WorkspaceLayer::Floating
+                    && self
+                        .focused_monitor()
+                        .map(|monitor| {
+                            monitor.pinned_windows().iter().any(|w| w.hwnd == window.hwnd)
+                        })
+                        .unwrap_or(false);
+
+                // Whether the focused window is one of this workspace's own floating
+                // windows; used to skip re-tapping the pinned band over it.
+                let focused_own_float;
 
                 {
                     let workspace = self.focused_workspace_mut()?;
@@ -424,6 +439,7 @@ impl WindowManager {
                         .floating_windows()
                         .iter()
                         .position(|w| w.hwnd == window.hwnd);
+                    focused_own_float = floating_window_idx.is_some();
 
                     match floating_window_idx {
                         None => {
@@ -433,40 +449,37 @@ impl WindowManager {
                                 return Ok(());
                             }
 
-                            if let Some(monocle) = &workspace.monocle_container {
-                                if let Some(window) = monocle.focused_window() {
-                                    window.focus(false)?;
-                                }
-                                if !workspace.layer_lock {
-                                    workspace.layer = WorkspaceLayer::Tiling;
-                                }
-                            } else if suppress_layer {
-                                tracing::info!(
-                                    hwnd = window.hwnd,
-                                    "FocusChange: suppressing layer change for tiling window after toggle",
-                                );
-                            } else {
-                                tracing::debug!(
-                                    hwnd = window.hwnd,
-                                    "FocusChange: updating last_focused_hwnd on current workspace"
-                                );
-                                workspace.focus_container_by_window(window.hwnd)?;
-                                if workspace.layer_lock {
-                                    tracing::info!(
-                                        hwnd = window.hwnd,
-                                        "FocusChange: workspace layer locked, keeping layer after toggle",
-                                    );
+                            if !is_pinned_overlay {
+                                if let Some(monocle) = &workspace.monocle_container {
+                                    if let Some(window) = monocle.focused_window() {
+                                        window.focus(false)?;
+                                    }
                                 } else {
-                                    workspace.layer = WorkspaceLayer::Tiling;
+                                    tracing::debug!(
+                                        hwnd = window.hwnd,
+                                        "FocusChange: updating last_focused_hwnd on current workspace"
+                                    );
+                                    workspace.focus_container_by_window(window.hwnd)?;
                                 }
-                            }
 
-                            if matches!(
-                                self.focused_workspace()?.layout,
-                                Layout::Default(DefaultLayout::Scrolling)
-                            ) && !self.focused_workspace()?.containers().is_empty()
-                            {
-                                self.update_focused_workspace(self.mouse_follows_focus, false)?;
+                                // Focusing a window on the tiling layer always
+                                // switches the workspace back to Tiling and
+                                // releases the lock left by a ToggleWorkspaceLayer,
+                                // so the floating overlay is lowered below the
+                                // tiled windows again.
+                                workspace.layer = WorkspaceLayer::Tiling;
+                                workspace.layer_lock = false;
+
+                                if matches!(
+                                    self.focused_workspace()?.layout,
+                                    Layout::Default(DefaultLayout::Scrolling)
+                                ) && !self.focused_workspace()?.containers().is_empty()
+                                {
+                                    self.update_focused_workspace(
+                                        self.mouse_follows_focus,
+                                        false,
+                                    )?;
+                                }
                             }
                         }
                         Some(idx) => {
@@ -477,11 +490,6 @@ impl WindowManager {
                     }
                 }
 
-                // Consume one count so that the counter eventually reaches 0
-                if self.layer_ignore_count > 0 {
-                    self.layer_ignore_count -= 1;
-                }
-
                 // If the focus event flipped the workspace layer, re-establish the
                 // layer stack so the newly focused layer is raised above its base
                 // (e.g. floating windows above the tiling base after focusing one).
@@ -489,6 +497,22 @@ impl WindowManager {
                     self.focused_monitor()
                         .ok_or_eyre("there is no monitor with this idx")?
                         .enforce_layer_stack()?;
+                }
+
+                // Skip the re-assert when the focused window is itself part of the
+                // Floating overlay (an own floating window or a pinned window):
+                // tapping the pins above it would visually cover the window that
+                // was just focused (e.g. when cycle-focusing between floating
+                // windows). The pin band is still re-tapped over an active tiled
+                // window so the pins stay in the Floating band.
+                let focused_workspace = self.focused_workspace()?;
+                if focused_workspace.layer == WorkspaceLayer::Floating
+                    && !focused_own_float
+                    && !is_pinned_overlay
+                {
+                    self.focused_monitor()
+                        .ok_or_eyre("there is no monitor with this idx")?
+                        .raise_pinned_windows();
                 }
 
                 if self.capture_native_maximize(window)? {
@@ -687,6 +711,16 @@ impl WindowManager {
                             self.focused_monitor()
                                 .ok_or_eyre("there is no monitor with this idx")?
                                 .enforce_layer_stack()?;
+                        }
+
+                        // Re-assert the pinned floating band even without a layer flip
+                        // so a window that just joined a Floating workspace cannot bury
+                        // the pinned windows above it.
+                        let focused_workspace = self.focused_workspace()?;
+                        if focused_workspace.layer == WorkspaceLayer::Floating {
+                            self.focused_monitor()
+                                .ok_or_eyre("there is no monitor with this idx")?
+                                .raise_pinned_windows();
                         }
 
                         if workspace_contains_window {

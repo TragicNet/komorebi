@@ -1124,6 +1124,18 @@ impl Window {
         Ok(())
     }
 
+    /// Raise the window above the currently active window (see
+    /// [`WindowsApi::raise_window_above_active`]) without activating or focusing
+    /// it, applied synchronously regardless of `WINDOW_HANDLING_BEHAVIOUR`.
+    /// Also raises the border attached to this window, if any.
+    pub fn raise_above_active(self) -> eyre::Result<()> {
+        WindowsApi::raise_window_above_active(self.hwnd)?;
+        if let Some(border_info) = crate::border_manager::window_border(self.hwnd) {
+            WindowsApi::raise_window_above_active(border_info.border_hwnd)?;
+        }
+        Ok(())
+    }
+
     /// Lower the window to the bottom of the Z order, but do not activate or focus
     /// it.
     /// It also checks if there is a border attached to this window and if it is

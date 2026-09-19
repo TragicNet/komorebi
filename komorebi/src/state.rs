@@ -289,6 +289,7 @@ impl From<&WindowManager> for State {
                             promotion_swap_container_idx: None,
                             last_focused_hwnd: None,
                             last_focused_floating_hwnd: None,
+                            last_focused_cycle_window_hwnd: None,
                             restoration_indices: HashMap::new(),
                             last_minimized_hwnd: None,
                         })

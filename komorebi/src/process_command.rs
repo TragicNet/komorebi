@@ -1371,9 +1371,6 @@ impl WindowManager {
             SocketMessage::ToggleWorkspaceLayer => {
                 let mouse_follows_focus = self.mouse_follows_focus;
 
-                // Optimistically set the layer ignore count before borrowing workspace
-                self.layer_ignore_count = 2;
-
                 let (workspace_layer, must_lower_ignored) = {
                     let workspace = self.focused_workspace()?;
 
@@ -1393,14 +1390,15 @@ impl WindowManager {
                             "suppressing FocusChange layer reversion for next events"
                         );
 
-                        // Pinned floating windows from other workspaces on this monitor
-                        // join the Floating overlay so they appear above the base layer,
-                        // respecting the toggled layer. They are raised before the focused
-                        // workspace's own floating windows so the focused window stays on
-                        // top.
-                        self.focused_monitor()
+                        // Pinned floating windows of every workspace on this monitor
+                        // belong to the focused workspace's Floating overlay: they are
+                        // treated as part of this workspace's floating set on whichever
+                        // workspace is focused, not just their home workspace. Capture
+                        // them before borrowing the focused workspace.
+                        let mut pinned_overlay = self
+                            .focused_monitor()
                             .ok_or_eyre("there is no monitor")?
-                            .raise_pinned_windows();
+                            .pinned_windows();
 
                         let workspace = self.focused_workspace_mut()?;
                         workspace.layer = WorkspaceLayer::Floating;
@@ -1441,6 +1439,38 @@ impl WindowManager {
                             focused_window.raise()?;
                         }
 
+                        // Show the monitor's pinned windows from other workspaces alongside
+                        // this workspace's own floating windows. Their deterministic z-order
+                        // is fixed by the synchronous pinned band raise at the end of this
+                        // arm.
+                        let own_hwnds = workspace
+                            .floating_windows()
+                            .iter()
+                            .map(|window| window.hwnd)
+                            .collect::<Vec<_>>();
+                        pinned_overlay.retain(|window| !own_hwnds.contains(&window.hwnd));
+                        for window in pinned_overlay {
+                            window.restore();
+                        }
+
+                        // Hoist the monocle window so the workspace borrow ends here,
+                        // before the pinned-band raise takes its own monitor borrow.
+                        let monocle_window = workspace
+                            .monocle_container
+                            .as_ref()
+                            .and_then(|monocle| monocle.focused_window())
+                            .copied();
+
+                        // Deterministically place the pinned floating band before the focus
+                        // step: the whole Floating overlay (own floats plus pins from other
+                        // workspaces on this monitor) is raised above the intact tiling base,
+                        // synchronously, so no pending async window-thread raises can land
+                        // above the pinned windows. The focused floating window is then
+                        // activated last so it sits on top of the pinned band.
+                        self.focused_monitor()
+                            .ok_or_eyre("there is no monitor")?
+                            .raise_pinned_windows();
+
                         // If there are no floating windows to focus, focus the desktop
                         // instead so that lowering the monocle window does not trigger an
                         // auto-focus.
@@ -1453,9 +1483,7 @@ impl WindowManager {
                         // Only the monocle window (fullscreen) needs to be lowered so the
                         // floating overlay can sit above it; every other base window keeps its
                         // position.
-                        if let Some(monocle) = &workspace.monocle_container
-                            && let Some(window) = monocle.focused_window()
-                        {
+                        if let Some(window) = monocle_window {
                             tracing::info!(
                                 hwnd = window.hwnd,
                                 "Tiling->Floating: lowering monocle window",

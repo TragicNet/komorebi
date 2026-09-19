@@ -302,6 +302,15 @@ impl Monitor {
             self.raise_managed_window(&window);
         }
 
+        // Pinned floating windows from other workspaces on this monitor belong
+        // to the focused workspace's layer band: they join the Floating overlay
+        // when the layer is Floating, and sit in the floating base below the
+        // tiled top layer when it is Tiling. They are positioned here, below
+        // the focused top-layer window, so the focused window (e.g. a floating
+        // window just focused via cycle-focus or a layer flip) is never covered
+        // by the pinned band.
+        self.reposition_pinned_windows(workspace.layer)?;
+
         // Demote ignored windows below the managed windows as the final z-order
         // operation, so that desktop widgets and unmanaged fullscreen windows can
         // never end up above the base or top layer regardless of the async
@@ -347,12 +356,6 @@ impl Monitor {
             let _ = WindowsApi::raise_and_focus_window(window.hwnd);
         }
 
-        // Pinned floating windows from other workspaces on this monitor belong
-        // to the focused workspace's layer band: they join the Floating overlay
-        // when the layer is Floating, and sit in the floating base below the
-        // tiled top layer when it is Tiling.
-        self.reposition_pinned_windows(workspace.layer)?;
-
         Ok(())
     }
 
@@ -362,9 +365,10 @@ impl Monitor {
     /// below the tiled top layer when it is Tiling.
     ///
     /// Uses synchronous z-order operations, so the placement is fully applied
-    /// before this returns regardless of `WINDOW_HANDLING_BEHAVIOUR`: every
-    /// raise issued before it ends up above the pinned windows, and no later
-    /// operation can push them back over the top layer.
+    /// before this returns regardless of `WINDOW_HANDLING_BEHAVIOUR`, and no
+    /// pending async window-thread raise can land above the pinned windows. The
+    /// focused top-layer window is raised/activated afterwards so it sits on top
+    /// of the pinned band.
     fn reposition_pinned_windows(&self, layer: WorkspaceLayer) -> eyre::Result<()> {
         match layer {
             WorkspaceLayer::Floating => self.raise_pinned_windows(),
@@ -374,42 +378,59 @@ impl Monitor {
         Ok(())
     }
 
-    /// Raise the pinned floating windows of all workspaces on this monitor so
-    /// they join the Floating overlay when a workspace layer is toggled to
-    /// Floating. Non-activating so the focused workspace's window keeps focus.
-    /// Applied synchronously so the overlay placement is deterministic.
-    pub fn raise_pinned_windows(&self) {
+    /// Returns the pinned floating windows of every workspace on this monitor,
+    /// deduplicated by HWND. Pinned windows belong to the monitor as a whole:
+    /// they are treated as part of the floating overlay of whichever workspace
+    /// is currently focused.
+    pub fn pinned_windows(&self) -> Vec<Window> {
+        let mut windows: Vec<Window> = vec![];
         for workspace in self.workspaces() {
             for window in workspace.pinned_floating_windows() {
-                if let Err(error) = window.raise_sync() {
-                    tracing::warn!(
-                        hwnd = window.hwnd,
-                        exe = window.exe().unwrap_or_default(),
-                        title = window.title().unwrap_or_default(),
-                        "could not raise pinned window: {error}"
-                    );
+                if !windows.iter().any(|w| w.hwnd == window.hwnd) {
+                    windows.push(window);
                 }
             }
         }
+        windows
+    }
+
+    /// Raise the pinned floating windows of all workspaces on this monitor so
+    /// they join the Floating overlay when a workspace layer is toggled to
+    /// Floating. Applied synchronously so the overlay placement is deterministic.
+    /// Uses the transient TopMost band so the pinned windows are displayed above
+    /// the currently active window without activating them or stealing focus.
+    pub fn raise_pinned_windows(&self) -> Vec<Window> {
+        let windows = self.pinned_windows();
+        for window in &windows {
+            if let Err(error) = window.raise_above_active() {
+                tracing::warn!(
+                    hwnd = window.hwnd,
+                    exe = window.exe().unwrap_or_default(),
+                    title = window.title().unwrap_or_default(),
+                    "could not raise pinned window: {error}"
+                );
+            }
+        }
+        windows
     }
 
     /// Lower the pinned floating windows of all workspaces on this monitor so
     /// they drop back behind the tiling base when a workspace layer is toggled
     /// back to Tiling. Applied synchronously so they can never end up above the
     /// tiled windows regardless of the async SetWindowPos ordering.
-    pub fn lower_pinned_windows(&self) {
-        for workspace in self.workspaces() {
-            for window in workspace.pinned_floating_windows() {
-                if let Err(error) = window.lower_sync() {
-                    tracing::warn!(
-                        hwnd = window.hwnd,
-                        exe = window.exe().unwrap_or_default(),
-                        title = window.title().unwrap_or_default(),
-                        "could not lower pinned window: {error}"
-                    );
-                }
+    pub fn lower_pinned_windows(&self) -> Vec<Window> {
+        let windows = self.pinned_windows();
+        for window in &windows {
+            if let Err(error) = window.lower_sync() {
+                tracing::warn!(
+                    hwnd = window.hwnd,
+                    exe = window.exe().unwrap_or_default(),
+                    title = window.title().unwrap_or_default(),
+                    "could not lower pinned window: {error}"
+                );
             }
         }
+        windows
     }
 
     fn raise_managed_window(&self, window: &Window) {
