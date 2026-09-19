@@ -792,6 +792,10 @@ where
                                         .window_based_work_area_offset_limit,
                                     workspaces: cached.workspaces.clone(),
                                     last_focused_workspace: cached.last_focused_workspace,
+                                    last_switch_at: cached.last_switch_at,
+                                    minimized_ignored_game_windows: cached
+                                        .minimized_ignored_game_windows
+                                        .clone(),
                                     workspace_names: cached.workspace_names.clone(),
                                     container_padding: cached.container_padding,
                                     workspace_padding: cached.workspace_padding,

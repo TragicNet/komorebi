@@ -71,6 +71,10 @@ pub struct Workspace {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub maximized_window_restore_idx: Option<usize>,
     pub floating_windows: Ring<Window>,
+    /// HWNDs of floating windows that are pinned across all workspaces on this monitor.
+    /// Only floating windows can be pinned; tiling windows are never pinned.
+    #[serde(default)]
+    pub pinned_floating: Vec<isize>,
     pub layout: Layout,
     pub layout_options: Option<LayoutOptions>,
     pub layout_rules: Vec<(usize, Layout)>,
@@ -156,6 +160,7 @@ impl Default for Workspace {
             maximized_window_restore_idx: None,
             monocle_container_restore_idx: None,
             floating_windows: Ring::default(),
+            pinned_floating: vec![],
             layout: Layout::Default(DefaultLayout::BSP),
             layout_options: None,
             layout_rules: vec![],
@@ -464,6 +469,7 @@ impl Workspace {
     }
 
     pub fn hide(&mut self, omit: Option<isize>) {
+        let pinned = self.pinned_floating.clone();
         for window in self.floating_windows_mut().iter_mut().rev() {
             let mut should_hide = omit.is_none();
 
@@ -474,7 +480,8 @@ impl Workspace {
                 should_hide = true
             }
 
-            if should_hide {
+            // Pinned floating windows remain visible across all workspaces on the monitor
+            if should_hide && !pinned.contains(&window.hwnd) {
                 window.hide();
             }
         }
@@ -489,6 +496,55 @@ impl Workspace {
 
         if let Some(container) = &self.monocle_container {
             container.hide(omit)
+        }
+    }
+
+    /// Returns the pinned floating windows: windows that are pinned across all
+    /// workspaces on this monitor.
+    pub fn pinned_floating_windows(&self) -> Vec<Window> {
+        self.floating_windows()
+            .iter()
+            .filter(|w| self.pinned_floating.contains(&w.hwnd))
+            .copied()
+            .collect()
+    }
+
+    /// Whether the given window HWND is managed as a floating window on this workspace.
+    pub fn is_floating(&self, hwnd: isize) -> bool {
+        self.floating_windows().iter().any(|w| w.hwnd == hwnd)
+    }
+
+    /// Whether the given floating window HWND is pinned across all workspaces.
+    pub fn is_pinned(&self, hwnd: isize) -> bool {
+        self.pinned_floating.contains(&hwnd)
+    }
+
+    /// Pin a floating window so it is visible across all workspaces on this monitor.
+    pub fn pin_floating_window(&mut self, hwnd: isize) {
+        if !self.is_pinned(hwnd) {
+            self.pinned_floating.push(hwnd);
+        }
+    }
+
+    /// Unpin a floating window, leaving it on its current workspace.
+    pub fn unpin_floating_window(&mut self, hwnd: isize) {
+        self.pinned_floating.retain(|h| *h != hwnd);
+    }
+
+    /// Toggle pinning for a floating window.
+    pub fn toggle_pin_floating_window(&mut self, hwnd: isize) {
+        if self.is_pinned(hwnd) {
+            self.unpin_floating_window(hwnd);
+        } else {
+            self.pin_floating_window(hwnd);
+        }
+    }
+
+    /// Restore (show) only the pinned floating windows of this workspace, used so
+    /// they stay visible when another workspace on the monitor is focused.
+    pub fn restore_pinned(&self) {
+        for window in self.pinned_floating_windows() {
+            window.restore();
         }
     }
 
@@ -1347,6 +1403,7 @@ impl Workspace {
 
     pub fn remove_window(&mut self, hwnd: isize) -> eyre::Result<()> {
         border_manager::delete_border(hwnd);
+        self.unpin_floating_window(hwnd);
 
         if self.floating_windows().iter().any(|w| w.hwnd == hwnd) {
             if let Some(idx) = self.floating_windows().iter().position(|w| w.hwnd == hwnd) {
@@ -2449,6 +2506,7 @@ impl Workspace {
             None => None,
             Some(idx) => {
                 if self.floating_windows().get(idx).is_some() {
+                    self.unpin_floating_window(hwnd);
                     let window = self.floating_windows_mut().remove(idx);
                     if let Some(next_idx) = self
                         .floating_windows()
@@ -3719,5 +3777,48 @@ mod tests {
         // treated as a normal tiled window and must be repositioned.
         assert!(should_reposition_window(true, &target, &current, true));
         assert!(should_reposition_window(true, &target, &target, false));
+    }
+
+    #[test]
+    fn test_toggle_pin_floating_window() {
+        let mut ws = Workspace::default();
+        ws.floating_windows_mut().push_back(Window::from(1000));
+
+        assert!(ws.is_floating(1000));
+        assert!(!ws.is_pinned(1000));
+
+        ws.toggle_pin_floating_window(1000);
+        assert!(ws.is_pinned(1000));
+        assert_eq!(ws.pinned_floating_windows(), vec![Window::from(1000)]);
+
+        ws.toggle_pin_floating_window(1000);
+        assert!(!ws.is_pinned(1000));
+        assert!(ws.pinned_floating_windows().is_empty());
+    }
+
+    #[test]
+    fn test_pinned_floating_windows_only_returns_pinned() {
+        let mut ws = Workspace::default();
+        ws.floating_windows_mut().push_back(Window::from(1000));
+        ws.floating_windows_mut().push_back(Window::from(2000));
+
+        ws.pin_floating_window(1000);
+
+        assert_eq!(ws.pinned_floating_windows(), vec![Window::from(1000)]);
+        assert!(ws.is_floating(2000));
+        assert!(!ws.is_pinned(2000));
+    }
+
+    #[test]
+    fn test_unpin_floating_window_prunes() {
+        let mut ws = Workspace::default();
+        ws.floating_windows_mut().push_back(Window::from(1000));
+        ws.floating_windows_mut().push_back(Window::from(2000));
+
+        ws.pin_floating_window(1000);
+        ws.pin_floating_window(2000);
+        ws.unpin_floating_window(1000);
+
+        assert_eq!(ws.pinned_floating_windows(), vec![Window::from(2000)]);
     }
 }

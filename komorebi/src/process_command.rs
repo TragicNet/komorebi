@@ -437,6 +437,7 @@ impl WindowManager {
             }
             SocketMessage::ToggleLock => self.toggle_lock()?,
             SocketMessage::ToggleFloat => self.toggle_float(false)?,
+            SocketMessage::TogglePin => self.toggle_pin_floating_window()?,
             SocketMessage::ToggleMonocle => self.toggle_monocle()?,
             SocketMessage::ToggleMaximize => self.toggle_maximize()?,
             SocketMessage::ContainerPadding(monitor_idx, workspace_idx, size) => {
@@ -1504,7 +1505,17 @@ impl WindowManager {
                 }
             }
             SocketMessage::ToggleIgnoredWindowLayer => {
-                let ignored_windows = self.ignored_windows();
+                // Reuse the same predicate as automatic demotion so that always-on-top
+                // widget windows (e.g. a status bar) are never moved by the manual
+                // toggle: they are already pinned to the topmost band above everything
+                // else, so raising or lowering them is a pointless no-op that flickers
+                // the bar.
+                let ignored_windows = self
+                    .ignored_windows()
+                    .into_iter()
+                    .filter(crate::monitor::Monitor::should_auto_demote)
+                    .collect::<Vec<_>>();
+
                 let workspace = self.focused_workspace_mut()?;
 
                 workspace.ignored_windows_above_managed = !workspace.ignored_windows_above_managed;
@@ -1516,10 +1527,20 @@ impl WindowManager {
                     );
                     // EnumWindows enumerates in top-to-bottom z-order; raising bottom-to-top
                     // preserves each ignored window's relative stacking with the current
-                    // topmost window ending up on top.
+                    // topmost window ending up on top. The originally-topmost ignored
+                    // window is therefore the final one raised, i.e. `ignored_windows.first()`.
                     for window in ignored_windows.iter().rev() {
                         window.restore();
                         window.raise()?;
+                    }
+
+                    // Raising with HWND_TOP alone is not enough when a managed window still
+                    // holds the foreground: Windows keeps the foreground window drawn above
+                    // everything else. Activate the now-topmost raised window (e.g. a
+                    // fullscreen game such as DFO) so that it actually comes to the front,
+                    // which is the point of the toggle.
+                    if let Some(window) = ignored_windows.first() {
+                        WindowsApi::raise_and_focus_window(window.hwnd)?;
                     }
                 } else {
                     tracing::info!(

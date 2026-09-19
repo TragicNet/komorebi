@@ -1,5 +1,6 @@
 use crate::config_generation::ApplicationConfiguration;
 use crate::config_generation::ApplicationOptions;
+use crate::config_generation::FloatingApplicationRule;
 use crate::config_generation::MatchingRule;
 use color_eyre::eyre;
 use serde::Deserialize;
@@ -58,7 +59,7 @@ pub struct AscApplicationRules {
     pub manage: Option<Vec<MatchingRule>>,
     /// Rules to manage specific windows as floating windows
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub floating: Option<Vec<MatchingRule>>,
+    pub floating: Option<Vec<FloatingApplicationRule>>,
     /// Rules to ignore specific windows from the transparency feature
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transparency_ignore: Option<Vec<MatchingRule>>,

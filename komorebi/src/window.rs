@@ -584,6 +584,18 @@ impl AspectRatio {
 
 pub(crate) const FULLSCREEN_EDGE_TOLERANCE: i32 = 8;
 
+/// Lenient edge tolerance used when checking coverage of a monitor's work area:
+/// borderless games sized to the work area can land a few pixels short or over
+/// the taskbar edge.
+pub(crate) const FULLSCREEN_WORK_AREA_EDGE_TOLERANCE: i32 = 8;
+
+/// Minimum share of the target area a window must cover to count as fullscreen
+/// coverage, in case its edges are not aligned with the monitor (e.g. a window
+/// spanning two monitors or snapped with a small gap). Low enough that a game
+/// sized to the work area of a full-HD monitor with a 30px taskbar (≈97.9% of
+/// the monitor area) still counts as fullscreen coverage.
+pub(crate) const FULLSCREEN_COVERAGE_RATIO: f32 = 0.97;
+
 /// Checks whether `window_rect` covers `monitor_rect` within `tolerance` pixels
 /// on every edge. Pure helper so the fullscreen decision can be unit tested
 /// without touching the Win32 API.
@@ -596,6 +608,36 @@ pub(crate) fn rect_covers_monitor_rect(
         && window_rect.top <= monitor_rect.top + tolerance
         && window_rect.right >= monitor_rect.right - tolerance
         && window_rect.bottom >= monitor_rect.bottom - tolerance
+}
+
+/// Checks whether `window_rect` covers `target_rect` either by covering it
+/// within `tolerance` pixels on every edge, or by overlapping at least
+/// `coverage_ratio` of its area. Both rectangles must be expressed in the same
+/// absolute coordinate space. Pure helper so the fullscreen-coverage decision
+/// can be unit tested without touching the Win32 API.
+pub(crate) fn rect_covers_target_rect(
+    window_rect: &Rect,
+    target_rect: &Rect,
+    tolerance: i32,
+    coverage_ratio: f32,
+) -> bool {
+    if rect_covers_monitor_rect(window_rect, target_rect, tolerance) {
+        return true;
+    }
+
+    let overlap_width =
+        (window_rect.right.min(target_rect.right) - window_rect.left.max(target_rect.left)).max(0);
+    let overlap_height =
+        (window_rect.bottom.min(target_rect.bottom) - window_rect.top.max(target_rect.top)).max(0);
+    let target_width = (target_rect.right - target_rect.left).max(1);
+    let target_height = (target_rect.bottom - target_rect.top).max(1);
+
+    let covered = u64::try_from(overlap_width).unwrap_or_default()
+        * u64::try_from(overlap_height).unwrap_or_default();
+    let total = u64::try_from(target_width).unwrap_or_default()
+        * u64::try_from(target_height).unwrap_or_default();
+
+    (covered as f32) / (total as f32) >= coverage_ratio
 }
 
 impl Window {
@@ -1112,6 +1154,16 @@ impl Window {
         }
     }
 
+    /// Checks whether this window is pinned to the topmost z-order band
+    /// (WS_EX_TOPMOST), e.g. a status bar such as yasb with always_on_top
+    /// enabled. Such windows are part of the ignored widget layer but should
+    /// never be moved by automatic demotions.
+    pub fn is_always_on_top(self) -> bool {
+        self.ex_style()
+            .map(|ex| ex.contains(ExtendedWindowStyle::TOPMOST))
+            .unwrap_or(false)
+    }
+
     /// Checks whether this window covers the entire monitor it is displayed on,
     /// within a small pixel tolerance. Fullscreen borderless windows (common for
     /// games) typically drop the caption and window edge styles while still
@@ -1119,26 +1171,89 @@ impl Window {
     /// even though they visibly occlude the desktop. Used to include such
     /// windows in the ignored window layer.
     pub fn is_fullscreen(self) -> bool {
+        let Some(monitor_rect) = self.monitor_rect() else {
+            return false;
+        };
+        let Some(window_rect) = self.absolute_window_rect() else {
+            return false;
+        };
+
+        rect_covers_monitor_rect(&window_rect, &monitor_rect, FULLSCREEN_EDGE_TOLERANCE)
+    }
+
+    /// Checks whether this window covers the whole monitor or its work area
+    /// closely enough to be treated as a fullscreen coverage window by the
+    /// ignored window layer. This is deliberately more lenient than
+    /// `is_fullscreen`: borderless games frequently size themselves to the work
+    /// area (leaving the taskbar visible) or snap to the full monitor while a
+    /// few pixels short of the edge, and either way they must never be occluded
+    /// by desktop widgets (e.g. Rainmeter meters).
+    pub fn covers_monitor_or_work_area(self) -> bool {
         let hmonitor = HMONITOR(windows_api::as_ptr!(WindowsApi::monitor_from_window(
             self.hwnd
         )));
         let Ok(monitor_info) = WindowsApi::monitor_info_w(hmonitor) else {
             return false;
         };
-        let monitor_rect = monitor_info.monitorInfo.rcMonitor;
-
-        let Ok(window_rect) = WindowsApi::window_rect(self.hwnd) else {
+        let Some(window_rect) = self.absolute_window_rect() else {
             return false;
         };
 
         let monitor_rect = Rect {
-            left: monitor_rect.left,
-            top: monitor_rect.top,
-            right: monitor_rect.right,
-            bottom: monitor_rect.bottom,
+            left: monitor_info.monitorInfo.rcMonitor.left,
+            top: monitor_info.monitorInfo.rcMonitor.top,
+            right: monitor_info.monitorInfo.rcMonitor.right,
+            bottom: monitor_info.monitorInfo.rcMonitor.bottom,
+        };
+        let work_rect = Rect {
+            left: monitor_info.monitorInfo.rcWork.left,
+            top: monitor_info.monitorInfo.rcWork.top,
+            right: monitor_info.monitorInfo.rcWork.right,
+            bottom: monitor_info.monitorInfo.rcWork.bottom,
         };
 
-        rect_covers_monitor_rect(&window_rect, &monitor_rect, FULLSCREEN_EDGE_TOLERANCE)
+        rect_covers_target_rect(
+            &window_rect,
+            &monitor_rect,
+            FULLSCREEN_EDGE_TOLERANCE,
+            FULLSCREEN_COVERAGE_RATIO,
+        ) || rect_covers_target_rect(
+            &window_rect,
+            &work_rect,
+            FULLSCREEN_WORK_AREA_EDGE_TOLERANCE,
+            FULLSCREEN_COVERAGE_RATIO,
+        )
+    }
+
+    /// The physical monitor rectangle of the monitor this window is displayed
+    /// on, in absolute screen coordinates.
+    fn monitor_rect(self) -> Option<Rect> {
+        let hmonitor = HMONITOR(windows_api::as_ptr!(WindowsApi::monitor_from_window(
+            self.hwnd
+        )));
+        let Ok(monitor_info) = WindowsApi::monitor_info_w(hmonitor) else {
+            return None;
+        };
+        let rc = monitor_info.monitorInfo.rcMonitor;
+        Some(Rect {
+            left: rc.left,
+            top: rc.top,
+            right: rc.right,
+            bottom: rc.bottom,
+        })
+    }
+
+    /// The window rectangle in absolute screen coordinates, converted from the
+    /// normalized `{left, top, width, height}` form returned by
+    /// `WindowsApi::window_rect`.
+    fn absolute_window_rect(self) -> Option<Rect> {
+        let window_rect = WindowsApi::window_rect(self.hwnd).ok()?;
+        Some(Rect {
+            left: window_rect.left,
+            top: window_rect.top,
+            right: window_rect.left + window_rect.right,
+            bottom: window_rect.top + window_rect.bottom,
+        })
     }
 
     /// Checks whether this window is in a self-managed fullscreen state: a
@@ -1755,5 +1870,70 @@ mod tests {
         assert!(!rect_covers_monitor_rect(&rect(10, 10, 1910, 1070), &monitor, 8));
         assert!(!rect_covers_monitor_rect(&rect(0, 0, 1920, 500), &monitor, 8));
         assert!(!rect_covers_monitor_rect(&rect(0, 0, 1920, 1050), &monitor, 8));
+    }
+
+    #[test]
+    fn test_rect_covers_monitor_rect_on_secondary_monitor() {
+        // A monitor whose origin is not (0, 0); the window rectangle is given in
+        // absolute screen coordinates.
+        let monitor = rect(1280, 0, 3840, 1440);
+
+        assert!(rect_covers_monitor_rect(&rect(1280, 0, 3840, 1440), &monitor, 8));
+        assert!(rect_covers_monitor_rect(&rect(1280, 0, 3832, 1440), &monitor, 8));
+        assert!(!rect_covers_monitor_rect(&rect(1280, 0, 3830, 1440), &monitor, 8));
+    }
+
+    #[test]
+    fn test_rect_covers_target_rect_by_area_fallback() {
+        let monitor = rect(0, 0, 2560, 1440);
+
+        // A work-area-sized window (2560x1410, taskbar visible) is 97.9% of the
+        // monitor area: not edge-covered, but area-covered.
+        assert!(rect_covers_target_rect(
+            &rect(0, 0, 2560, 1410),
+            &monitor,
+            FULLSCREEN_EDGE_TOLERANCE,
+            FULLSCREEN_COVERAGE_RATIO,
+        ));
+
+        // A window spanning two monitors still covers the whole first monitor.
+        assert!(rect_covers_target_rect(
+            &rect(0, 0, 5120, 1440),
+            &monitor,
+            FULLSCREEN_EDGE_TOLERANCE,
+            FULLSCREEN_COVERAGE_RATIO,
+        ));
+
+        // A desktop widget (617x142) is nowhere near fullscreen coverage.
+        assert!(!rect_covers_target_rect(
+            &rect(0, 0, 617, 142),
+            &monitor,
+            FULLSCREEN_EDGE_TOLERANCE,
+            FULLSCREEN_COVERAGE_RATIO,
+        ));
+    }
+
+    #[test]
+    fn test_rect_covers_target_rect_by_work_area() {
+        let work_area = rect(0, 0, 2560, 1410);
+
+        assert!(rect_covers_target_rect(
+            &rect(0, 0, 2560, 1410),
+            &work_area,
+            FULLSCREEN_WORK_AREA_EDGE_TOLERANCE,
+            FULLSCREEN_COVERAGE_RATIO,
+        ));
+        assert!(rect_covers_target_rect(
+            &rect(0, 0, 2554, 1404),
+            &work_area,
+            FULLSCREEN_WORK_AREA_EDGE_TOLERANCE,
+            FULLSCREEN_COVERAGE_RATIO,
+        ));
+        assert!(!rect_covers_target_rect(
+            &rect(0, 0, 617, 142),
+            &work_area,
+            FULLSCREEN_WORK_AREA_EDGE_TOLERANCE,
+            FULLSCREEN_COVERAGE_RATIO,
+        ));
     }
 }

@@ -1409,6 +1409,9 @@ enum SubCommand {
     ToggleTiling,
     /// Toggle floating mode for the focused window
     ToggleFloat,
+    /// Pin or unpin the focused window so it is visible across all workspaces.
+    /// Only floating windows can be pinned; tiling windows are never pinned.
+    TogglePin,
     /// Toggle monocle mode for the focused container
     ToggleMonocle,
     /// Toggle native maximization for the focused window
@@ -2299,6 +2302,9 @@ fn main() -> eyre::Result<()> {
         }
         SubCommand::ToggleFloat => {
             send_message(&SocketMessage::ToggleFloat)?;
+        }
+        SubCommand::TogglePin => {
+            send_message(&SocketMessage::TogglePin)?;
         }
         SubCommand::ToggleMonocle => {
             send_message(&SocketMessage::ToggleMonocle)?;

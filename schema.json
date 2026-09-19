@@ -219,7 +219,7 @@
         "null"
       ],
       "items": {
-        "$ref": "#/$defs/MatchingRule"
+        "$ref": "#/$defs/FloatingApplicationRule"
       }
     },
     "floating_layer_behaviour": {
@@ -3450,6 +3450,53 @@
         {
           "description": "Simple matching rule which must evaluate to true",
           "$ref": "#/$defs/IdWithIdentifier"
+        },
+        {
+          "description": "Composite matching rule where all conditions must evaluate to true",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IdWithIdentifier"
+          }
+        }
+      ]
+    },
+    "FloatingApplicationRule": {
+      "description": "Rule for matching applications which should be managed as floating windows",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "pinned": {
+              "description": "Pin the floating window so it is visible across all workspaces on its monitor",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "kind": {
+              "description": "Kind of identifier to target",
+              "$ref": "#/$defs/ApplicationIdentifier"
+            },
+            "id": {
+              "description": "Target identifier",
+              "type": "string"
+            },
+            "matching_strategy": {
+              "description": "Matching strategy to use",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MatchingStrategy"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
         },
         {
           "description": "Composite matching rule where all conditions must evaluate to true",

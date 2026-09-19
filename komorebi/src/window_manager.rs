@@ -47,6 +47,7 @@ use crate::DATA_DIR;
 use crate::FLOATING_APPLICATIONS;
 use crate::HOME_DIR;
 use crate::NO_TITLEBAR;
+use crate::PINNED_FLOATING_APPLICATIONS;
 use crate::REGEX_IDENTIFIERS;
 use crate::SUBSCRIPTION_SOCKETS;
 use crate::WORKSPACE_MATCHING_RULES;
@@ -266,6 +267,16 @@ impl WindowManager {
                             workspace.container_padding = container_padding;
                             workspace.workspace_padding = workspace_padding;
                             workspace.layout_options = layout_options;
+
+                            // Prune any stale pinned HWNDs that are no longer managed as floating
+                            let floating_hwnds: Vec<isize> = workspace
+                                .floating_windows()
+                                .iter()
+                                .map(|w| w.hwnd)
+                                .collect();
+                            workspace
+                                .pinned_floating
+                                .retain(|hwnd| floating_hwnds.contains(hwnd));
 
                             if state_monitor.focused_workspace_idx() == workspace_idx {
                                 focused_workspace = workspace_idx;
@@ -1561,6 +1572,7 @@ impl WindowManager {
         {
             let ws = self.focused_workspace_mut()?;
             let floating_applications = FLOATING_APPLICATIONS.lock();
+            let pinned_floating_applications = PINNED_FLOATING_APPLICATIONS.lock();
 
             for &hwnd in &untracked {
                 if managed_hwnds.contains(&hwnd)
@@ -1571,6 +1583,7 @@ impl WindowManager {
 
                 let window = Window::from(hwnd);
                 let mut should_float = false;
+                let mut should_pin = false;
 
                 if !floating_applications.is_empty() {
                     let regex_identifiers = REGEX_IDENTIFIERS.lock();
@@ -1587,6 +1600,18 @@ impl WindowManager {
                             &regex_identifiers,
                         )
                         .is_some();
+
+                        if !pinned_floating_applications.is_empty() {
+                            should_pin = should_act(
+                                &title,
+                                &exe_name,
+                                &class,
+                                &path,
+                                &pinned_floating_applications,
+                                &regex_identifiers,
+                            )
+                            .is_some();
+                        }
                     }
                 }
 
@@ -1598,6 +1623,9 @@ impl WindowManager {
                 WindowsApi::restore_window_sync(hwnd);
 
                 if should_float {
+                    if should_pin {
+                        ws.pin_floating_window(window.hwnd);
+                    }
                     ws.floating_windows_mut().push_back(window);
                     ws.layer = WorkspaceLayer::Floating;
                 } else {
@@ -1846,6 +1874,14 @@ impl WindowManager {
         let floating_window =
             floating_window_index.and_then(|idx| workspace.floating_windows_mut().remove(idx));
         let container = if floating_window_index.is_none() {
+            if workspace
+                .focused_container()
+                .is_some_and(|container| container.windows().len() > 1)
+            {
+                // A stack is a group; only the focused window should move to the
+                // target monitor (inverse of the stack command).
+                workspace.new_container_for_focused_window()?;
+            }
             Some(
                 workspace
                     .remove_focused_container()
@@ -2595,12 +2631,6 @@ impl WindowManager {
 
         tracing::info!("moving container");
 
-        // If the focused container holds more than one window (a stack), split the
-        // focused window out into its own container before performing the move, so
-        // that only that window is relocated while the rest of the stack stays put.
-        self.move_focused_window_out_of_stack()?;
-
-        let workspace = self.focused_workspace()?;
         let origin_container_idx = workspace.focused_container_idx();
         let origin_monitor_idx = self.focused_monitor_idx();
         let target_container_idx = workspace.new_idx_for_direction(direction);
@@ -3083,7 +3113,6 @@ impl WindowManager {
         let workspace = self.focused_workspace_mut()?;
         let len = NonZeroUsize::new(workspace.containers_mut().len())
             .ok_or_eyre("there must be at least one container")?;
-        let current_container_idx = workspace.focused_container_idx();
 
         let is_valid = direction
             .destination(
@@ -3100,44 +3129,30 @@ impl WindowManager {
                 .new_idx_for_direction(direction)
                 .ok_or_eyre("this is not a valid direction from the current position")?;
 
-            let mut changed_focus = false;
+            let current_idx = workspace.focused_container_idx();
+            let current_is_stack = workspace
+                .focused_container()
+                .is_some_and(|container| container.windows().len() > 1);
+            let target_is_stack = workspace
+                .containers()
+                .get(new_idx)
+                .is_some_and(|container| container.windows().len() > 1);
 
-            let adjusted_new_index = if new_idx > current_container_idx
-                && !matches!(
-                    workspace.layout,
-                    Layout::Default(DefaultLayout::Grid)
-                        | Layout::Default(DefaultLayout::UltrawideVerticalStack)
-                ) {
+            if current_is_stack && !target_is_stack {
+                // A focused stack absorbs the single-window container in the given
+                // direction (stack expansion), matching the left direction behaviour.
                 workspace.focus_container(new_idx);
-                changed_focus = true;
-                new_idx.saturating_sub(1)
+                workspace.move_window_to_container(current_idx)?;
+
+                if let Some(container) = workspace.focused_container_mut() {
+                    container.load_focused_window();
+                    if let Some(window) = container.focused_window() {
+                        window.focus(self.mouse_follows_focus)?;
+                    }
+                }
             } else {
-                new_idx
-            };
-
-            let mut target_container_is_stack = false;
-
-            if let Some(container) = workspace.containers().get(adjusted_new_index)
-                && container.windows().len() > 1
-            {
-                target_container_is_stack = true;
-            }
-
-            if let Some(current) = workspace.focused_container() {
-                if current.windows().len() > 1 && !target_container_is_stack {
-                    workspace.focus_container(adjusted_new_index);
-                    changed_focus = true;
-                    workspace.move_window_to_container(current_container_idx)?;
-                } else {
-                    workspace.move_window_to_container(adjusted_new_index)?;
-                }
-            }
-
-            if changed_focus && let Some(container) = workspace.focused_container_mut() {
-                container.load_focused_window();
-                if let Some(window) = container.focused_window() {
-                    window.focus(self.mouse_follows_focus)?;
-                }
+                // The focused window joins the container in the given direction.
+                workspace.move_window_to_container(new_idx)?;
             }
 
             self.update_focused_workspace(self.mouse_follows_focus, false)?;
@@ -3268,6 +3283,31 @@ impl WindowManager {
         }
 
         self.update_focused_workspace(is_floating_window, true)
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub fn toggle_pin_floating_window(&mut self) -> eyre::Result<()> {
+        let hwnd = WindowsApi::foreground_window()?;
+        let workspace = self.focused_workspace_mut()?;
+
+        // Only floating windows can be pinned; tiling windows are never pinned
+        if !workspace.is_floating(hwnd) {
+            tracing::warn!(
+                hwnd,
+                "ignoring toggle-pin command: only floating windows can be pinned"
+            );
+            return Ok(());
+        }
+
+        workspace.toggle_pin_floating_window(hwnd);
+
+        // Refresh the monitor so visibility follows the new pin state
+        let mouse_follows_focus = self.mouse_follows_focus;
+        if let Some(monitor) = self.focused_monitor_mut() {
+            monitor.load_focused_workspace(mouse_follows_focus, false)?;
+        }
+
+        Ok(())
     }
 
     #[tracing::instrument(skip(self))]
@@ -5544,8 +5584,43 @@ mod tests {
     }
 
     #[test]
-    fn test_move_container_in_direction_from_stack() {
-        let mut wm = setup_workspace_with_stack();
+    fn test_move_container_in_direction_moves_whole_stack() {
+        let (mut wm, _context) = setup_window_manager();
+
+        let mut m = monitor::new(
+            0,
+            Rect::default(),
+            Rect::default(),
+            "TestMonitor".to_string(),
+            "TestDevice".to_string(),
+            "TestDeviceID".to_string(),
+            Some("TestMonitorID".to_string()),
+        );
+
+        let workspace = m.focused_workspace_mut().unwrap();
+        workspace.layout = Layout::Default(DefaultLayout::Columns);
+
+        // A single-window container, a stack, and another single-window container
+        let mut container = Container::default();
+        container.windows_mut().push_back(Window::from(0));
+        workspace.add_container_to_back(container);
+
+        let mut container = Container::default();
+        for i in 1..4 {
+            container.windows_mut().push_back(Window::from(i));
+        }
+        workspace.add_container_to_back(container);
+
+        let mut container = Container::default();
+        container.windows_mut().push_back(Window::from(4));
+        workspace.add_container_to_back(container);
+
+        workspace.focus_container(1);
+
+        assert_eq!(workspace.containers().len(), 3);
+        assert_eq!(workspace.focused_container_idx(), 1);
+
+        wm.monitors_mut().push_back(m);
 
         // This requires a real foreground window in the test environment; skip the
         // end-to-end check otherwise and rely on the direct split tests above.
@@ -5554,7 +5629,19 @@ mod tests {
             .ok()
             .is_some()
         {
-            assert_stack_stays_stacked(&wm);
+            let workspace = wm.focused_workspace().unwrap();
+            assert_eq!(workspace.containers().len(), 3);
+            assert_eq!(workspace.focused_container_idx(), 2);
+
+            // The whole stack moved as a single group, not split apart
+            let moved = workspace
+                .containers()
+                .get(workspace.focused_container_idx())
+                .unwrap();
+            assert_eq!(moved.windows().len(), 3);
+            assert!(moved.contains_window(1));
+            assert!(moved.contains_window(2));
+            assert!(moved.contains_window(3));
         }
     }
 
@@ -5571,6 +5658,158 @@ mod tests {
         {
             assert_stack_stays_stacked(&wm);
         }
+    }
+
+    fn setup_workspace_with_containers(window_counts: &[usize]) -> WindowManager {
+        let (mut wm, _context) = setup_window_manager();
+
+        let mut m = monitor::new(
+            0,
+            Rect::default(),
+            Rect::default(),
+            "TestMonitor".to_string(),
+            "TestDevice".to_string(),
+            "TestDeviceID".to_string(),
+            Some("TestMonitorID".to_string()),
+        );
+
+        let workspace = m.focused_workspace_mut().unwrap();
+        workspace.layout = Layout::Default(DefaultLayout::Columns);
+
+        let mut next_hwnd = 0isize;
+        for &count in window_counts {
+            let mut container = Container::default();
+            for _ in 0..count {
+                container.windows_mut().push_back(Window::from(next_hwnd));
+                next_hwnd += 1;
+            }
+            workspace.add_container_to_back(container);
+        }
+
+        wm.monitors_mut().push_back(m);
+
+        wm
+    }
+
+    fn assert_container_windows(wm: &WindowManager, idx: usize, hwnds: &[isize]) {
+        let workspace = wm.focused_workspace().unwrap();
+        let container = workspace.containers().get(idx).unwrap();
+        assert_eq!(
+            container.windows().len(),
+            hwnds.len(),
+            "container {idx} should hold {} windows",
+            hwnds.len()
+        );
+        for &hwnd in hwnds {
+            assert!(
+                container.contains_window(hwnd),
+                "container {idx} should contain window {hwnd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stack_right_single_window_joins_right_container() {
+        let mut wm = setup_workspace_with_containers(&[1, 1, 1]);
+        wm.focused_workspace_mut()
+            .unwrap()
+            .focus_container(1);
+
+        wm.add_window_to_container(OperationDirection::Right)
+            .ok();
+
+        let workspace = wm.focused_workspace().unwrap();
+        assert_eq!(workspace.containers().len(), 2);
+        assert_container_windows(&wm, 0, &[0]);
+        assert_container_windows(&wm, 1, &[1, 2]);
+        assert_eq!(workspace.focused_container_idx(), 1);
+    }
+
+    #[test]
+    fn test_stack_left_single_window_joins_left_container() {
+        let mut wm = setup_workspace_with_containers(&[1, 1, 1]);
+        wm.focused_workspace_mut()
+            .unwrap()
+            .focus_container(1);
+
+        wm.add_window_to_container(OperationDirection::Left)
+            .ok();
+
+        let workspace = wm.focused_workspace().unwrap();
+        assert_eq!(workspace.containers().len(), 2);
+        assert_container_windows(&wm, 0, &[0, 1]);
+        assert_container_windows(&wm, 1, &[2]);
+        assert_eq!(workspace.focused_container_idx(), 0);
+    }
+
+    #[test]
+    fn test_stack_right_expands_focused_stack_into_single_neighbor() {
+        let mut wm = setup_workspace_with_containers(&[1, 2, 1]);
+        wm.focused_workspace_mut()
+            .unwrap()
+            .focus_container(1);
+
+        wm.add_window_to_container(OperationDirection::Right)
+            .ok();
+
+        let workspace = wm.focused_workspace().unwrap();
+        assert_eq!(workspace.containers().len(), 2);
+        assert_container_windows(&wm, 0, &[0]);
+        assert_container_windows(&wm, 1, &[1, 2, 3]);
+        assert_eq!(workspace.focused_container_idx(), 1);
+    }
+
+    #[test]
+    fn test_stack_left_expands_focused_stack_into_single_neighbor() {
+        let mut wm = setup_workspace_with_containers(&[1, 2, 1]);
+        wm.focused_workspace_mut()
+            .unwrap()
+            .focus_container(1);
+
+        wm.add_window_to_container(OperationDirection::Left)
+            .ok();
+
+        let workspace = wm.focused_workspace().unwrap();
+        assert_eq!(workspace.containers().len(), 2);
+        assert_container_windows(&wm, 0, &[0, 1, 2]);
+        assert_container_windows(&wm, 1, &[3]);
+        assert_eq!(workspace.focused_container_idx(), 0);
+    }
+
+    #[test]
+    fn test_stack_right_stack_to_stack_moves_focused_window() {
+        let mut wm = setup_workspace_with_containers(&[1, 2, 2]);
+        wm.focused_workspace_mut()
+            .unwrap()
+            .focus_container(1);
+
+        wm.add_window_to_container(OperationDirection::Right)
+            .ok();
+
+        let workspace = wm.focused_workspace().unwrap();
+        assert_eq!(workspace.containers().len(), 3);
+        assert_container_windows(&wm, 0, &[0]);
+        assert_container_windows(&wm, 1, &[2]);
+        assert_container_windows(&wm, 2, &[3, 4, 1]);
+        assert_eq!(workspace.focused_container_idx(), 2);
+    }
+
+    #[test]
+    fn test_stack_left_stack_to_stack_moves_focused_window() {
+        let mut wm = setup_workspace_with_containers(&[2, 2, 1]);
+        wm.focused_workspace_mut()
+            .unwrap()
+            .focus_container(1);
+
+        wm.add_window_to_container(OperationDirection::Left)
+            .ok();
+
+        let workspace = wm.focused_workspace().unwrap();
+        assert_eq!(workspace.containers().len(), 3);
+        assert_container_windows(&wm, 0, &[0, 1, 2]);
+        assert_container_windows(&wm, 1, &[3]);
+        assert_container_windows(&wm, 2, &[4]);
+        assert_eq!(workspace.focused_container_idx(), 0);
     }
 
     #[test]

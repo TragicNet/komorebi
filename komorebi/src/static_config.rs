@@ -11,6 +11,7 @@ use crate::DEFAULT_RESIZE_DELTA;
 use crate::DEFAULT_WORKSPACE_PADDING;
 use crate::DISPLAY_INDEX_PREFERENCES;
 use crate::FLOATING_APPLICATIONS;
+use crate::PINNED_FLOATING_APPLICATIONS;
 use crate::FLOATING_WINDOW_TOGGLE_ASPECT_RATIO;
 use crate::FloatingLayerBehaviour;
 use crate::HIDING_BEHAVIOUR;
@@ -77,6 +78,7 @@ use crate::core::WindowManagementBehaviour;
 use crate::core::config_generation::ApplicationConfiguration;
 use crate::core::config_generation::ApplicationConfigurationGenerator;
 use crate::core::config_generation::ApplicationOptions;
+use crate::core::config_generation::FloatingApplicationRule;
 use crate::core::config_generation::MatchingRule;
 use crate::core::config_generation::MatchingStrategy;
 use crate::current_virtual_desktop;
@@ -651,7 +653,7 @@ pub struct StaticConfig {
     pub manage_rules: Option<Vec<MatchingRule>>,
     /// Identify applications which should be managed as floating windows
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub floating_applications: Option<Vec<MatchingRule>>,
+    pub floating_applications: Option<Vec<FloatingApplicationRule>>,
     /// Identify border overflow applications
     #[serde(skip_serializing_if = "Option::is_none")]
     pub border_overflow_applications: Option<Vec<MatchingRule>>,
@@ -1222,6 +1224,7 @@ impl StaticConfig {
         let mut transparency_blacklist = TRANSPARENCY_BLACKLIST.lock();
         let mut slow_application_identifiers = SLOW_APPLICATION_IDENTIFIERS.lock();
         let mut floating_applications = FLOATING_APPLICATIONS.lock();
+        let mut pinned_floating_applications = PINNED_FLOATING_APPLICATIONS.lock();
         let mut no_titlebar_applications = NO_TITLEBAR.lock();
 
         ignore_identifiers.clear();
@@ -1230,8 +1233,21 @@ impl StaticConfig {
         }
 
         floating_applications.clear();
+        pinned_floating_applications.clear();
         if let Some(rules) = &mut self.floating_applications {
-            populate_rules(rules, &mut floating_applications, &mut regex_identifiers)?;
+            let mut all_rules = vec![];
+            for rule in rules.iter() {
+                if rule.is_pinned() {
+                    let mut pinned_rule = vec![rule.matching_rule()];
+                    populate_rules(
+                        &mut pinned_rule,
+                        &mut pinned_floating_applications,
+                        &mut regex_identifiers,
+                    )?;
+                }
+                all_rules.push(rule.matching_rule());
+            }
+            populate_rules(&mut all_rules, &mut floating_applications, &mut regex_identifiers)?;
         }
 
         manage_identifiers.clear();
@@ -1374,6 +1390,7 @@ impl StaticConfig {
                     &mut tray_and_multi_window_identifiers,
                     &mut manage_identifiers,
                     &mut floating_applications,
+                    &mut pinned_floating_applications,
                     &mut transparency_blacklist,
                     &mut slow_application_identifiers,
                     &mut regex_identifiers,
@@ -1388,6 +1405,7 @@ impl StaticConfig {
                             &mut tray_and_multi_window_identifiers,
                             &mut manage_identifiers,
                             &mut floating_applications,
+                            &mut pinned_floating_applications,
                             &mut transparency_blacklist,
                             &mut slow_application_identifiers,
                             &mut regex_identifiers,
@@ -2048,6 +2066,7 @@ fn handle_asc_file(
     tray_and_multi_window_identifiers: &mut Vec<MatchingRule>,
     manage_identifiers: &mut Vec<MatchingRule>,
     floating_applications: &mut Vec<MatchingRule>,
+    pinned_floating_applications: &mut Vec<MatchingRule>,
     transparency_blacklist: &mut Vec<MatchingRule>,
     slow_application_identifiers: &mut Vec<MatchingRule>,
     regex_identifiers: &mut HashMap<String, Regex>,
@@ -2120,7 +2139,23 @@ fn handle_asc_file(
                             }
 
                             if let Some(rules) = &mut entry.floating {
-                                populate_rules(rules, floating_applications, regex_identifiers)?;
+                                let mut all_rules = vec![];
+                                for rule in rules.iter() {
+                                    if rule.is_pinned() {
+                                        let mut pinned_rule = vec![rule.matching_rule()];
+                                        populate_rules(
+                                            &mut pinned_rule,
+                                            pinned_floating_applications,
+                                            regex_identifiers,
+                                        )?;
+                                    }
+                                    all_rules.push(rule.matching_rule());
+                                }
+                                populate_rules(
+                                    &mut all_rules,
+                                    floating_applications,
+                                    regex_identifiers,
+                                )?;
                             }
 
                             if let Some(rules) = &mut entry.transparency_ignore {
@@ -2171,6 +2206,9 @@ mod tests {
 
     use crate::StaticConfig;
     use crate::WorkspaceConfig;
+use crate::core::config_generation::FloatingApplicationRule;
+    use crate::core::config_generation::FloatingApplicationRuleSimple;
+    use crate::core::config_generation::MatchingRule;
 
     #[test]
     #[ignore = "this fails on github actions due to rate limiting changes introduced in may 2025"]
@@ -2242,5 +2280,111 @@ mod tests {
         #[allow(deprecated)]
         let custom_layout_rules = config.custom_layout_rules;
         assert_eq!(custom_layout_rules, None);
+    }
+
+    #[test]
+    fn deserialize_floating_application_rules_with_pinned() {
+        let config = r#"
+        {
+            "floating_applications": [
+                { "kind": "exe", "id": "plain.exe" },
+                { "kind": "exe", "id": "pinned.exe", "pinned": true }
+            ]
+        }
+        "#;
+        let config = serde_json::from_str::<StaticConfig>(config).unwrap();
+
+        let rules = config.floating_applications.unwrap();
+        assert_eq!(rules.len(), 2);
+        assert!(!rules[0].is_pinned());
+        assert!(rules[1].is_pinned());
+        assert_eq!(
+            rules[1].matching_rule(),
+            serde_json::from_str(r#"{ "kind": "exe", "id": "pinned.exe" }"#).unwrap()
+        );
+
+        let serialized = serde_json::to_string(&FloatingApplicationRule::Simple(
+            FloatingApplicationRuleSimple {
+                pinned: Some(true),
+                rule: serde_json::from_str(r#"{ "kind": "exe", "id": "pinned.exe" }"#).unwrap(),
+            },
+        ))
+        .unwrap();
+        assert!(serialized.contains("\"pinned\":true"));
+    }
+
+    #[test]
+    fn deserialize_floating_application_rules_as_composite() {
+        let config = serde_json::from_str::<StaticConfig>(r#"
+        {
+            "floating_applications": [
+                [
+                    { "kind": "exe", "id": "blender.exe" },
+                    { "kind": "Title", "id": "Blender", "matching_strategy": "DoesNotContain" }
+                ]
+            ]
+        }
+        "#)
+        .unwrap();
+
+        let rules = config.floating_applications.unwrap();
+        assert_eq!(rules.len(), 1);
+        assert!(!rules[0].is_pinned());
+        assert_eq!(
+            rules[0].matching_rule(),
+            MatchingRule::Composite(vec![
+                serde_json::from_str(r#"{ "kind": "exe", "id": "blender.exe" }"#).unwrap(),
+                serde_json::from_str(
+                    r#"{ "kind": "Title", "id": "Blender", "matching_strategy": "DoesNotContain" }"#
+                )
+                .unwrap(),
+            ])
+        );
+    }
+
+    #[test]
+    fn load_application_specific_configuration_with_floating_rules() {
+        let asc = r#"
+        {
+            "Blender": {
+                "floating": [
+                    [
+                        { "kind": "Exe", "id": "blender.exe", "matching_strategy": "Equals" },
+                        { "kind": "Title", "id": "Blender", "matching_strategy": "DoesNotContain" }
+                    ]
+                ],
+                "slow_application": [
+                    { "kind": "Exe", "id": "blender.exe", "matching_strategy": "Equals" }
+                ]
+            },
+            "Games": {
+                "floating": [
+                    { "kind": "Exe", "id": "FPilot.exe", "matching_strategy": "Equals", "pinned": true }
+                ]
+            }
+        }
+        "#;
+        let config =
+            serde_json::from_str::<crate::core::asc::ApplicationSpecificConfiguration>(asc).unwrap();
+
+        use crate::core::asc::AscApplicationRulesOrSchema;
+
+        match &config["Blender"] {
+            AscApplicationRulesOrSchema::AscApplicationRules(rules) => {
+                let floating = rules.floating.as_ref().unwrap();
+                assert_eq!(floating.len(), 1);
+                assert!(matches!(floating[0], FloatingApplicationRule::Composite(..)));
+            }
+            AscApplicationRulesOrSchema::Schema(_) => panic!("expected rules"),
+        }
+
+        match &config["Games"] {
+            AscApplicationRulesOrSchema::AscApplicationRules(rules) => {
+                let floating = rules.floating.as_ref().unwrap();
+                assert_eq!(floating.len(), 1);
+                assert!(floating[0].is_pinned());
+            }
+            AscApplicationRulesOrSchema::Schema(_) => panic!("expected rules"),
+        }
     }
 }

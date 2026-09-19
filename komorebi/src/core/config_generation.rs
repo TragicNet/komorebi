@@ -63,6 +63,47 @@ pub enum MatchingRule {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+/// Rule for matching applications which should be managed as floating windows
+pub enum FloatingApplicationRule {
+    /// Simple matching rule which must evaluate to true
+    Simple(FloatingApplicationRuleSimple),
+    /// Composite matching rule where all conditions must evaluate to true
+    Composite(Vec<IdWithIdentifier>),
+}
+
+impl FloatingApplicationRule {
+    /// Whether this rule pins the floating window across all workspaces on its monitor
+    pub fn is_pinned(&self) -> bool {
+        matches!(
+            self,
+            Self::Simple(rule) if rule.pinned.unwrap_or(false)
+        )
+    }
+
+    /// The matching rule which determines whether an application matches
+    pub fn matching_rule(&self) -> MatchingRule {
+        match self {
+            Self::Simple(rule) => rule.rule.clone(),
+            Self::Composite(composite) => MatchingRule::Composite(composite.clone()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+/// A single floating application matching rule with optional pinning
+pub struct FloatingApplicationRuleSimple {
+    #[serde(flatten)]
+    /// Matching rule for the application
+    pub rule: MatchingRule,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Pin the floating window so it is visible across all workspaces on its monitor
+    pub pinned: Option<bool>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 /// Rule for assigning applications to a workspace
 pub struct WorkspaceMatchingRule {
     /// Target monitor index

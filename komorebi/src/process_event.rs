@@ -19,6 +19,7 @@ use crate::HIDDEN_HWNDS;
 use crate::Layout;
 use crate::Notification;
 use crate::NotificationEvent;
+use crate::PINNED_FLOATING_APPLICATIONS;
 use crate::REGEX_IDENTIFIERS;
 use crate::TRAY_AND_MULTI_WINDOW_IDENTIFIERS;
 use crate::VirtualDesktopNotification;
@@ -570,7 +571,9 @@ impl WindowManager {
 
                         if !workspace_contains_window && needs_reconciliation.is_none() {
                             let floating_applications = FLOATING_APPLICATIONS.lock();
+                            let pinned_floating_applications = PINNED_FLOATING_APPLICATIONS.lock();
                             let mut should_float = false;
+                            let mut should_pin = false;
 
                             if !floating_applications.is_empty() {
                                 let regex_identifiers = REGEX_IDENTIFIERS.lock();
@@ -587,6 +590,18 @@ impl WindowManager {
                                         &regex_identifiers,
                                     )
                                     .is_some();
+
+                                    if !pinned_floating_applications.is_empty() {
+                                        should_pin = should_act(
+                                            &title,
+                                            &exe_name,
+                                            &class,
+                                            &path,
+                                            &pinned_floating_applications,
+                                            &regex_identifiers,
+                                        )
+                                        .is_some();
+                                    }
                                 }
                             }
 
@@ -609,6 +624,9 @@ impl WindowManager {
                                 // on a floating workspace
                                 let center_spawned_floats =
                                     placement.should_center() && workspace.tile;
+                                if should_pin {
+                                    workspace.pin_floating_window(window.hwnd);
+                                }
                                 workspace.floating_windows_mut().push_back(window);
                                 workspace.layer = WorkspaceLayer::Floating;
                                 if center_spawned_floats {
