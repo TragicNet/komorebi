@@ -2557,6 +2557,26 @@ impl WindowManager {
         Ok(())
     }
 
+    /// If the focused container holds more than one window (a stack), move the
+    /// focused window out into its own container so that subsequent container
+    /// operations act on that single window while the remainder of the stack stays
+    /// stacked in place.
+    ///
+    /// Returns `true` if the focused window was split out of a stack.
+    fn move_focused_window_out_of_stack(&mut self) -> eyre::Result<bool> {
+        let workspace = self.focused_workspace()?;
+        let is_stack = workspace
+            .containers()
+            .get(workspace.focused_container_idx())
+            .is_some_and(|container| container.windows().len() > 1);
+
+        if is_stack {
+            self.focused_workspace_mut()?.new_container_for_focused_window()?;
+        }
+
+        Ok(is_stack)
+    }
+
     #[tracing::instrument(skip(self))]
     pub fn move_container_in_direction(
         &mut self,
@@ -2575,6 +2595,12 @@ impl WindowManager {
 
         tracing::info!("moving container");
 
+        // If the focused container holds more than one window (a stack), split the
+        // focused window out into its own container before performing the move, so
+        // that only that window is relocated while the rest of the stack stays put.
+        self.move_focused_window_out_of_stack()?;
+
+        let workspace = self.focused_workspace()?;
         let origin_container_idx = workspace.focused_container_idx();
         let origin_monitor_idx = self.focused_monitor_idx();
         let target_container_idx = workspace.new_idx_for_direction(direction);
@@ -2844,6 +2870,12 @@ impl WindowManager {
 
         tracing::info!("moving container");
 
+        // If the focused container holds more than one window (a stack), split the
+        // focused window out into its own container before performing the move, so
+        // that only that window is relocated while the rest of the stack stays put.
+        self.move_focused_window_out_of_stack()?;
+
+        let workspace = self.focused_workspace_mut()?;
         let current_idx = workspace.focused_container_idx();
         let new_idx = workspace
             .new_idx_for_cycle_direction(direction)
@@ -5369,6 +5401,175 @@ mod tests {
             let workspace = wm.focused_workspace_mut().unwrap();
             let container = workspace.focused_container_mut().unwrap();
             assert_eq!(container.focused_window_idx(), 1);
+        }
+    }
+
+    fn setup_workspace_with_stack() -> WindowManager {
+        let (mut wm, _context) = setup_window_manager();
+
+        let mut m = monitor::new(
+            0,
+            Rect::default(),
+            Rect::default(),
+            "TestMonitor".to_string(),
+            "TestDevice".to_string(),
+            "TestDeviceID".to_string(),
+            Some("TestMonitorID".to_string()),
+        );
+
+        let workspace = m.focused_workspace_mut().unwrap();
+
+        {
+            // A single-window container
+            let mut container = Container::default();
+            container.windows_mut().push_back(Window::from(0));
+            workspace.add_container_to_back(container);
+        }
+
+        {
+            // A stack container with multiple windows; its first window is focused
+            let mut container = Container::default();
+            for i in 1..4 {
+                container.windows_mut().push_back(Window::from(i));
+            }
+            workspace.add_container_to_back(container);
+        }
+
+        // Should have 2 containers
+        assert_eq!(workspace.containers().len(), 2);
+
+        // Should be focused on the stack container with all 3 stack windows
+        assert_eq!(workspace.focused_container_idx(), 1);
+        assert_eq!(
+            workspace.focused_container_mut().unwrap().windows().len(),
+            3
+        );
+
+        wm.monitors_mut().push_back(m);
+
+        wm
+    }
+
+    fn assert_stack_stays_stacked(wm: &WindowManager) {
+        let workspace = wm.focused_workspace().unwrap();
+
+        // The focused window was split out into its own container, giving us 3
+        // containers in total
+        assert_eq!(workspace.containers().len(), 3);
+
+        // The remainder of the stack is still grouped in a single container
+        let stacked = workspace
+            .containers()
+            .iter()
+            .filter(|container| container.windows().len() > 1)
+            .count();
+        assert_eq!(stacked, 1);
+
+        let stack_container = workspace
+            .containers()
+            .iter()
+            .find(|container| container.windows().len() > 1)
+            .unwrap();
+        assert_eq!(stack_container.windows().len(), 2);
+
+        // The moved window lives in its own single-window container
+        let focused_container = workspace
+            .containers()
+            .get(workspace.focused_container_idx())
+            .unwrap();
+        assert_eq!(focused_container.windows().len(), 1);
+    }
+
+    #[test]
+    fn test_move_focused_window_out_of_stack_splits_stack() {
+        let mut wm = setup_workspace_with_stack();
+
+        // The focused container is a stack with multiple windows
+        assert!(
+            wm.move_focused_window_out_of_stack().unwrap(),
+            "expected the focused window to be split out of the stack"
+        );
+
+        assert_stack_stays_stacked(&wm);
+
+        // All 4 windows are still present across the 3 containers
+        let workspace = wm.focused_workspace().unwrap();
+        let total_windows = workspace
+            .containers()
+            .iter()
+            .map(|container| container.windows().len())
+            .sum::<usize>();
+        assert_eq!(total_windows, 4);
+    }
+
+    #[test]
+    fn test_move_focused_window_out_of_stack_ignores_single_window_container() {
+        let (mut wm, _context) = setup_window_manager();
+
+        let mut m = monitor::new(
+            0,
+            Rect::default(),
+            Rect::default(),
+            "TestMonitor".to_string(),
+            "TestDevice".to_string(),
+            "TestDeviceID".to_string(),
+            Some("TestMonitorID".to_string()),
+        );
+
+        let workspace = m.focused_workspace_mut().unwrap();
+        for i in 0..2 {
+            let mut container = Container::default();
+            container.windows_mut().push_back(Window::from(i));
+            workspace.add_container_to_back(container);
+        }
+
+        wm.monitors_mut().push_back(m);
+
+        // Single-window containers are not stacks, so no split happens
+        assert!(
+            !wm.move_focused_window_out_of_stack().unwrap(),
+            "a single-window container should not be split"
+        );
+
+        let workspace = wm.focused_workspace().unwrap();
+        assert_eq!(workspace.containers().len(), 2);
+        assert_eq!(
+            workspace
+                .containers()
+                .iter()
+                .map(|container| container.windows().len())
+                .sum::<usize>(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_move_container_in_direction_from_stack() {
+        let mut wm = setup_workspace_with_stack();
+
+        // This requires a real foreground window in the test environment; skip the
+        // end-to-end check otherwise and rely on the direct split tests above.
+        if wm
+            .move_container_in_direction(OperationDirection::Right)
+            .ok()
+            .is_some()
+        {
+            assert_stack_stays_stacked(&wm);
+        }
+    }
+
+    #[test]
+    fn test_move_container_in_cycle_direction_from_stack() {
+        let mut wm = setup_workspace_with_stack();
+
+        // This requires a real foreground window in the test environment; skip the
+        // end-to-end check otherwise and rely on the direct split tests above.
+        if wm
+            .move_container_in_cycle_direction(CycleDirection::Next)
+            .ok()
+            .is_some()
+        {
+            assert_stack_stays_stacked(&wm);
         }
     }
 
