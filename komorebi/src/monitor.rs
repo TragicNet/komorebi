@@ -335,11 +335,28 @@ impl Monitor {
                 let is_fullscreen = !is_normal && window.is_fullscreen();
                 let is_widget = !is_normal && !is_fullscreen && window.is_widget_window();
 
-                if is_normal || is_fullscreen || is_widget {
+                // A window that is still managed (e.g. a browser whose caption is
+                // temporarily dropped while an HTML5 video plays in fullscreen) must
+                // never be treated as an ignored window: lowering it would hide the
+                // fullscreen video behind the tiled base layer.
+                let is_managed = self
+                    .workspaces()
+                    .iter()
+                    .any(|workspace| workspace.contains_window(window.hwnd));
+
+                let is_candidate = Self::is_ignored_window_candidate(
+                    is_managed,
+                    is_normal,
+                    is_fullscreen,
+                    is_widget,
+                );
+
+                if is_candidate {
                     tracing::debug!(
                         hwnd = window.hwnd,
                         exe = window.exe().unwrap_or_default(),
                         title = window.title().unwrap_or_default(),
+                        is_managed,
                         is_normal_application_window = is_normal,
                         is_fullscreen = is_fullscreen,
                         is_widget_window = is_widget,
@@ -347,16 +364,42 @@ impl Monitor {
                     );
                 }
 
-                is_normal || is_fullscreen || is_widget
+                is_candidate
             })
             .collect()
+    }
+
+    /// Decides whether an unmanaged window should be handled by the ignored
+    /// window layer: it must be a regular application window, a fullscreen
+    /// coverage window or a desktop widget, and it must not be a managed window
+    /// that temporarily dropped its normal styles (e.g. a browser in fullscreen).
+    fn is_ignored_window_candidate(
+        is_managed: bool,
+        is_normal: bool,
+        is_fullscreen: bool,
+        is_widget: bool,
+    ) -> bool {
+        !is_managed && (is_normal || is_fullscreen || is_widget)
     }
 
     /// Lower every ignored window on this monitor below the managed windows, so
     /// that unmanaged windows (e.g. desktop widgets or fullscreen games) never
     /// visually occlude the tiling or floating base layer.
     pub fn lower_ignored_windows(&self) -> eyre::Result<()> {
-        for window in self.ignored_windows() {
+        // Each SetWindowPos(HWND_BOTTOM) call pushes the window below all the
+        // ones lowered before it, so lowering the biggest window first leaves it
+        // highest within the ignored layer. Fullscreen borderless games are the
+        // largest ignored windows, so they end up above smaller desktop widgets
+        // (e.g. Rainmeter meters) instead of being occluded by them.
+        let mut ignored_windows = self.ignored_windows();
+        ignored_windows.sort_by_key(|window| {
+            let area = WindowsApi::window_rect(window.hwnd)
+                .map(|rect| (rect.right - rect.left).max(0) * (rect.bottom - rect.top).max(0))
+                .unwrap_or_default();
+            std::cmp::Reverse(area)
+        });
+
+        for window in ignored_windows {
             if let Err(error) = window.lower() {
                 tracing::warn!(
                     hwnd = window.hwnd,
@@ -1029,5 +1072,21 @@ mod tests {
         // Try to call the ensure workspace count again to ensure it doesn't change
         m.ensure_workspace_count(3);
         assert_eq!(m.workspaces().len(), 5, "Monitor should have 5 workspaces");
+    }
+
+    #[test]
+    fn test_ignored_window_candidate_excludes_managed_windows() {
+        // Unmanaged normal / fullscreen / widget windows are candidates.
+        assert!(Monitor::is_ignored_window_candidate(false, true, false, false));
+        assert!(Monitor::is_ignored_window_candidate(false, false, true, false));
+        assert!(Monitor::is_ignored_window_candidate(false, false, false, true));
+
+        // A managed window (e.g. a browser that dropped its caption during
+        // HTML5 fullscreen) must never enter the ignored window layer.
+        assert!(!Monitor::is_ignored_window_candidate(true, false, true, false));
+        assert!(!Monitor::is_ignored_window_candidate(true, true, false, false));
+
+        // System shell surfaces stay excluded.
+        assert!(!Monitor::is_ignored_window_candidate(false, false, false, false));
     }
 }

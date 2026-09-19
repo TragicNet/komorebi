@@ -582,6 +582,22 @@ impl AspectRatio {
     }
 }
 
+pub(crate) const FULLSCREEN_EDGE_TOLERANCE: i32 = 8;
+
+/// Checks whether `window_rect` covers `monitor_rect` within `tolerance` pixels
+/// on every edge. Pure helper so the fullscreen decision can be unit tested
+/// without touching the Win32 API.
+pub(crate) fn rect_covers_monitor_rect(
+    window_rect: &Rect,
+    monitor_rect: &Rect,
+    tolerance: i32,
+) -> bool {
+    window_rect.left <= monitor_rect.left + tolerance
+        && window_rect.top <= monitor_rect.top + tolerance
+        && window_rect.right >= monitor_rect.right - tolerance
+        && window_rect.bottom >= monitor_rect.bottom - tolerance
+}
+
 impl Window {
     const FLOATING_WINDOW_RESIZE_MARGIN: i32 = 10;
 
@@ -1103,8 +1119,6 @@ impl Window {
     /// even though they visibly occlude the desktop. Used to include such
     /// windows in the ignored window layer.
     pub fn is_fullscreen(self) -> bool {
-        const EDGE_TOLERANCE: i32 = 8;
-
         let hmonitor = HMONITOR(windows_api::as_ptr!(WindowsApi::monitor_from_window(
             self.hwnd
         )));
@@ -1116,15 +1130,25 @@ impl Window {
         let Ok(window_rect) = WindowsApi::window_rect(self.hwnd) else {
             return false;
         };
-        let window_left = window_rect.left;
-        let window_top = window_rect.top;
-        let window_right = window_rect.right;
-        let window_bottom = window_rect.bottom;
 
-        window_left <= monitor_rect.left + EDGE_TOLERANCE
-            && window_top <= monitor_rect.top + EDGE_TOLERANCE
-            && window_right >= monitor_rect.right - EDGE_TOLERANCE
-            && window_bottom >= monitor_rect.bottom - EDGE_TOLERANCE
+        let monitor_rect = Rect {
+            left: monitor_rect.left,
+            top: monitor_rect.top,
+            right: monitor_rect.right,
+            bottom: monitor_rect.bottom,
+        };
+
+        rect_covers_monitor_rect(&window_rect, &monitor_rect, FULLSCREEN_EDGE_TOLERANCE)
+    }
+
+    /// Checks whether this window is in a self-managed fullscreen state: a
+    /// window that covers its entire monitor while no longer looking like a
+    /// normal application window (e.g. a browser with an HTML5 video in
+    /// fullscreen, which drops its caption). Such windows manage their own
+    /// geometry and must not be repositioned by the tiling layout or demoted
+    /// by the ignored window layer, otherwise the fullscreen is interrupted.
+    pub fn is_self_fullscreen(self) -> bool {
+        self.is_fullscreen() && !self.is_normal_application_window()
     }
 
     #[tracing::instrument(fields(exe, title), skip(debug))]
@@ -1703,4 +1727,33 @@ pub fn should_act_individual(
     }
 
     should_act
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
+        Rect { left, top, right, bottom }
+    }
+
+    #[test]
+    fn test_rect_covers_monitor_rect_when_window_matches_monitor() {
+        let monitor = rect(0, 0, 1920, 1080);
+
+        assert!(rect_covers_monitor_rect(&monitor, &monitor, 0));
+        assert!(rect_covers_monitor_rect(&rect(0, 0, 1920, 1080), &monitor, FULLSCREEN_EDGE_TOLERANCE));
+
+        // Edge coordinate slightly inside the monitor still counts as coverage.
+        assert!(rect_covers_monitor_rect(&rect(0, 0, 1916, 1080), &monitor, 8));
+    }
+
+    #[test]
+    fn test_rect_covers_monitor_rect_when_window_does_not_match() {
+        let monitor = rect(0, 0, 1920, 1080);
+
+        assert!(!rect_covers_monitor_rect(&rect(10, 10, 1910, 1070), &monitor, 8));
+        assert!(!rect_covers_monitor_rect(&rect(0, 0, 1920, 500), &monitor, 8));
+        assert!(!rect_covers_monitor_rect(&rect(0, 0, 1920, 1050), &monitor, 8));
+    }
 }

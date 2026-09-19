@@ -274,6 +274,20 @@ pub(crate) fn stack_idx_for_identifiers(
     })
 }
 
+/// Decides whether a tiled window needs to be repositioned to its computed
+/// layout rect. A window managing its own fullscreen state (e.g. a browser
+/// playing an HTML5 video) must be left alone, unless it already occupies the
+/// rect we previously tiled it to, in which case it is a normal tiled window
+/// that simply fills the workspace (e.g. a titleless one about to be split).
+fn should_reposition_window(
+    self_fullscreen: bool,
+    target: &Rect,
+    current: &Rect,
+    previously_matches_current: bool,
+) -> bool {
+    !self_fullscreen || target == current || previously_matches_current
+}
+
 impl Workspace {
     pub fn load_static_config(
         &mut self,
@@ -851,6 +865,8 @@ impl Workspace {
                 let no_titlebar = NO_TITLEBAR.lock().clone();
                 let regex_identifiers = REGEX_IDENTIFIERS.lock().clone();
 
+                let latest_layout = self.latest_layout.clone();
+
                 let containers = self.containers_mut();
 
                 for (i, container) in containers.iter_mut().enumerate() {
@@ -869,38 +885,70 @@ impl Workspace {
                         }
 
                         for window in container.windows() {
-                            if container
-                                .focused_window()
-                                .is_some_and(|w| w.hwnd == window.hwnd)
-                            {
-                                let should_remove_titlebar_for_window = should_act(
-                                    &window.title().unwrap_or_default(),
-                                    &window.exe().unwrap_or_default(),
-                                    &window.class().unwrap_or_default(),
-                                    &window.path().unwrap_or_default(),
-                                    &no_titlebar,
-                                    &regex_identifiers,
-                                )
-                                .is_some();
+                            let current_rect =
+                                WindowsApi::window_rect(window.hwnd).unwrap_or_default();
 
-                                if should_remove_titlebars && should_remove_titlebar_for_window {
-                                    window.remove_title_bar()?;
-                                } else if should_remove_titlebar_for_window {
-                                    window.add_title_bar()?;
+                            // A window managing its own fullscreen state (e.g. a browser
+                            // playing an HTML5 video in fullscreen) must not be
+                            // repositioned back to its tile, otherwise the fullscreen is
+                            // interrupted. Only trust the self-fullscreen signal when the
+                            // window does not simply occupy the rect we previously tiled
+                            // it to, so a tiled window filling the workspace (e.g. a
+                            // titleless one about to be split) is still repositioned.
+                            let self_fullscreen = window.is_self_fullscreen();
+                            let previously_matches_current = latest_layout
+                                .get(i)
+                                .is_some_and(|layout| *layout == current_rect);
+
+                            if !should_reposition_window(
+                                self_fullscreen,
+                                layout,
+                                &current_rect,
+                                previously_matches_current,
+                            ) {
+                                tracing::debug!(
+                                    hwnd = window.hwnd,
+                                    current = ?current_rect,
+                                    layout = ?*layout,
+                                    "update: skipping repositioning of self-fullscreen window",
+                                );
+                            } else {
+                                if !self_fullscreen
+                                    && container
+                                        .focused_window()
+                                        .is_some_and(|w| w.hwnd == window.hwnd)
+                                {
+                                    let should_remove_titlebar_for_window = should_act(
+                                        &window.title().unwrap_or_default(),
+                                        &window.exe().unwrap_or_default(),
+                                        &window.class().unwrap_or_default(),
+                                        &window.path().unwrap_or_default(),
+                                        &no_titlebar,
+                                        &regex_identifiers,
+                                    )
+                                    .is_some();
+
+                                    if should_remove_titlebars
+                                        && should_remove_titlebar_for_window
+                                    {
+                                        window.remove_title_bar()?;
+                                    } else if should_remove_titlebar_for_window {
+                                        window.add_title_bar()?;
+                                    }
+
+                                    // If a window has been unmaximized via toggle-maximize, this block
+                                    // will make sure that it is unmaximized via restore_window
+                                    if window.is_maximized() && !managed_maximized_window {
+                                        tracing::debug!(hwnd = window.hwnd, "update: restoring maximized window before tiling");
+                                        WindowsApi::restore_window(window.hwnd);
+                                    }
                                 }
 
-                                // If a window has been unmaximized via toggle-maximize, this block
-                                // will make sure that it is unmaximized via restore_window
-                                if window.is_maximized() && !managed_maximized_window {
-                                    tracing::debug!(hwnd = window.hwnd, "update: restoring maximized window before tiling");
-                                    WindowsApi::restore_window(window.hwnd);
+                                if current_rect != *layout {
+                                    tracing::debug!(hwnd = window.hwnd, old = ?current_rect, new = ?*layout, "update: repositioning window");
                                 }
+                                window.set_position(layout, false)?;
                             }
-                            let current_rect = WindowsApi::window_rect(window.hwnd).unwrap_or_default();
-                            if current_rect != *layout {
-                                tracing::debug!(hwnd = window.hwnd, old = ?current_rect, new = ?layout, "update: repositioning window");
-                            }
-                            window.set_position(layout, false)?;
                         }
                     }
                 }
@@ -3628,5 +3676,48 @@ mod tests {
         drop(regex_identifiers);
 
         assert_eq!(workspace.stack_rules[0], vec![rule]);
+    }
+
+    #[test]
+    fn test_should_reposition_window_repositions_normal_windows() {
+        let target = Rect {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 100,
+        };
+        let current = Rect {
+            left: 2,
+            top: 2,
+            right: 98,
+            bottom: 98,
+        };
+
+        assert!(should_reposition_window(false, &target, &current, false));
+        assert!(should_reposition_window(false, &target, &target, false));
+    }
+
+    #[test]
+    fn test_should_reposition_window_skips_self_fullscreen() {
+        let target = Rect {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 100,
+        };
+        let current = Rect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+
+        // A self-fullscreen window detached from its tile rect must not move.
+        assert!(!should_reposition_window(true, &target, &current, false));
+
+        // But once it already sits in the rect we previously tiled it to, it is
+        // treated as a normal tiled window and must be repositioned.
+        assert!(should_reposition_window(true, &target, &current, true));
+        assert!(should_reposition_window(true, &target, &target, false));
     }
 }
