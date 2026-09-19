@@ -186,14 +186,122 @@ impl Monitor {
             }
         }
 
-        // Demote ignored windows (e.g. fullscreen borderless windows or desktop
-        // widgets) on this monitor below the managed windows of the newly focused
-        // workspace so that they never visually occlude the tiling or floating
-        // base layer. Skipped when the ignored windows have been manually raised
-        // above managed or there are no managed windows to cover.
-        self.lower_ignored_windows_on_focus()?;
+        // Re-establish the workspace layer stack on this monitor so the whole
+        // tiling/floating base is drawn above the floating overlay and the
+        // ignored (unmanaged widget/fullscreen) windows after a workspace or
+        // monitor switch. Skipped when the ignored windows have been manually
+        // raised above managed or there are no managed windows to cover.
+        self.enforce_layer_stack()?;
 
         Ok(())
+    }
+
+    /// Re-establishes the workspace layer stack for the focused workspace so
+    /// that the layering is consistent after any transition (workspace switch,
+    /// monitor switch, focus-driven layer flip):
+    ///
+    /// ```text
+    /// bottom -> top: ignored windows < base layer < top layer < focused window
+    /// ```
+    ///
+    /// In `Tiling` mode the floating windows form the base and the tiled windows
+    /// the top layer; in `Floating` mode the layers are reversed. Ignored
+    /// (unmanaged widget / fullscreen) windows are only demoted when
+    /// `LOWER_IGNORED_WINDOWS_ON_FOCUS` is enabled and the workspace is
+    /// non-empty, and the manual `ignored_windows_above_managed` layer toggle is
+    /// always respected.
+    #[tracing::instrument(skip(self))]
+    pub fn enforce_layer_stack(&self) -> eyre::Result<()> {
+        let Some(workspace) = self.focused_workspace() else {
+            return Ok(());
+        };
+
+        // Fullscreen (monocle / maximized) windows manage their own stacking, so
+        // only make sure ignored windows do not occlude them.
+        if workspace.monocle_container.is_some() || workspace.maximized_window.is_some() {
+            self.lower_ignored_windows_on_focus()?;
+            return Ok(());
+        }
+
+        if workspace.is_empty() || workspace.ignored_windows_above_managed {
+            return Ok(());
+        }
+
+        let focused_window = match workspace.layer {
+            WorkspaceLayer::Tiling => workspace
+                .focused_container()
+                .and_then(|container| container.focused_window())
+                .copied(),
+            WorkspaceLayer::Floating => workspace.focused_floating_window().copied(),
+        };
+
+        match workspace.layer {
+            WorkspaceLayer::Tiling => {
+                // Floating windows form the base, tiled windows the top layer.
+                for window in workspace.floating_windows() {
+                    self.raise_managed_window(window);
+                }
+                for window in workspace.containers().iter().rev() {
+                    if let Some(window) = window.focused_window() {
+                        self.raise_managed_window(window);
+                    }
+                }
+            }
+            WorkspaceLayer::Floating => {
+                // Tiled windows form the base, floating windows the top layer.
+                for window in workspace.containers() {
+                    if let Some(window) = window.focused_window() {
+                        self.raise_managed_window(window);
+                    }
+                }
+                for window in workspace.floating_windows().iter().rev() {
+                    self.raise_managed_window(window);
+                }
+            }
+        }
+
+        // Keep the focused window of the top layer on the very top.
+        if let Some(window) = focused_window {
+            self.raise_managed_window(&window);
+        }
+
+        // Demote ignored windows below the managed windows as the final z-order
+        // operation, so that desktop widgets and unmanaged fullscreen windows can
+        // never end up above the base or top layer regardless of the async
+        // SetWindowPos ordering. This mirrors the ordering used by the working
+        // ToggleWorkspaceLayer flow, which lowers ignored windows last.
+        self.lower_ignored_windows_on_focus()?;
+
+        // If an ignored window was auto-promoted to the foreground while the
+        // switch was in flight (Windows draws foreground windows above everything
+        // else), hand focus back to the top-layer window so the layer stack is
+        // not visually reverted once the event storm settles.
+        if let Some(foreground) = WindowsApi::foreground_window().ok()
+            && self
+                .ignored_windows()
+                .iter()
+                .any(|window| window.hwnd == foreground)
+            && let Some(window) = focused_window
+        {
+            tracing::debug!(
+                hwnd = foreground,
+                "ignored window auto-promoted to foreground during switch, restoring managed focus",
+            );
+            let _ = WindowsApi::raise_and_focus_window(window.hwnd);
+        }
+
+        Ok(())
+    }
+
+    fn raise_managed_window(&self, window: &Window) {
+        if let Err(error) = window.raise() {
+            tracing::warn!(
+                hwnd = window.hwnd,
+                exe = window.exe().unwrap_or_default(),
+                title = window.title().unwrap_or_default(),
+                "could not raise managed window: {error}"
+            );
+        }
     }
 
     /// Enumerates the ignored (unmanaged) windows currently visible on this

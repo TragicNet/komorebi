@@ -441,6 +441,28 @@ pub fn notify_subscribers(
     Ok(())
 }
 
+/// Writes the list of managed window HWNDs (consumed by e.g. `masir`) to a temp
+/// file and renames it into place, so readers of `komorebi.hwnd.json` never
+/// observe a truncated or empty file mid-write.
+pub(crate) fn write_known_hwnds(hwnds: &[isize]) -> eyre::Result<()> {
+    let hwnd_json = DATA_DIR.join("komorebi.hwnd.json");
+    let tmp_json = DATA_DIR.join("komorebi.hwnd.json.tmp");
+
+    {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(&tmp_json)?;
+        serde_json::to_writer_pretty(&file, hwnds)?;
+        file.sync_all().ok();
+    }
+
+    std::fs::rename(&tmp_json, &hwnd_json)?;
+
+    Ok(())
+}
+
 pub fn load_configuration() -> eyre::Result<()> {
     let config_pwsh = HOME_DIR.join("komorebi.ps1");
     let config_ahk = HOME_DIR.join("komorebi.ahk");

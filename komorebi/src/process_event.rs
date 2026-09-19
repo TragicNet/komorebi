@@ -415,6 +415,7 @@ impl WindowManager {
                 }
 
                 let suppress_layer = self.layer_ignore_count > 0;
+                let previous_layer = self.focused_workspace()?.layer;
 
                 {
                     let workspace = self.focused_workspace_mut()?;
@@ -469,6 +470,15 @@ impl WindowManager {
                 // Consume one count so that the counter eventually reaches 0
                 if self.layer_ignore_count > 0 {
                     self.layer_ignore_count -= 1;
+                }
+
+                // If the focus event flipped the workspace layer, re-establish the
+                // layer stack so the newly focused layer is raised above its base
+                // (e.g. floating windows above the tiling base after focusing one).
+                if previous_layer != self.focused_workspace()?.layer {
+                    self.focused_monitor()
+                        .ok_or_eyre("there is no monitor with this idx")?
+                        .enforce_layer_stack()?;
                 }
 
                 if self.capture_native_maximize(window)? {
@@ -556,6 +566,7 @@ impl WindowManager {
                         let workspace = self.focused_workspace_mut()?;
                         let workspace_contains_window = workspace.contains_window(window.hwnd);
                         let monocle_container = workspace.monocle_container.clone();
+                        let previous_layer = workspace.layer;
 
                         if !workspace_contains_window && needs_reconciliation.is_none() {
                             let floating_applications = FLOATING_APPLICATIONS.lock();
@@ -634,6 +645,15 @@ impl WindowManager {
 
                             // Always focus new windows so the cursor follows them
                             window.focus(self.mouse_follows_focus)?;
+                        }
+
+                        // If adding the window flipped the workspace layer, re-establish
+                        // the layer stack so the whole layer the new window joined is
+                        // drawn above its base consistently.
+                        if previous_layer != self.focused_workspace()?.layer {
+                            self.focused_monitor()
+                                .ok_or_eyre("there is no monitor with this idx")?
+                                .enforce_layer_stack()?;
                         }
 
                         if workspace_contains_window {

@@ -37,6 +37,7 @@ use crate::should_act;
 use crate::stackbar_manager;
 use crate::stackbar_manager::STACKBAR_TAB_HEIGHT;
 use crate::static_config::WorkspaceConfig;
+use crate::static_config::register_workspace_rule_regex;
 use crate::window::Window;
 use crate::window::WindowDetails;
 use crate::windows_api::WindowsApi;
@@ -362,6 +363,16 @@ impl Workspace {
         self.float_override = config.float_override;
 
         self.stack_rules = config.stack_rules.clone().unwrap_or_default();
+
+        // Register the regex identifiers used by `restack` stack matching at the
+        // same time the rules are loaded, so enforcement never silently depends on
+        // a later full configuration reload having run first.
+        {
+            let mut regex_identifiers = REGEX_IDENTIFIERS.lock();
+            for rule in self.stack_rules.iter().flat_map(|stack| stack.iter()) {
+                register_workspace_rule_regex(rule, &mut regex_identifiers)?;
+            }
+        }
 
         self.layout_flip = config.layout_flip;
         self.floating_layer_behaviour = config.floating_layer_behaviour;
@@ -1685,10 +1696,40 @@ impl Workspace {
         self.containers().iter().position(|c| c.id == id)
     }
 
+    /// Re-populates `stack_rules` from this workspace's stored configuration when
+    /// they are currently empty (e.g. on workspaces created at runtime after
+    /// startup), so `enforce-stack-rules` can restack them without requiring a
+    /// full configuration reload first. Regex identifiers for the recovered rules
+    /// are registered at the same time.
+    fn ensure_stack_rules_loaded(&mut self) -> eyre::Result<()> {
+        if !self.stack_rules.is_empty() {
+            return Ok(());
+        }
+
+        let stack_rules = self
+            .workspace_config
+            .as_ref()
+            .and_then(|config| config.stack_rules.as_ref());
+        if stack_rules.is_none_or(|rules| rules.is_empty()) {
+            return Ok(());
+        }
+
+        self.stack_rules = stack_rules.cloned().unwrap_or_default();
+
+        let mut regex_identifiers = REGEX_IDENTIFIERS.lock();
+        for rule in self.stack_rules.iter().flat_map(|stack| stack.iter()) {
+            register_workspace_rule_regex(rule, &mut regex_identifiers)?;
+        }
+
+        Ok(())
+    }
+
     /// Groups tiled windows into stacks based on this workspace's `stack_rules`.
     /// Each inner array of rules defines a stack; matching windows are moved into a single
     /// container for that stack. Windows that match no rule keep their own container.
     pub fn restack(&mut self) -> eyre::Result<()> {
+        self.ensure_stack_rules_loaded()?;
+
         if self.stack_rules.is_empty() || self.containers().is_empty() {
             return Ok(());
         }
@@ -3537,5 +3578,55 @@ mod tests {
             &stack,
             &regex_identifiers,
         ));
+    }
+
+    #[test]
+    fn test_restack_recovers_stack_rules_from_config() {
+        let mut workspace = Workspace::default();
+
+        let rule = simple_rule(
+            crate::core::ApplicationIdentifier::Exe,
+            "firefox.exe",
+            crate::core::config_generation::MatchingStrategy::Equals,
+        );
+        workspace.stack_rules = vec![vec![rule.clone()]];
+        workspace.workspace_config = Some(WorkspaceConfig::from(&workspace));
+
+        // Simulate a workspace created after startup that never had
+        // `load_static_config` applied to it: the instance `stack_rules` are
+        // empty, but the stored workspace config still carries them.
+        workspace.stack_rules = vec![];
+        assert!(workspace.stack_rules.is_empty());
+
+        workspace.restack().unwrap();
+
+        assert_eq!(workspace.stack_rules.len(), 1);
+        assert_eq!(workspace.stack_rules[0], vec![rule.clone()]);
+    }
+
+    #[test]
+    fn test_restack_registers_regex_for_recovered_stack_rules() {
+        let mut workspace = Workspace::default();
+
+        let pattern = "^restack-regex-.*";
+        let rule = simple_rule(
+            crate::core::ApplicationIdentifier::Title,
+            pattern,
+            crate::core::config_generation::MatchingStrategy::Regex,
+        );
+        workspace.stack_rules = vec![vec![rule.clone()]];
+        workspace.workspace_config = Some(WorkspaceConfig::from(&workspace));
+        workspace.stack_rules = vec![];
+        assert!(workspace.stack_rules.is_empty());
+
+        workspace.restack().unwrap();
+
+        // The recovered regex rule must be registered so `restack` matching can
+        // find it without relying on a full configuration reload having run.
+        let regex_identifiers = REGEX_IDENTIFIERS.lock();
+        assert!(regex_identifiers.contains_key(pattern));
+        drop(regex_identifiers);
+
+        assert_eq!(workspace.stack_rules[0], vec![rule]);
     }
 }

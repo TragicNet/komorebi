@@ -1950,6 +1950,11 @@ impl StaticConfig {
             wm.apply_wallpaper_for_monitor_workspace(i, ws_idx)?;
         }
 
+        // Flush the managed window HWND file so integration consumers (e.g. masir)
+        // see a consistent view after the reload instead of transiently only seeing
+        // a subset of the windows that were moved around.
+        wm.update_known_hwnds();
+
         Ok(())
     }
 }
@@ -1980,7 +1985,7 @@ fn populate_option(
     Ok(())
 }
 
-fn register_workspace_rule_regex(
+pub(crate) fn register_workspace_rule_regex(
     rule: &MatchingRule,
     regex_identifiers: &mut HashMap<String, Regex>,
 ) -> eyre::Result<()> {

@@ -1,6 +1,5 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
-use crate::DATA_DIR;
 use crate::HIDING_BEHAVIOUR;
 use crate::HidingBehaviour;
 use crate::NotificationEvent;
@@ -16,7 +15,6 @@ use crossbeam_channel::Sender;
 use lazy_static::lazy_static;
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::fs::OpenOptions;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -132,14 +130,7 @@ fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result<()>
         }
 
         // Save to file
-        let hwnd_json = DATA_DIR.join("komorebi.hwnd.json");
-        let file = OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .create(true)
-            .open(hwnd_json)?;
-
-        serde_json::to_writer_pretty(&file, &wm.known_hwnds.keys().collect::<Vec<_>>())?;
+        crate::write_known_hwnds(&wm.known_hwnds.keys().copied().collect::<Vec<_>>())?;
     }
 
     Ok(())
