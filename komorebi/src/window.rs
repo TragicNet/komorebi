@@ -877,23 +877,6 @@ impl Window {
         self.restore_with_border(true);
     }
 
-    /// Hides the window by DWM cloaking (DWMWA_CLOAK), regardless of the
-    /// configured `window_hiding_behaviour`, and without tracking the window as
-    /// programmatically hidden. Used for ignored fullscreen windows and status
-    /// bars that must never be minimized (e.g. a borderless game or a bar on a
-    /// workspace where the game is being played): cloaking removes the window
-    /// from the DWM presentation without changing its state, so the app cannot
-    /// react to a minimize/restore round trip.
-    pub fn cloak_hide(self) {
-        SetCloak(self.hwnd(), 1, 2);
-    }
-
-    /// Unhides a window previously hidden with `cloak_hide`, regardless of the
-    /// configured `window_hiding_behaviour`.
-    pub fn cloak_restore(self) {
-        SetCloak(self.hwnd(), 1, 0);
-    }
-
     pub fn minimize(self) {
         let exe = self.exe().unwrap_or_default();
         if !exe.contains("komorebi-bar") {

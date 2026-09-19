@@ -298,7 +298,6 @@ impl From<&WindowManager> for State {
                 },
                 last_focused_workspace: monitor.last_focused_workspace,
                 last_switch_at: monitor.last_switch_at,
-                hidden_ignored_game_windows: monitor.hidden_ignored_game_windows.clone(),
                 workspace_names: monitor.workspace_names.clone(),
                 container_padding: monitor.container_padding,
                 workspace_padding: monitor.workspace_padding,

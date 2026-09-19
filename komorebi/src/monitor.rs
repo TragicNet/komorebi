@@ -53,11 +53,6 @@ pub struct Monitor {
     /// event storm that follows a switch, so games never lose focus during gameplay.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_switch_at: Option<u64>,
-    /// Hwnds of ignored fullscreen windows (e.g. borderless games) that were
-    /// hidden when this monitor switched away from their workspace; they are
-    /// restored when the focused workspace is empty again.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub hidden_ignored_game_windows: Vec<isize>,
     pub workspace_names: HashMap<usize, String>,
     pub container_padding: Option<i32>,
     pub workspace_padding: Option<i32>,
@@ -116,7 +111,6 @@ pub fn new(
         workspaces,
         last_focused_workspace: None,
         last_switch_at: None,
-        hidden_ignored_game_windows: vec![],
         workspace_names: HashMap::default(),
         container_padding: None,
         workspace_padding: None,
@@ -169,7 +163,6 @@ impl Monitor {
             workspaces: Default::default(),
             last_focused_workspace: None,
             last_switch_at: None,
-            hidden_ignored_game_windows: vec![],
             workspace_names: Default::default(),
             container_padding: None,
             workspace_padding: None,
@@ -212,56 +205,6 @@ impl Monitor {
                 // all workspaces on this monitor
                 workspace.hide(None);
                 workspace.restore_pinned();
-            }
-        }
-
-        // Ignored fullscreen windows (e.g. borderless games) persist across
-        // workspaces and keep presenting above the managed stack as long as
-        // they hold the foreground - no z-order demotion can beat a foreground
-        // flip-model game. When the user leaves such a game for a workspace
-        // with managed windows, hide it (cloak per the configured hiding
-        // behaviour, like any managed window whose workspace was left) so it
-        // can neither overlay the stack nor fight for the foreground (which
-        // also keeps hide_on_fullscreen status bars from flickering); when they
-        // return to an empty workspace, restore it ready to play.
-        //
-        // The layer work below (enforce/demote) runs after this so it sees the
-        // correct visibility.
-        let (is_empty, ignored_above_managed) = self
-            .focused_workspace()
-            .map(|workspace| (workspace.is_empty(), workspace.ignored_windows_above_managed))
-            .unwrap_or((false, false));
-
-        if !ignored_above_managed {
-            if is_empty {
-                self.restore_hidden_ignored_game_windows()?;
-            } else {
-                self.hide_ignored_game_windows()?;
-            }
-        }
-
-        // A fullscreen game is drawn above the topmost status bar only while
-        // DWM projects it over the topmost band, which is not reliably
-        // re-established after the cloak/uncloak cycle - so while a covering
-        // game is up on this (empty) workspace, hide this monitor's status bar
-        // so the game deterministically has nothing above it. Leaving the
-        // workspace (or any switch to a workspace without a covering game)
-        // brings the bar back. The manual ignored_windows_above_managed layer
-        // toggle is respected.
-        if !ignored_above_managed {
-            let covering_game_up = if is_empty {
-                self.ignored_windows().iter().any(|window| {
-                    !window.is_widget_window()
-                        && (window.is_fullscreen() || window.covers_monitor_or_work_area())
-                })
-            } else {
-                false
-            };
-
-            if covering_game_up {
-                self.hide_monitor_status_bars();
-            } else {
-                self.show_monitor_status_bars();
             }
         }
 
@@ -743,221 +686,9 @@ impl Monitor {
         }
     }
 
-    pub(crate) fn should_hide_ignored_game(is_widget: bool, covers_fullscreen: bool) -> bool {
-        !is_widget && covers_fullscreen
-    }
+    
 
-    /// Hides every ignored fullscreen-coverage window (e.g. a borderless game)
-    /// on this monitor when the user switches away from its workspace, so it
-    /// can neither overlay the managed stack nor fight for the foreground
-    /// (which would also make hide_on_fullscreen status bars flicker). The
-    /// windows are hidden with the configured hiding behaviour (Cloak by
-    /// default), exactly like managed windows whose workspace was left: the
-    /// window state is not changed, so a flip-model game receives no
-    /// minimize/restore messages it could react to, and DWM stops presenting
-    /// the cloaked window, which deterministically drops the fullscreen
-    /// overlay. The windows are recorded so they can be restored when the user
-    /// returns to an empty workspace. Widgets (status bars, desktop meters) are
-    /// left untouched; a fullscreen game is hidden regardless of whether it
-    /// holds the topmost style.
-    fn hide_ignored_game_windows(&mut self) -> eyre::Result<()> {
-        let candidates = self.ignored_windows();
-
-        for window in candidates.iter() {
-            let covers_fullscreen =
-                window.is_fullscreen() || window.covers_monitor_or_work_area();
-            let is_widget = window.is_widget_window();
-
-            tracing::debug!(
-                hwnd = window.hwnd,
-                exe = window.exe().unwrap_or_default(),
-                is_widget = is_widget,
-                is_always_on_top = window.is_always_on_top(),
-                covers_fullscreen = covers_fullscreen,
-                is_cloaked = window.is_cloaked().unwrap_or(false),
-                is_visible = window.is_visible(),
-                "evaluating ignored fullscreen window on switch away",
-            );
-
-            if !Self::should_hide_ignored_game(is_widget, covers_fullscreen) {
-                continue;
-            }
-
-            if !self.hidden_ignored_game_windows.contains(&window.hwnd) {
-                self.hidden_ignored_game_windows.push(window.hwnd);
-            }
-
-            // Already hidden (e.g. the user cloaked it with a virtual desktop
-            // tool); keep it recorded so the return switch still restores it.
-            if !window.is_visible() || window.is_cloaked().unwrap_or(false) {
-                continue;
-            }
-
-            tracing::debug!(
-                hwnd = window.hwnd,
-                exe = window.exe().unwrap_or_default(),
-                title = window.title().unwrap_or_default(),
-                "hiding ignored fullscreen window on switch away",
-            );
-
-            // Cloak the game directly (not via the configured hiding behaviour)
-            // so it is never minimized and receives no window-state change it
-            // could react to; the window is recorded and restored on return.
-            window.cloak_hide();
-        }
-
-        let hidden_exes = candidates
-            .iter()
-            .filter(|window| {
-                !window.is_widget_window()
-                    && (window.is_fullscreen() || window.covers_monitor_or_work_area())
-            })
-            .filter_map(|window| window.exe().ok())
-            .collect::<Vec<_>>();
-
-        tracing::info!(
-            monitor = self.id,
-            candidates = candidates.len(),
-            hidden_exes = tracing::field::debug(hidden_exes),
-            "hiding ignored fullscreen windows on switch to a workspace with managed windows",
-        );
-
-        Ok(())
-    }
-
-    /// Restores the ignored fullscreen windows (e.g. borderless games) that were
-    /// hidden when their workspace was left, so the user can pick the game up
-    /// again after switching to an empty workspace. Stale hwnds (the game was
-    /// closed while hidden) are pruned, and the restored game is given the
-    /// foreground. The restored game is not touched in any other way: it stays
-    /// in the normal z-order and is never minimized, and the status bar on this
-    /// workspace is hidden separately (see `load_focused_workspace`) so the
-    /// game deterministically has nothing above it.
-    fn restore_hidden_ignored_game_windows(&mut self) -> eyre::Result<()> {
-        let mut restored = 0;
-        let mut pruned = 0;
-
-        for hwnd in std::mem::take(&mut self.hidden_ignored_game_windows) {
-            // Prune stale hwnds: the game was closed while hidden.
-            if WindowsApi::window_rect(hwnd).is_err() {
-                pruned += 1;
-                continue;
-            }
-
-            tracing::debug!(
-                hwnd,
-                "restoring ignored fullscreen window on return to empty workspace"
-            );
-            let window = Window::from(hwnd);
-            window.cloak_restore();
-            restored += 1;
-            let _ = WindowsApi::raise_and_focus_window(hwnd);
-        }
-
-        // Self-healing sweep: bring back any covering ignored fullscreen window
-        // that is still DWM-cloaked (e.g. a game whose hide was never recorded,
-        // or a window left cloaked by a previous daemon), so returning to an
-        // empty workspace always restores the game. Invisible windows, minimized
-        // windows, and widgets are never touched.
-        let mut recovered = 0;
-        for window in self.ignored_windows().iter() {
-            let covers_fullscreen =
-                window.is_fullscreen() || window.covers_monitor_or_work_area();
-            if !Self::should_hide_ignored_game(window.is_widget_window(), covers_fullscreen)
-                || !window.is_cloaked().unwrap_or(false)
-                || !window.is_visible()
-                || window.is_minimized()
-            {
-                continue;
-            }
-
-            tracing::debug!(
-                hwnd = window.hwnd,
-                exe = window.exe().unwrap_or_default(),
-                title = window.title().unwrap_or_default(),
-                "recovering cloaked ignored fullscreen window on return to empty workspace",
-            );
-            window.cloak_restore();
-            recovered += 1;
-            let _ = WindowsApi::raise_and_focus_window(window.hwnd);
-        }
-
-        tracing::info!(
-            monitor = self.id,
-            restored = restored,
-            recovered = recovered,
-            pruned = pruned,
-            "restored ignored fullscreen windows on return to an empty workspace",
-        );
-
-        Ok(())
-    }
-
-    /// Enumerates the status bar (komorebi-bar) windows currently on this
-    /// monitor.
-    fn status_bar_windows(&self) -> Vec<Window> {
-        let mut windows: Vec<Window> = vec![];
-        if WindowsApi::enum_windows(
-            Some(windows_callbacks::enum_status_bar),
-            &mut windows as *mut Vec<Window> as isize,
-        )
-        .is_err()
-        {
-            tracing::warn!("could not enumerate status bar windows");
-            return vec![];
-        }
-
-        let monitor_id = self.id;
-        windows
-            .into_iter()
-            .filter(|window| WindowsApi::monitor_from_window(window.hwnd) == monitor_id)
-            .collect()
-    }
-
-    /// Cloaks the status bar on this monitor while a fullscreen game is being
-    /// played on an empty workspace. A game window in the normal z-order can
-    /// never draw above the topmost status bar unless DWM projects it over the
-    /// topmost band, which is not reliably re-established after the
-    /// cloak/uncloak cycle - so the bar is simply not drawn while the game is
-    /// up, which deterministically keeps it off the game without touching the
-    /// game in any way.
-    fn hide_monitor_status_bars(&self) {
-        let bars = self.status_bar_windows();
-        if bars.is_empty() {
-            return;
-        }
-
-        for bar in bars.iter() {
-            bar.cloak_hide();
-        }
-
-        tracing::info!(
-            monitor = self.id,
-            bars = bars.len(),
-            "hiding status bar on the fullscreen game workspace",
-        );
-    }
-
-    /// Uncloaks the status bar on this monitor after leaving the fullscreen
-    /// game workspace (or when no covering game is up).
-    fn show_monitor_status_bars(&self) {
-        let bars = self.status_bar_windows();
-        if bars.is_empty() {
-            return;
-        }
-
-        for bar in bars.iter() {
-            bar.cloak_restore();
-        }
-
-        tracing::info!(
-            monitor = self.id,
-            bars = bars.len(),
-            "showing status bar after leaving the fullscreen game workspace",
-        );
-    }
-
-    /// Updates the `globals` field of all workspaces
+    
     pub fn update_workspaces_globals(&mut self, offset: Option<Rect>) {
         let container_padding = self
             .container_padding
@@ -1701,19 +1432,6 @@ mod tests {
         // Topmost widgets (e.g. a yasb bar with always_on_top) are never
         // demoted by automatic focus/switch demotions.
         assert!(!Monitor::should_auto_demote_predicate(true, true));
-    }
-
-    #[test]
-    fn test_should_hide_ignored_game() {
-        // A borderless game covering the monitor is hidden when switching to
-        // a workspace with managed windows, regardless of the topmost style.
-        assert!(Monitor::should_hide_ignored_game(false, true));
-        // Widgets are never hidden, even if they happen to cover the
-        // work area.
-        assert!(!Monitor::should_hide_ignored_game(true, true));
-        assert!(!Monitor::should_hide_ignored_game(true, false));
-        // A non-covering ignored window (e.g. a floating tool) is left alone.
-        assert!(!Monitor::should_hide_ignored_game(false, false));
     }
 
     #[test]
