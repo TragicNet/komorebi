@@ -375,9 +375,7 @@ mod tests {
     use crate::monitor;
     use crate::workspace::Workspace;
     use parking_lot::MutexGuard;
-    use std::path::PathBuf;
     use std::sync::atomic::Ordering;
-    use uuid::Uuid;
 
     // The transparency statics are process-global, so tests that touch them must run one at a
     // time; otherwise the toggles set by one test leak into another running in parallel.
@@ -422,12 +420,8 @@ mod tests {
 
     fn window_manager_with_floats(floats: &[&[isize]]) -> WindowManager {
         let (_tx, rx) = crossbeam_channel::bounded(1);
-        let socket_path = PathBuf::from(format!(
-            "komorebi-transparency-test-{}.sock",
-            Uuid::new_v4()
-        ));
 
-        let mut wm = WindowManager::new(rx, Some(socket_path)).unwrap();
+        let mut wm = WindowManager::new(rx, None).unwrap();
 
         let mut m = monitor::new(
             0,
