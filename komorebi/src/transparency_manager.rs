@@ -219,9 +219,21 @@ fn decide_targets(
         let focused_workspace_idx = m.focused_workspace_idx();
 
         'workspaces: for (workspace_idx, ws) in m.workspaces().iter().enumerate() {
-            // Only operate on the focused workspace of each monitor
-            // Workspaces with tiling disabled don't have transparent windows
-            if !ws.tile || workspace_idx != focused_workspace_idx {
+            // Non-focused workspaces are hidden; leave their windows at the transparency computed
+            // when they were last focused. Force-opaquing them here would reveal them fully opaque
+            // for one pass when the user switches to them, because the workspace is restored
+            // before the next async pass runs. Only pinned floating windows, which stay visible
+            // across all workspaces on the monitor, are kept opaque.
+            if workspace_idx != focused_workspace_idx {
+                for window in ws.pinned_floating_windows() {
+                    opaque_targets.push(window.hwnd);
+                }
+
+                continue 'workspaces;
+            }
+
+            // Tiling-disabled workspaces don't have transparent windows
+            if !ws.tile {
                 for window in ws.visible_windows().iter().flatten() {
                     opaque_targets.push(window.hwnd);
                 }
@@ -489,9 +501,32 @@ mod tests {
     }
 
     #[test]
+    fn test_non_focused_workspace_windows_are_not_opaqued() {
+        let _guard = StateGuard::enable();
+        // ws0 is focused and holds float 10; ws1 is hidden and holds float 20.
+        let wm = window_manager_with_floats(&[&[10], &[20]]);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        // Only the focused workspace's float is touched; the hidden workspace is left alone so
+        // its windows keep their alpha when the user switches to it.
+        assert_eq!(transparent, vec![10]);
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
     fn test_pinned_floating_window_stays_opaque() {
         let _guard = StateGuard::enable();
-        let wm = window_manager_with_floats(&[&[10], &[10]]);
+        let mut wm = window_manager_with_floats(&[&[10], &[]]);
+
+        // Pin float 10 on ws0, then move focus to ws1 so ws0 is hidden but 10 stays visible.
+        let workspace = &mut wm.monitors_mut()[0].workspaces_mut()[0];
+        workspace.pin_floating_window(10);
+
+        wm.focused_monitor_mut()
+            .unwrap()
+            .focus_workspace(1)
+            .unwrap();
 
         let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
 
