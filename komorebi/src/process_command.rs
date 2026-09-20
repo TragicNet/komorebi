@@ -1428,7 +1428,7 @@ impl WindowManager {
                                 to_focus = Some(*window);
                             } else {
                                 window.restore();
-                                window.raise()?;
+                                window.raise_above_active()?;
                             }
                         }
 
@@ -1436,7 +1436,7 @@ impl WindowManager {
                             // The focused window should be the last one raised to make sure it is
                             // on top
                             focused_window.restore();
-                            focused_window.raise()?;
+                            focused_window.raise_above_active()?;
                         }
 
                         // Show the monitor's pinned windows from other workspaces alongside

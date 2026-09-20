@@ -434,7 +434,7 @@ impl Monitor {
     }
 
     fn raise_managed_window(&self, window: &Window) {
-        if let Err(error) = window.raise() {
+        if let Err(error) = window.raise_sync() {
             tracing::warn!(
                 hwnd = window.hwnd,
                 exe = window.exe().unwrap_or_default(),
