@@ -456,10 +456,11 @@ impl WindowManager {
                 // windows; used to skip re-tapping the pinned band over it.
                 let focused_own_float;
 
-                // Set when the focus-driven layer flip must not re-order the
-                // window stack (e.g. `WorkspaceLayerFocusBehaviour::AlwaysTileNoRaise`),
-                // so the clicked window is left at its Windows-activated z-order.
-                let mut skip_layer_enforce = false;
+                // Set when the focus-driven flip to Tiling must not raise the tiled
+                // windows (`WorkspaceLayerFocusBehaviour::AlwaysTileNoRaise`):
+                // the floating overlay is lowered below the tiling base instead,
+                // which still switches the layer completely.
+                let mut lower_floating_overlay = false;
 
                 // Copied out before the mutable workspace borrow (Copy enum).
                 let focus_behaviour = self.workspace_layer_focus_behaviour;
@@ -506,7 +507,7 @@ impl WindowManager {
                                     WorkspaceLayerFocusBehaviour::AlwaysTileNoRaise => {
                                         workspace.layer = WorkspaceLayer::Tiling;
                                         workspace.layer_lock = false;
-                                        skip_layer_enforce = true;
+                                        lower_floating_overlay = true;
                                     }
                                 }
 
@@ -533,10 +534,16 @@ impl WindowManager {
                 // If the focus event flipped the workspace layer, re-establish the
                 // layer stack so the newly focused layer is raised above its base
                 // (e.g. floating windows above the tiling base after focusing one).
-                if previous_layer != self.focused_workspace()?.layer && !skip_layer_enforce {
-                    self.focused_monitor()
-                        .ok_or_eyre("there is no monitor with this idx")?
-                        .enforce_layer_stack()?;
+                if previous_layer != self.focused_workspace()?.layer {
+                    if lower_floating_overlay {
+                        // Switch to Tiling completely without raising any tiled
+                        // window: lower the floating overlay below the tiling base.
+                        self.lower_floating_overlay()?;
+                    } else {
+                        self.focused_monitor()
+                            .ok_or_eyre("there is no monitor with this idx")?
+                            .enforce_layer_stack()?;
+                    }
                 }
 
                 // Skip the re-assert when the focused window is itself part of the

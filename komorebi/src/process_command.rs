@@ -1513,43 +1513,23 @@ impl WindowManager {
                             {
                                 window.focus(mouse_follows_focus)?;
                             }
-
-                            // Lower the floating windows below the intact base layer. Sorting by
-                            // area means the largest floating windows end up on the bottom of the
-                            // z-order.
-                            let mut window_idx_pairs = workspace
-                                .floating_windows_mut()
-                                .make_contiguous()
-                                .iter()
-                                .collect::<Vec<_>>();
-
-                            // Sort by window area
-                            window_idx_pairs.sort_by_key(|w| {
-                                let rect = WindowsApi::window_rect(w.hwnd).unwrap_or_default();
-                                rect.right * rect.bottom
-                            });
-
-                            for window in window_idx_pairs {
-                                window.lower()?;
-                            }
-
-                            tracing::info!(
-                                container_windows = workspace
-                                    .containers()
-                                    .iter()
-                                    .flat_map(|c| c.windows())
-                                    .count(),
-                                floating_count = workspace.floating_windows().len(),
-                                "Floating->Tiling: post-toggle workspace state",
-                            );
                         }
 
-                        // Pinned floating windows from other workspaces on this monitor
-                        // drop back below the tiling base together with the focused
-                        // workspace's floating overlay, so they respect the toggled layer.
-                        self.focused_monitor()
-                            .ok_or_eyre("there is no monitor")?
-                            .lower_pinned_windows();
+                        // Lower the floating overlay below the intact base layer without
+                        // raising any tiled window, and drop the pinned floating windows of
+                        // other workspaces on this monitor back below the tiling base.
+                        self.lower_floating_overlay()?;
+
+                        let workspace = self.focused_workspace()?;
+                        tracing::info!(
+                            container_windows = workspace
+                                .containers()
+                                .iter()
+                                .flat_map(|c| c.windows())
+                                .count(),
+                            floating_count = workspace.floating_windows().len(),
+                            "Floating->Tiling: post-toggle workspace state",
+                        );
                     }
                 };
 

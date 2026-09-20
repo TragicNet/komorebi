@@ -4438,6 +4438,41 @@ impl WindowManager {
             .ok_or_eyre("there is no workspace")
     }
 
+    /// Lower the focused workspace's floating overlay below the tiling base
+    /// without raising any tiled windows. Used to switch the layer to Tiling
+    /// completely while leaving the tiled windows at their current z-order.
+    ///
+    /// Sorting by area means the largest floating windows end up on the bottom
+    /// of the z-order. The pinned floating windows of other workspaces on this
+    /// monitor drop back below the tiling base together with the overlay.
+    pub(crate) fn lower_floating_overlay(&mut self) -> eyre::Result<()> {
+        {
+            let workspace = self.focused_workspace_mut()?;
+
+            let mut window_idx_pairs = workspace
+                .floating_windows_mut()
+                .make_contiguous()
+                .iter()
+                .collect::<Vec<_>>();
+
+            // Sort by window area
+            window_idx_pairs.sort_by_key(|w| {
+                let rect = WindowsApi::window_rect(w.hwnd).unwrap_or_default();
+                rect.right * rect.bottom
+            });
+
+            for window in window_idx_pairs {
+                window.lower()?;
+            }
+        }
+
+        self.focused_monitor()
+            .ok_or_eyre("there is no monitor")?
+            .lower_pinned_windows();
+
+        Ok(())
+    }
+
     #[tracing::instrument(skip(self))]
     pub fn focus_workspace(&mut self, idx: usize) -> eyre::Result<()> {
         tracing::info!("focusing workspace");
