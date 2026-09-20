@@ -315,20 +315,24 @@ fn decide_targets(
             // WM ring focus (focused_floating_window_idx) tracks that same window; keeping it
             // crisp matters more than honoring ring focus, and ring focus can lag behind the real
             // foreground the same way container focus does (see the container comment above).
-            if TRANSPARENCY_FLOATING.load_consume() {
-                for window in ws.floating_windows() {
-                    let opaque = window.hwnd == foreground_hwnd
-                        || is_transparency_blacklisted(
-                            window,
-                            &transparency_blacklist,
-                            &regex_identifiers,
-                        );
+            // Floats are always emitted as a target: when the toggle is off they must be actively
+            // restored to opaque, otherwise a float dimmed by a previous pass would stay dimmed
+            // (the `visible_windows()` opaque path only runs for non-focused workspaces).
+            let floating_transparency = TRANSPARENCY_FLOATING.load_consume();
 
-                    if opaque {
-                        opaque_targets.push(window.hwnd);
-                    } else {
-                        transparent_targets.push(window.hwnd);
-                    }
+            for window in ws.floating_windows() {
+                let opaque = !floating_transparency
+                    || window.hwnd == foreground_hwnd
+                    || is_transparency_blacklisted(
+                        window,
+                        &transparency_blacklist,
+                        &regex_identifiers,
+                    );
+
+                if opaque {
+                    opaque_targets.push(window.hwnd);
+                } else {
+                    transparent_targets.push(window.hwnd);
                 }
             }
         }
@@ -474,14 +478,14 @@ mod tests {
     }
 
     #[test]
-    fn test_floating_toggle_disabled_leaves_floating_windows_alone() {
+    fn test_floating_toggle_disabled_restores_opaque() {
         let _guard = StateGuard::enable().disable_floating();
         let wm = window_manager_with_floats(&[&[10, 20]]);
 
         let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
 
         assert!(transparent.is_empty());
-        assert!(opaque.is_empty());
+        assert_eq!(opaque, vec![10, 20]);
     }
 
     #[test]
