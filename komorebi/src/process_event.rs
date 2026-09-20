@@ -24,6 +24,7 @@ use crate::REGEX_IDENTIFIERS;
 use crate::TRAY_AND_MULTI_WINDOW_IDENTIFIERS;
 use crate::VirtualDesktopNotification;
 use crate::Window;
+use crate::apply_worker::ApplyWorker;
 use crate::border_manager;
 use crate::border_manager::BORDER_OFFSET;
 use crate::border_manager::BORDER_WIDTH;
@@ -605,16 +606,14 @@ impl WindowManager {
                     // This mirrors why the pinned band is reliable: it is
                     // re-asserted here on every such focus change instead of
                     // relying on a one-shot raise during the layer toggle.
-                    for window in focused_workspace.floating_windows() {
-                        if let Err(error) = window.raise_above_active() {
-                            tracing::warn!(
-                                hwnd = window.hwnd,
-                                exe = window.exe().unwrap_or_default(),
-                                title = window.title().unwrap_or_default(),
-                                "could not re-tap floating window: {error}"
-                            );
-                        }
-                    }
+                    // The raises are posted to the apply worker so a Not
+                    // Responding window can never block the window-manager thread.
+                    let floats = focused_workspace
+                        .floating_windows()
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>();
+                    ApplyWorker::raise_above_active(floats);
                     self.focused_monitor()
                         .ok_or_eyre("there is no monitor with this idx")?
                         .raise_pinned_windows();
@@ -626,14 +625,9 @@ impl WindowManager {
                 // flip, or the forward toggle), so the last-focused window is never
                 // covered by pins.
                 if focused_workspace.layer == WorkspaceLayer::Floating && focused_own_float {
-                    if let Err(error) = window.raise_sync() {
-                        tracing::warn!(
-                            hwnd = window.hwnd,
-                            exe = window.exe().unwrap_or_default(),
-                            title = window.title().unwrap_or_default(),
-                            "could not lift focused floating window: {error}"
-                        );
-                    }
+                    // Posted after the overlay re-tap above so the FIFO worker
+                    // lifts the focused float last, above the pinned band.
+                    ApplyWorker::raise_above_active(vec![window]);
                 }
 
                 if self.capture_native_maximize(window)? {
@@ -725,45 +719,55 @@ impl WindowManager {
                         let mut monitor_pinned_hwnd = None;
 
                         if !workspace_contains_window && needs_reconciliation.is_none() {
-                            let floating_applications = FLOATING_APPLICATIONS.lock();
-                            let pinned_floating_applications = PINNED_FLOATING_APPLICATIONS.lock();
-                            let regex_identifiers = REGEX_IDENTIFIERS.lock();
-                            let mut should_float = false;
-                            let mut should_pin = false;
-
+                            // The rule locks are scoped to the float/pin matching
+                            // below and dropped before any mutation, focus or z-order
+                            // work: holding REGEX_IDENTIFIERS across that work would
+                            // self-deadlock the window-manager thread, because the
+                            // layer-stack and ignored-window passes enumerate windows
+                            // and re-enter should_manage(), which re-locks it.
                             // Pinned-floating rule matching must not depend on the
                             // floating-applications list being non-empty: a window
                             // that is only matched by the pinned rules (e.g. a
                             // file manager pinned across all workspaces) must still
                             // be auto-pinned when a new instance replaces a
                             // previous one whose HWND died.
-                            if let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) =
-                                (window.title(), window.exe(), window.class(), window.path())
-                            {
-                                if !floating_applications.is_empty() {
-                                    should_float = should_act(
-                                        &title,
-                                        &exe_name,
-                                        &class,
-                                        &path,
-                                        &floating_applications,
-                                        &regex_identifiers,
-                                    )
-                                    .is_some();
+                            let (should_float, should_pin) = {
+                                let floating_applications = FLOATING_APPLICATIONS.lock();
+                                let pinned_floating_applications = PINNED_FLOATING_APPLICATIONS.lock();
+                                let regex_identifiers = REGEX_IDENTIFIERS.lock();
+                                let mut should_float = false;
+                                let mut should_pin = false;
+
+                                if let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) =
+                                    (window.title(), window.exe(), window.class(), window.path())
+                                {
+                                    if !floating_applications.is_empty() {
+                                        should_float = should_act(
+                                            &title,
+                                            &exe_name,
+                                            &class,
+                                            &path,
+                                            &floating_applications,
+                                            &regex_identifiers,
+                                        )
+                                        .is_some();
+                                    }
+
+                                    if !pinned_floating_applications.is_empty() {
+                                        should_pin = should_act(
+                                            &title,
+                                            &exe_name,
+                                            &class,
+                                            &path,
+                                            &pinned_floating_applications,
+                                            &regex_identifiers,
+                                        )
+                                        .is_some();
+                                    }
                                 }
 
-                                if !pinned_floating_applications.is_empty() {
-                                    should_pin = should_act(
-                                        &title,
-                                        &exe_name,
-                                        &class,
-                                        &path,
-                                        &pinned_floating_applications,
-                                        &regex_identifiers,
-                                    )
-                                    .is_some();
-                                }
-                            }
+                                (should_float, should_pin)
+                            };
 
                             if behaviour.float_override
                                 || behaviour.floating_layer_override

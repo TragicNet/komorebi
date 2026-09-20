@@ -1,6 +1,7 @@
 #![warn(clippy::all)]
 
 pub mod animation;
+pub mod apply_worker;
 pub mod border_manager;
 pub mod com;
 #[macro_use]

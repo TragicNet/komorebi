@@ -8,6 +8,9 @@ use std::collections::VecDeque;
 use std::convert::TryFrom;
 use std::mem::size_of;
 use std::path::Path;
+use std::sync::OnceLock;
+use std::time::Duration;
+use std::time::Instant;
 use windows::Win32::Foundation::COLORREF;
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Foundation::GetLastError;
@@ -116,7 +119,9 @@ use windows::Win32::UI::WindowsAndMessaging::REGISTER_NOTIFICATION_FLAGS;
 use windows::Win32::UI::WindowsAndMessaging::RealGetWindowClassW;
 use windows::Win32::UI::WindowsAndMessaging::RegisterClassW;
 use windows::Win32::UI::WindowsAndMessaging::RegisterDeviceNotificationW;
+use windows::Win32::UI::WindowsAndMessaging::SMTO_ABORTIFHUNG;
 use windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS;
+use windows::Win32::UI::WindowsAndMessaging::SendMessageTimeoutW;
 use windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD;
 use windows::Win32::UI::WindowsAndMessaging::SPI_GETACTIVEWINDOWTRACKING;
 use windows::Win32::UI::WindowsAndMessaging::SPI_GETFOREGROUNDLOCKTIMEOUT;
@@ -144,6 +149,7 @@ use windows::Win32::UI::WindowsAndMessaging::ShowWindowAsync;
 use windows::Win32::UI::WindowsAndMessaging::SystemParametersInfoW;
 use windows::Win32::UI::WindowsAndMessaging::WINDOW_LONG_PTR_INDEX;
 use windows::Win32::UI::WindowsAndMessaging::WM_CLOSE;
+use windows::Win32::UI::WindowsAndMessaging::WM_NULL;
 use windows::Win32::UI::WindowsAndMessaging::WNDCLASSW;
 use windows::Win32::UI::WindowsAndMessaging::WNDENUMPROC;
 use windows::Win32::UI::WindowsAndMessaging::WS_DISABLED;
@@ -159,6 +165,8 @@ use windows::core::PWSTR;
 use windows::core::Result as WindowsCrateResult;
 use windows_core::BOOL;
 use windows_core::HSTRING;
+
+use parking_lot::Mutex;
 
 use crate::core::Rect;
 
@@ -581,6 +589,12 @@ impl WindowsApi {
     }
 
     pub fn bring_window_to_top(hwnd: isize) -> eyre::Result<()> {
+        // BringWindowToTop sends the window to the top synchronously and can
+        // block on a Not Responding window's thread; skip it in that case.
+        if Self::skip_unresponsive_window(hwnd, "bring window to top") {
+            return Ok(());
+        }
+
         unsafe { BringWindowToTop(HWND(as_ptr!(hwnd))) }.process()
     }
 
@@ -617,6 +631,10 @@ impl WindowsApi {
     /// at that point in time, instead of the ordering being left to the message
     /// queues of the individual window threads.
     pub fn raise_window_sync(hwnd: isize) -> eyre::Result<()> {
+        if Self::skip_unresponsive_window(hwnd, "raise sync") {
+            return Ok(());
+        }
+
         let flags = SetWindowPosition::NO_MOVE
             | SetWindowPosition::NO_SIZE
             | SetWindowPosition::NO_ACTIVATE
@@ -645,6 +663,10 @@ impl WindowsApi {
     /// any owned windows that briefly inherited it (TopMost is viral) drop back
     /// out of the TopMost band together with it.
     pub fn raise_window_above_active(hwnd: isize) -> eyre::Result<()> {
+        if Self::skip_unresponsive_window(hwnd, "raise above active") {
+            return Ok(());
+        }
+
         let flags = SetWindowPosition::NO_MOVE
             | SetWindowPosition::NO_SIZE
             | SetWindowPosition::NO_ACTIVATE
@@ -674,6 +696,10 @@ impl WindowsApi {
     /// pinned/always-on-top tool windows) re-assert their own TopMost state; that
     /// is observable in the layered band via the topmost diagnostics.
     pub fn clear_topmost_window(hwnd: isize) -> eyre::Result<()> {
+        if Self::skip_unresponsive_window(hwnd, "clear topmost") {
+            return Ok(());
+        }
+
         let flags = SetWindowPosition::NO_MOVE
             | SetWindowPosition::NO_SIZE
             | SetWindowPosition::NO_ACTIVATE
@@ -728,6 +754,10 @@ impl WindowsApi {
     /// that point in time, instead of the ordering being left to the message
     /// queues of the individual window threads.
     pub fn lower_window_sync(hwnd: isize) -> eyre::Result<()> {
+        if Self::skip_unresponsive_window(hwnd, "lower sync") {
+            return Ok(());
+        }
+
         let flags = SetWindowPosition::NO_MOVE
             | SetWindowPosition::NO_SIZE
             | SetWindowPosition::NO_ACTIVATE
@@ -765,6 +795,18 @@ impl WindowsApi {
 
     /// set_window_pos calls SetWindowPos without any accounting for Window decorations.
     fn set_window_pos(hwnd: HWND, layout: &Rect, position: HWND, flags: u32) -> eyre::Result<()> {
+        // A synchronous SetWindowPos marshals to the target window's thread and
+        // blocks until it processes the message, so a single Not Responding
+        // window would wedge the caller. Probe the window's thread first when the
+        // call would block (an already-async call via SWP_ASYNCWINDOWPOS can never
+        // block and skips the probe) and leave unresponsive windows in their
+        // current state - the next arrangement retries once they respond.
+        if flags & SWP_ASYNCWINDOWPOS.0 == 0 {
+            if Self::skip_unresponsive_window(hwnd.0 as isize, "set window pos") {
+                return Ok(());
+            }
+        }
+
         unsafe {
             SetWindowPos(
                 hwnd,
@@ -805,6 +847,13 @@ impl WindowsApi {
                 let _ = ShowWindowAsync(HWND(as_ptr!(hwnd)), command);
             };
         } else {
+            // The synchronous ShowWindow marshals to the target window's thread
+            // and can block indefinitely on a Not Responding window; skip it and
+            // leave the window's current state.
+            if Self::skip_unresponsive_window(hwnd, "show window") {
+                return;
+            }
+
             unsafe {
                 let _ = ShowWindow(HWND(as_ptr!(hwnd)), command);
             };
@@ -839,6 +888,12 @@ impl WindowsApi {
     /// This ensures the window state (e.g., minimized) is updated immediately
     /// so that subsequent checks like is_minimized() return accurate results.
     pub fn restore_window_sync(hwnd: isize) {
+        // The synchronous ShowWindow can block indefinitely on a Not Responding
+        // window's thread; skip it and leave the window's current state.
+        if Self::skip_unresponsive_window(hwnd, "restore window sync") {
+            return;
+        }
+
         unsafe {
             let _ = ShowWindow(HWND(as_ptr!(hwnd)), SW_SHOWNOACTIVATE);
         };
@@ -1226,6 +1281,75 @@ impl WindowsApi {
 
     pub fn is_window(hwnd: isize) -> bool {
         unsafe { IsWindow(Option::from(HWND(as_ptr!(hwnd)))) }.into()
+    }
+
+    /// Whether the target window's UI thread currently pumps its message queue.
+    /// Uses `SendMessageTimeoutW` with `WM_NULL` and `SMTO_ABORTIFHUNG`; on a
+    /// hung or suspended thread the call aborts after `timeout_ms` and this
+    /// returns `false`.
+    ///
+    /// Synchronous WinAPI calls such as `SetWindowPos` marshal to the target
+    /// window's thread and block until it processes the message. A single
+    /// Not Responding window could otherwise wedge the whole window manager, so
+    /// callers probe responsiveness before performing such operations and skip
+    /// windows whose thread is not pumping.
+    pub fn is_window_thread_responding(hwnd: isize, timeout_ms: u32) -> bool {
+        if !Self::is_window(hwnd) {
+            return false;
+        }
+
+        let mut result = 0usize;
+        let response = unsafe {
+            SendMessageTimeoutW(
+                HWND(as_ptr!(hwnd)),
+                WM_NULL,
+                WPARAM(0),
+                LPARAM(0),
+                SMTO_ABORTIFHUNG,
+                timeout_ms,
+                Some(&mut result as *mut usize),
+            )
+        };
+        response.0 != 0
+    }
+
+    /// Timeout used to probe a window's thread before a synchronous z-order
+    /// operation. When the window is responding the probe returns almost
+    /// instantly; when it is not, we skip the operation entirely rather than
+    /// block the caller on a Not Responding window.
+    const WINDOW_THREAD_RESPONSE_TIMEOUT_MS: u32 = 100;
+
+    /// Whether a synchronous window operation against `hwnd` should be skipped
+    /// because the window's thread is not responding.
+    ///
+    /// The skip reason is logged at most once per window per cooldown window:
+    /// an unresponsive window can be probed repeatedly by the arrangement and
+    /// z-order passes while events keep arriving, and logging every skip would
+    /// drown the logs.
+    fn skip_unresponsive_window(hwnd: isize, operation: &str) -> bool {
+        if Self::is_window_thread_responding(hwnd, Self::WINDOW_THREAD_RESPONSE_TIMEOUT_MS) {
+            return false;
+        }
+
+        static LAST_SKIP_LOG: OnceLock<Mutex<HashMap<isize, Instant>>> = OnceLock::new();
+        const LOG_COOLDOWN: Duration = Duration::from_secs(10);
+
+        let now = Instant::now();
+        let mut last_skip_log = LAST_SKIP_LOG.get_or_init(|| Mutex::new(HashMap::new())).lock();
+        if let Some(&last) = last_skip_log.get(&hwnd)
+            && now.duration_since(last) < LOG_COOLDOWN
+        {
+            return true;
+        }
+        last_skip_log.insert(hwnd, now);
+        drop(last_skip_log);
+
+        tracing::warn!(
+            hwnd,
+            operation,
+            "skipping synchronous window operation: window thread is not responding"
+        );
+        true
     }
 
     pub fn is_window_visible(hwnd: isize) -> bool {

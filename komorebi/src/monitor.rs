@@ -10,6 +10,7 @@ use color_eyre::eyre::bail;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::apply_worker::ApplyWorker;
 use crate::border_manager::BORDER_ENABLED;
 use crate::border_manager::BORDER_OFFSET;
 use crate::border_manager::BORDER_WIDTH;
@@ -332,15 +333,14 @@ impl Monitor {
                 // and the working floats must be demoted out of the TopMost band
                 // first. Some applications (e.g. pinned/always-on-top tool
                 // windows) re-assert their own TopMost state; that shows up in
-                // the layered band diagnostics.
-                for window in pins.iter().chain(floats.iter()) {
-                    if let Err(error) = WindowsApi::clear_topmost_window(window.hwnd) {
-                        tracing::warn!(
-                            hwnd = window.hwnd,
-                            "could not clear topmost state of layer window: {error}"
-                        );
-                    }
-                }
+                // the layered band diagnostics. Demoting runs on the apply
+                // worker ahead of the raises below, preserving the ordering.
+                let topmost_batch = pins
+                    .iter()
+                    .chain(floats.iter())
+                    .copied()
+                    .collect::<Vec<_>>();
+                ApplyWorker::clear_topmost(topmost_batch);
                 for window in workspace.containers() {
                     if let Some(window) = window.focused_window() {
                         self.raise_managed_window(window);
@@ -474,7 +474,9 @@ impl Monitor {
 
     /// Raise the pinned floating windows of all workspaces on this monitor so
     /// they join the Floating overlay when a workspace layer is toggled to
-    /// Floating. Applied synchronously so the overlay placement is deterministic.
+    /// Floating. Posted to the apply worker so the synchronous TopMost-band
+    /// raise never blocks the window-manager thread on a Not Responding window;
+    /// the worker preserves the deterministic overlay placement.
     /// Uses the transient TopMost band so the pinned windows are displayed above
     /// the currently active window without activating them or stealing focus.
     pub fn raise_pinned_windows(&self) -> Vec<Window> {
@@ -483,51 +485,27 @@ impl Monitor {
             .into_iter()
             .filter(|window| window.is_window())
             .collect::<Vec<_>>();
-        for window in &windows {
-            if let Err(error) = window.raise_above_active() {
-                tracing::warn!(
-                    hwnd = window.hwnd,
-                    exe = window.exe().unwrap_or_default(),
-                    title = window.title().unwrap_or_default(),
-                    "could not raise pinned window: {error}"
-                );
-            }
-        }
+        ApplyWorker::raise_above_active(windows.clone());
         windows
     }
 
     /// Lower the pinned floating windows of all workspaces on this monitor so
     /// they drop back behind the tiling base when a workspace layer is toggled
-    /// back to Tiling. Applied synchronously so they can never end up above the
-    /// tiled windows regardless of the async SetWindowPos ordering.
+    /// back to Tiling. Posted to the apply worker so they can never block the
+    /// window-manager thread on a Not Responding window and never end up above
+    /// the tiled windows regardless of the apply ordering.
     pub fn lower_pinned_windows(&self) -> Vec<Window> {
         let windows = self
             .pinned_windows()
             .into_iter()
             .filter(|window| window.is_window())
             .collect::<Vec<_>>();
-        for window in &windows {
-            if let Err(error) = window.lower_sync() {
-                tracing::warn!(
-                    hwnd = window.hwnd,
-                    exe = window.exe().unwrap_or_default(),
-                    title = window.title().unwrap_or_default(),
-                    "could not lower pinned window: {error}"
-                );
-            }
-        }
+        ApplyWorker::lower(windows.clone());
         windows
     }
 
     fn raise_managed_window(&self, window: &Window) {
-        if let Err(error) = window.raise_sync() {
-            tracing::warn!(
-                hwnd = window.hwnd,
-                exe = window.exe().unwrap_or_default(),
-                title = window.title().unwrap_or_default(),
-                "could not raise managed window: {error}"
-            );
-        }
+        ApplyWorker::raise(vec![*window]);
     }
 
     /// Raise a window above the currently active (foreground) window without
@@ -536,15 +514,10 @@ impl Monitor {
     /// HWND_TOP raise cannot place the Floating overlay above it; this is the
     /// only raise that reliably pops the overlay (pinned band and working
     /// floats) over the tiling base even while a tiled window holds focus.
+    /// Posted to the apply worker so the synchronous raise never blocks the
+    /// window-manager thread.
     fn raise_managed_window_above_active(&self, window: &Window) {
-        if let Err(error) = window.raise_above_active() {
-            tracing::warn!(
-                hwnd = window.hwnd,
-                exe = window.exe().unwrap_or_default(),
-                title = window.title().unwrap_or_default(),
-                "could not raise managed window above the active window: {error}"
-            );
-        }
+        ApplyWorker::raise_above_active(vec![*window]);
     }
 
     /// Enumerates the ignored (unmanaged) windows currently visible on this
@@ -658,6 +631,7 @@ impl Monitor {
             (is_widget, std::cmp::Reverse(area))
         });
 
+        let mut windows_to_lower = Vec::with_capacity(ignored_windows.len());
         for window in ignored_windows {
             if !should_lower(&window) {
                 continue;
@@ -684,15 +658,14 @@ impl Monitor {
                 continue;
             }
 
-            if let Err(error) = window.lower() {
-                tracing::warn!(
-                    hwnd = window.hwnd,
-                    exe = window.exe().unwrap_or_default(),
-                    title = window.title().unwrap_or_default(),
-                    "could not lower ignored window: {error}"
-                );
-            }
+            windows_to_lower.push(window);
         }
+
+        // Lowered on the apply worker so the synchronous HWND_BOTTOM calls
+        // never block the window-manager thread on a Not Responding window.
+        // Each lower pushes the window below the ones lowered before it, so the
+        // collected order is preserved by the worker.
+        ApplyWorker::lower(windows_to_lower);
 
         Ok(())
     }

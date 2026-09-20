@@ -54,6 +54,7 @@ use crate::PINNED_FLOATING_APPLICATIONS;
 use crate::REGEX_IDENTIFIERS;
 use crate::SUBSCRIPTION_SOCKETS;
 use crate::WORKSPACE_MATCHING_RULES;
+use crate::apply_worker::ApplyWorker;
 use crate::border_manager;
 use crate::border_manager::BORDER_OFFSET;
 use crate::border_manager::BORDER_WIDTH;
@@ -1587,8 +1588,6 @@ impl WindowManager {
         let mut pinned_to_apply: Vec<isize> = Vec::new();
         {
             let ws = self.focused_workspace_mut()?;
-            let floating_applications = FLOATING_APPLICATIONS.lock();
-            let pinned_floating_applications = PINNED_FLOATING_APPLICATIONS.lock();
 
             for &hwnd in &untracked {
                 if managed_hwnds.contains(&hwnd)
@@ -1598,42 +1597,53 @@ impl WindowManager {
                 }
 
                 let window = Window::from(hwnd);
-                let mut should_float = false;
-                let mut should_pin = false;
 
-                // Pinned-floating rule matching must not depend on the
-                // floating-applications list being non-empty: a window that is
-                // only matched by the pinned rules must still be auto-pinned
-                // when a new instance replaces a previous one whose HWND died.
-                let regex_identifiers = REGEX_IDENTIFIERS.lock();
+                // The rule locks are scoped to the float/pin matching and dropped
+                // before the window is restored or added to a container, which can
+                // enumerate windows and re-enter should_manage(). Holding
+                // REGEX_IDENTIFIERS across that work would self-deadlock the
+                // window-manager thread. Pinned-floating rule matching must not
+                // depend on the floating-applications list being non-empty: a
+                // window that is only matched by the pinned rules must still be
+                // auto-pinned when a new instance replaces a previous one whose
+                // HWND died.
+                let (should_float, should_pin) = {
+                    let floating_applications = FLOATING_APPLICATIONS.lock();
+                    let pinned_floating_applications = PINNED_FLOATING_APPLICATIONS.lock();
+                    let regex_identifiers = REGEX_IDENTIFIERS.lock();
+                    let mut should_float = false;
+                    let mut should_pin = false;
 
-                if let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) =
-                    (window.title(), window.exe(), window.class(), window.path())
-                {
-                    if !floating_applications.is_empty() {
-                        should_float = should_act(
-                            &title,
-                            &exe_name,
-                            &class,
-                            &path,
-                            &floating_applications,
-                            &regex_identifiers,
-                        )
-                        .is_some();
+                    if let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) =
+                        (window.title(), window.exe(), window.class(), window.path())
+                    {
+                        if !floating_applications.is_empty() {
+                            should_float = should_act(
+                                &title,
+                                &exe_name,
+                                &class,
+                                &path,
+                                &floating_applications,
+                                &regex_identifiers,
+                            )
+                            .is_some();
+                        }
+
+                        if !pinned_floating_applications.is_empty() {
+                            should_pin = should_act(
+                                &title,
+                                &exe_name,
+                                &class,
+                                &path,
+                                &pinned_floating_applications,
+                                &regex_identifiers,
+                            )
+                            .is_some();
+                        }
                     }
 
-                    if !pinned_floating_applications.is_empty() {
-                        should_pin = should_act(
-                            &title,
-                            &exe_name,
-                            &class,
-                            &path,
-                            &pinned_floating_applications,
-                            &regex_identifiers,
-                        )
-                        .is_some();
-                    }
-                }
+                    (should_float, should_pin)
+                };
 
                 tracing::info!(
                     "reclaiming untracked minimized window: {}",
@@ -4603,7 +4613,7 @@ impl WindowManager {
             .raise_pinned_windows();
 
         if let Some(window) = focused_tiled {
-            window.raise_sync()?;
+            ApplyWorker::raise(vec![window]);
             WindowsApi::raise_and_focus_window(window.hwnd)?;
         }
 

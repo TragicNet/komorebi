@@ -19,6 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::Instant;
 use uds_windows::UnixStream;
 
 use crate::CUSTOM_FFM;
@@ -51,6 +52,7 @@ use crate::animation::ANIMATION_ENABLED_PER_ANIMATION;
 use crate::animation::ANIMATION_FPS;
 use crate::animation::ANIMATION_STYLE_GLOBAL;
 use crate::animation::ANIMATION_STYLE_PER_ANIMATION;
+use crate::apply_worker::ApplyWorker;
 use crate::border_manager;
 use crate::border_manager::IMPLEMENTATION;
 use crate::border_manager::STYLE;
@@ -1486,35 +1488,27 @@ impl WindowManager {
                             last_focused_floating_hwnd,
                         );
 
+                        let mut floats_to_raise = Vec::with_capacity(window_idx_pairs.len());
                         for (_, window) in window_idx_pairs.iter() {
                             let window = **window;
                             if to_focus.is_some_and(|w| w.hwnd == window.hwnd) {
                                 continue;
                             }
                             window.restore();
-                            if let Err(error) = window.raise_above_active() {
-                                tracing::warn!(
-                                    hwnd = window.hwnd,
-                                    exe = window.exe().unwrap_or_default(),
-                                    title = window.title().unwrap_or_default(),
-                                    "could not raise floating window: {error}"
-                                );
-                            }
+                            floats_to_raise.push(window);
                         }
 
                         if let Some(focused_window) = &to_focus {
                             // The focused window should be the last one raised to make sure it is
                             // on top
                             focused_window.restore();
-                            if let Err(error) = focused_window.raise_above_active() {
-                                tracing::warn!(
-                                    hwnd = focused_window.hwnd,
-                                    exe = focused_window.exe().unwrap_or_default(),
-                                    title = focused_window.title().unwrap_or_default(),
-                                    "could not raise focused floating window: {error}"
-                                );
-                            }
+                            ApplyWorker::raise_above_active(vec![*focused_window]);
                         }
+
+                        // Raise the rest of the workspace's floating windows on the apply
+                        // worker so a Not Responding window can never block the
+                        // window-manager thread while toggling the layer.
+                        ApplyWorker::raise_above_active(floats_to_raise);
 
                         // Show the monitor's pinned windows from other workspaces alongside
                         // this workspace's own floating windows. Their deterministic z-order
@@ -1561,20 +1555,14 @@ impl WindowManager {
 
                         // Only the monocle window (fullscreen) needs to be lowered so the
                         // floating overlay can sit above it; every other base window keeps its
-                        // position.
+                        // position. Posted to the apply worker ahead of the layer re-stack
+                        // below so the FIFO order lowers it before the overlay raises.
                         if let Some(window) = monocle_window {
                             tracing::info!(
                                 hwnd = window.hwnd,
                                 "Tiling->Floating: lowering monocle window",
                             );
-                            if let Err(error) = window.lower() {
-                                tracing::warn!(
-                                    hwnd = window.hwnd,
-                                    exe = window.exe().unwrap_or_default(),
-                                    title = window.title().unwrap_or_default(),
-                                    "could not lower monocle window: {error}"
-                                );
-                            }
+                            ApplyWorker::lower(vec![window]);
                         }
 
                         // Deterministically re-assert the whole layer stack using the
@@ -2786,32 +2774,72 @@ pub fn read_commands_uds(
     for line in reader.lines() {
         let message = SocketMessage::from_str(&line?)?;
 
-        match wm.try_lock_for(Duration::from_secs(1)) {
-            None => {
-                tracing::warn!(
-                    "could not acquire window manager lock, not processing message: {message}"
-                );
-            }
-            Some(mut wm) => {
-                if wm.is_paused {
-                    return match message {
-                        SocketMessage::TogglePause
-                        | SocketMessage::State
-                        | SocketMessage::GlobalState
-                        | SocketMessage::Stop => Ok(wm.process_command(message, &mut stream)?),
-                        _ => {
-                            tracing::trace!("ignoring while paused");
-                            Ok(())
-                        }
-                    };
-                }
+        // Wait a bounded time for the window-manager lock instead of dropping
+        // the command outright. The lock is only ever held across a single
+        // event-loop pass (z-order application happens on the apply worker and
+        // blocking window operations are probe-guarded), so a missed acquisition
+        // is transient. If the lock is still held after the budget - a path the
+        // guards failed to cover - the command is dropped with a clear error
+        // rather than stalling the connection forever.
+        let Some(mut wm) = acquire_wm_lock(wm, &message) else {
+            continue;
+        };
 
-                wm.process_command(message.clone(), &mut stream)?;
-            }
+        if wm.is_paused {
+            return match message {
+                SocketMessage::TogglePause
+                | SocketMessage::State
+                | SocketMessage::GlobalState
+                | SocketMessage::Stop => Ok(wm.process_command(message, &mut stream)?),
+                _ => {
+                    tracing::trace!("ignoring while paused");
+                    Ok(())
+                }
+            };
         }
+
+        wm.process_command(message.clone(), &mut stream)?;
     }
 
     Ok(())
+}
+
+/// Try to acquire the `WindowManager` lock for at most [`LOCK_WAIT_BUDGET`],
+/// reporting unusually long acquisitions.
+///
+/// Returns `None` if the lock is still contended after the budget: the caller
+/// drops the command (with a clear log line, never silently) instead of holding
+/// the command connection open forever on a wedged window-manager thread.
+fn acquire_wm_lock<'a>(
+    wm: &'a Arc<Mutex<WindowManager>>,
+    message: &SocketMessage,
+) -> Option<parking_lot::MutexGuard<'a, WindowManager>> {
+    const LOCK_WAIT_BUDGET: Duration = Duration::from_secs(10);
+    const CONTENTION_WARN_AT: Duration = Duration::from_secs(2);
+    const ATTEMPT_STEP: Duration = Duration::from_millis(100);
+
+    let started = Instant::now();
+    let mut contention_warned = false;
+    loop {
+        match wm.try_lock_for(ATTEMPT_STEP) {
+            Some(wm) => return Some(wm),
+            None => {
+                let elapsed = started.elapsed();
+                if !contention_warned && elapsed >= CONTENTION_WARN_AT {
+                    tracing::warn!(
+                        "window manager lock held for {elapsed:?}, still waiting before processing message: {message}"
+                    );
+                    contention_warned = true;
+                }
+                if elapsed >= LOCK_WAIT_BUDGET {
+                    tracing::error!(
+                        "timed out after {elapsed:?} waiting for the window manager lock, dropping message: {message}"
+                    );
+                    return None;
+                }
+            }
+        }
+    }
 }
 
 pub fn read_commands_tcp(
@@ -2839,7 +2867,9 @@ pub fn read_commands_tcp(
                     break;
                 };
 
-                let mut wm = wm.lock();
+                let Some(mut wm) = acquire_wm_lock(wm, &message) else {
+                    continue;
+                };
 
                 if wm.is_paused {
                     return match message {
