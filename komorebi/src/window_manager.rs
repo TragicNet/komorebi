@@ -284,10 +284,14 @@ impl WindowManager {
 
                     // Restore this monitor's pinned floating windows and prune
                     // any stale pinned HWNDs whose windows no longer exist.
+                    // Validity is checked against the window, not the process:
+                    // `exe()` resolves the process executable, which survives the
+                    // window being destroyed, so a dead window handled by a still
+                    // running process would otherwise be resurrected as a pin.
                     monitor.pinned_floating = state_monitor.pinned_floating.clone();
                     monitor
                         .pinned_floating
-                        .retain(|hwnd| Window::from(*hwnd).exe().is_ok());
+                        .retain(|hwnd| WindowsApi::is_window(*hwnd));
                 }
 
                 if let Err(error) = monitor.focus_workspace(focused_workspace) {
@@ -1597,12 +1601,16 @@ impl WindowManager {
                 let mut should_float = false;
                 let mut should_pin = false;
 
-                if !floating_applications.is_empty() {
-                    let regex_identifiers = REGEX_IDENTIFIERS.lock();
+                // Pinned-floating rule matching must not depend on the
+                // floating-applications list being non-empty: a window that is
+                // only matched by the pinned rules must still be auto-pinned
+                // when a new instance replaces a previous one whose HWND died.
+                let regex_identifiers = REGEX_IDENTIFIERS.lock();
 
-                    if let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) =
-                        (window.title(), window.exe(), window.class(), window.path())
-                    {
+                if let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) =
+                    (window.title(), window.exe(), window.class(), window.path())
+                {
+                    if !floating_applications.is_empty() {
                         should_float = should_act(
                             &title,
                             &exe_name,
@@ -1612,18 +1620,18 @@ impl WindowManager {
                             &regex_identifiers,
                         )
                         .is_some();
+                    }
 
-                        if !pinned_floating_applications.is_empty() {
-                            should_pin = should_act(
-                                &title,
-                                &exe_name,
-                                &class,
-                                &path,
-                                &pinned_floating_applications,
-                                &regex_identifiers,
-                            )
-                            .is_some();
-                        }
+                    if !pinned_floating_applications.is_empty() {
+                        should_pin = should_act(
+                            &title,
+                            &exe_name,
+                            &class,
+                            &path,
+                            &pinned_floating_applications,
+                            &regex_identifiers,
+                        )
+                        .is_some();
                     }
                 }
 
@@ -2836,7 +2844,40 @@ impl WindowManager {
             .iter()
             .copied()
             .collect::<Vec<Window>>();
-        let pool = Self::floating_cycle_pool(&pins, &own_floats);
+        let mut pool = Self::floating_cycle_pool(&pins, &own_floats);
+
+        // A stale HWND in the cycle pool bricked cycle-focus entirely: focus
+        // fails with `Invalid window handle.` and the command error surfaces in
+        // the socket logs. Drop any member that is no longer a real window
+        // before cycling and prune the dead ones from the monitor's pinned set
+        // (a workspace's floating windows get pruned on their own destroy, but
+        // a stale pin can survive that because restore and reconciliation only
+        // validate process existence).
+        if let Some(monitor) = self.focused_monitor_mut() {
+            pool.retain(|hwnd| {
+                if Window::from(*hwnd).is_window() {
+                    true
+                } else {
+                    if monitor.is_pinned(*hwnd) {
+                        tracing::warn!(
+                            hwnd,
+                            exe = Window::from(*hwnd).exe().unwrap_or_default(),
+                            title = Window::from(*hwnd).title().unwrap_or_default(),
+                            "cycle focus: pruning stale pinned window from the cycle pool",
+                        );
+                        monitor.unpin_floating_window(*hwnd);
+                    } else {
+                        tracing::warn!(
+                            hwnd,
+                            exe = Window::from(*hwnd).exe().unwrap_or_default(),
+                            title = Window::from(*hwnd).title().unwrap_or_default(),
+                            "cycle focus: skipping invalid window in the floating cycle pool",
+                        );
+                    }
+                    false
+                }
+            });
+        }
 
         if pool.is_empty() {
             return Ok(());

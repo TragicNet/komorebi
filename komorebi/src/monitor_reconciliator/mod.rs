@@ -798,7 +798,12 @@ where
                                     workspace_padding: cached.workspace_padding,
                                     wallpaper: cached.wallpaper.clone(),
                                     floating_layer_behaviour: cached.floating_layer_behaviour,
-                                    pinned_floating: cached.pinned_floating.clone(),
+                                    pinned_floating: cached
+                                        .pinned_floating
+                                        .clone()
+                                        .into_iter()
+                                        .filter(|hwnd| WindowsApi::is_window(*hwnd))
+                                        .collect(),
                                 };
 
                                 let focused_workspace_idx = m.focused_workspace_idx();

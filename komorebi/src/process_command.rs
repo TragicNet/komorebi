@@ -348,10 +348,24 @@ impl WindowManager {
                 let focused_workspace = self.focused_workspace()?;
                 match focused_workspace.layer {
                     WorkspaceLayer::Tiling => {
-                        self.focus_container_in_cycle_direction(
-                            direction,
-                            cycle_focus_across_monitors_override,
-                        )?;
+                        // A workspace with no tiled content still hosts the
+                        // monitor's pinned floating windows, so when there is
+                        // nothing to cycle in the tiling containers fall back
+                        // to the floating cycle pool (pins) instead of doing
+                        // nothing.
+                        let workspace_empty = focused_workspace.is_empty();
+                        let has_pins = self
+                            .focused_monitor()
+                            .map(|monitor| !monitor.pinned_windows().is_empty())
+                            .unwrap_or(false);
+                        if workspace_empty && has_pins {
+                            self.focus_floating_window_in_cycle_direction(direction)?;
+                        } else {
+                            self.focus_container_in_cycle_direction(
+                                direction,
+                                cycle_focus_across_monitors_override,
+                            )?;
+                        }
                     }
                     WorkspaceLayer::Floating => {
                         self.focus_floating_window_in_cycle_direction(direction)?;

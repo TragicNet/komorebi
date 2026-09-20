@@ -294,6 +294,12 @@ impl Monitor {
             }
         };
 
+// The overlay raise must clear the active window to sit above the
+        // tiling base: a plain HWND_TOP raise cannot climb the foreground
+        // window, so the pins, floats and focused window are raised via the
+        // transient TopMost-band raise instead.
+        let layer_is_floating = matches!(workspace.layer, WorkspaceLayer::Floating);
+
         match workspace.layer {
             WorkspaceLayer::Tiling => {
                 // Floating windows form the base, tiled windows the top layer.
@@ -315,7 +321,11 @@ impl Monitor {
                 // base -> pins -> floats -> focused, with no pins-over-floats
                 // artifact. A focused pin still surfaces via the focused-window
                 // raise below.
-                let pins = self.pinned_windows();
+                let pins = self
+                    .pinned_windows()
+                    .into_iter()
+                    .filter(|window| window.is_window())
+                    .collect::<Vec<_>>();
                 let floats = workspace.floating_windows();
                 // A window in the TopMost band can never be climbed by a plain
                 // HWND_TOP raise from a normal-band window, so the pinned band
@@ -337,21 +347,26 @@ impl Monitor {
                     }
                 }
                 for window in &pins {
-                    self.raise_managed_window(window);
+                    self.raise_managed_window_above_active(window);
                 }
                 for window in floats.iter().rev() {
-                    self.raise_managed_window(window);
+                    self.raise_managed_window_above_active(window);
                 }
             }
         }
 
         // Keep the focused window of the top layer on the very top. Done after
-        // the pinned band is positioned so the raised (HWND_TOP) focused window
-        // ends up above the pinned floating windows, which the transient
-        // TopMost-style raise in `raise_pinned_windows` would otherwise leave
-        // covering the focused floating window on the Floating layer.
+        // the pinned band is positioned so the raised focused window ends up
+        // above the pinned floating windows and the rest of the overlay. On the
+        // Floating layer the raise must also clear the active window so the last
+        // focused window tops the whole overlay regardless of which window holds
+        // the foreground.
         if let Some(window) = focused_window {
-            self.raise_managed_window(&window);
+            if layer_is_floating {
+                self.raise_managed_window_above_active(&window);
+            } else {
+                self.raise_managed_window(&window);
+            }
         }
 
         // Demote ignored windows below the managed windows as the final z-order
@@ -463,7 +478,11 @@ impl Monitor {
     /// Uses the transient TopMost band so the pinned windows are displayed above
     /// the currently active window without activating them or stealing focus.
     pub fn raise_pinned_windows(&self) -> Vec<Window> {
-        let windows = self.pinned_windows();
+        let windows = self
+            .pinned_windows()
+            .into_iter()
+            .filter(|window| window.is_window())
+            .collect::<Vec<_>>();
         for window in &windows {
             if let Err(error) = window.raise_above_active() {
                 tracing::warn!(
@@ -482,7 +501,11 @@ impl Monitor {
     /// back to Tiling. Applied synchronously so they can never end up above the
     /// tiled windows regardless of the async SetWindowPos ordering.
     pub fn lower_pinned_windows(&self) -> Vec<Window> {
-        let windows = self.pinned_windows();
+        let windows = self
+            .pinned_windows()
+            .into_iter()
+            .filter(|window| window.is_window())
+            .collect::<Vec<_>>();
         for window in &windows {
             if let Err(error) = window.lower_sync() {
                 tracing::warn!(
@@ -503,6 +526,23 @@ impl Monitor {
                 exe = window.exe().unwrap_or_default(),
                 title = window.title().unwrap_or_default(),
                 "could not raise managed window: {error}"
+            );
+        }
+    }
+
+    /// Raise a window above the currently active (foreground) window without
+    /// activating it, via the transient TopMost-band raise. The foreground
+    /// window is always re-asserted to the top of the Z order, so a plain
+    /// HWND_TOP raise cannot place the Floating overlay above it; this is the
+    /// only raise that reliably pops the overlay (pinned band and working
+    /// floats) over the tiling base even while a tiled window holds focus.
+    fn raise_managed_window_above_active(&self, window: &Window) {
+        if let Err(error) = window.raise_above_active() {
+            tracing::warn!(
+                hwnd = window.hwnd,
+                exe = window.exe().unwrap_or_default(),
+                title = window.title().unwrap_or_default(),
+                "could not raise managed window above the active window: {error}"
             );
         }
     }

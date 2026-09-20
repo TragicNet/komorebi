@@ -606,7 +606,7 @@ impl WindowManager {
                     // re-asserted here on every such focus change instead of
                     // relying on a one-shot raise during the layer toggle.
                     for window in focused_workspace.floating_windows() {
-                        if let Err(error) = window.raise_sync() {
+                        if let Err(error) = window.raise_above_active() {
                             tracing::warn!(
                                 hwnd = window.hwnd,
                                 exe = window.exe().unwrap_or_default(),
@@ -727,15 +727,20 @@ impl WindowManager {
                         if !workspace_contains_window && needs_reconciliation.is_none() {
                             let floating_applications = FLOATING_APPLICATIONS.lock();
                             let pinned_floating_applications = PINNED_FLOATING_APPLICATIONS.lock();
+                            let regex_identifiers = REGEX_IDENTIFIERS.lock();
                             let mut should_float = false;
                             let mut should_pin = false;
 
-                            if !floating_applications.is_empty() {
-                                let regex_identifiers = REGEX_IDENTIFIERS.lock();
-
-                                if let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) =
-                                    (window.title(), window.exe(), window.class(), window.path())
-                                {
+                            // Pinned-floating rule matching must not depend on the
+                            // floating-applications list being non-empty: a window
+                            // that is only matched by the pinned rules (e.g. a
+                            // file manager pinned across all workspaces) must still
+                            // be auto-pinned when a new instance replaces a
+                            // previous one whose HWND died.
+                            if let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) =
+                                (window.title(), window.exe(), window.class(), window.path())
+                            {
+                                if !floating_applications.is_empty() {
                                     should_float = should_act(
                                         &title,
                                         &exe_name,
@@ -745,18 +750,18 @@ impl WindowManager {
                                         &regex_identifiers,
                                     )
                                     .is_some();
+                                }
 
-                                    if !pinned_floating_applications.is_empty() {
-                                        should_pin = should_act(
-                                            &title,
-                                            &exe_name,
-                                            &class,
-                                            &path,
-                                            &pinned_floating_applications,
-                                            &regex_identifiers,
-                                        )
-                                        .is_some();
-                                    }
+                                if !pinned_floating_applications.is_empty() {
+                                    should_pin = should_act(
+                                        &title,
+                                        &exe_name,
+                                        &class,
+                                        &path,
+                                        &pinned_floating_applications,
+                                        &regex_identifiers,
+                                    )
+                                    .is_some();
                                 }
                             }
 
