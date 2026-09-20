@@ -4,10 +4,13 @@ use crossbeam_channel::Receiver;
 use crossbeam_channel::Sender;
 use crossbeam_utils::atomic::AtomicConsume;
 use parking_lot::Mutex;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
+use std::time::Duration;
+use std::time::Instant;
 
 use crate::REGEX_IDENTIFIERS;
 use crate::TRANSPARENCY_BLACKLIST;
@@ -15,6 +18,7 @@ use crate::Window;
 use crate::WindowManager;
 use crate::WindowsApi;
 use crate::should_act;
+use crate::workspace::WorkspaceLayer;
 
 pub static TRANSPARENCY_ENABLED: AtomicBool = AtomicBool::new(false);
 pub static TRANSPARENCY_ALPHA: AtomicU8 = AtomicU8::new(200);
@@ -69,10 +73,24 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
     let receiver = event_rx();
     event_tx().send(Notification)?;
 
+    // Minimum time between passes; short enough to feel responsive, long enough to absorb rapid
+    // focus changes into a single repaint of the final state.
+    const SETTLE_DURATION: Duration = Duration::from_millis(50);
+    let mut last_pass = Instant::now();
+
     'receiver: for _ in &receiver {
         // Coalesce notifications that accumulated while the previous pass was running; a single
         // follow-up pass immediately after is enough to pick up any state change.
         while receiver.try_recv().is_ok() {}
+
+        // Settle: if a pass just ran, wait out the remainder of the settle window so a rapid focus
+        // chase (clicking/alt-tabbing across containers) paints the final state instead of flipping
+        // windows transparent/opaque on every intermediate focus event.
+        let elapsed = last_pass.elapsed();
+        if elapsed < SETTLE_DURATION {
+            std::thread::sleep(SETTLE_DURATION - elapsed);
+        }
+        last_pass = Instant::now();
 
         let known_hwnds = KNOWN_HWNDS.get_or_init(|| Mutex::new(Vec::new()));
         if !TRANSPARENCY_ENABLED.load_consume() {
@@ -187,9 +205,13 @@ fn decide_targets(
                 // Update the transparency for all containers on this workspace
 
                 // If the window is not focused on the current workspace, or isn't on the focused monitor
-                // make it transparent
+                // make it transparent. On a Floating workspace every tiled window is an unfocused
+                // background under the raised floating overlay, so none of them is treated as focused.
                 #[allow(clippy::collapsible_else_if)]
-                if idx != ws.focused_container_idx() || monitor_idx != focused_monitor_idx {
+                if idx != ws.focused_container_idx()
+                    || monitor_idx != focused_monitor_idx
+                    || ws.layer == WorkspaceLayer::Floating
+                {
                     let focused_window_idx = c.focused_window_idx();
                     for (window_idx, window) in c.windows().iter().enumerate() {
                         if window_idx == focused_window_idx {
@@ -216,7 +238,16 @@ fn decide_targets(
                             }
 
                             if should_make_transparent {
-                                transparent_targets.push(window.hwnd);
+                                // Never paint the OS foreground window transparent: the container that
+                                // WM state considers 'focused' can lag behind the real foreground while
+                                // focus events are reconciled, so making the foreground window of an
+                                // unreconciled container transparent would flip the window the user is
+                                // interacting with to alpha < 255 - a flicker storm while clicking around.
+                                if window.hwnd == foreground_hwnd {
+                                    opaque_targets.push(window.hwnd);
+                                } else {
+                                    transparent_targets.push(window.hwnd);
+                                }
                             }
                         } else {
                             // just in case, this is useful when people are clicking around
@@ -239,5 +270,17 @@ fn decide_targets(
         }
     }
 
-    (transparent_targets, opaque_targets)
+    // Deduplicate opaque targets (the maximized foreground window can be pushed once per monitor)
+    // and let opaque win over transparent so a window is never flipped both ways within a pass.
+    let mut unique_opaque = Vec::with_capacity(opaque_targets.len());
+    let mut seen_opaque = HashSet::new();
+    for hwnd in opaque_targets {
+        if seen_opaque.insert(hwnd) {
+            unique_opaque.push(hwnd);
+        }
+    }
+
+    transparent_targets.retain(|hwnd| !seen_opaque.contains(hwnd));
+
+    (transparent_targets, unique_opaque)
 }
