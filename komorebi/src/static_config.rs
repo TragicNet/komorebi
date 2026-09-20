@@ -15,6 +15,7 @@ use crate::PINNED_FLOATING_APPLICATIONS;
 use crate::FLOATING_WINDOW_TOGGLE_ASPECT_RATIO;
 use crate::FloatingLayerBehaviour;
 use crate::HIDING_BEHAVIOUR;
+use crate::HIDE_PINNED_ON_EMPTY_WORKSPACES;
 use crate::IGNORE_IDENTIFIERS;
 use crate::LAYERED_WHITELIST;
 use crate::LAYOUT_DEFAULTS;
@@ -146,6 +147,19 @@ pub struct BorderColours {
     /// Border colour when the container is unfocused and locked
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unfocused_locked: Option<Colour>,
+    /// Border colour when the window is pinned across all workspaces
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<Colour>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+/// Pinning configuration options
+pub struct PinningConfig {
+    /// Hide all pinned floating windows while the focused workspace is empty
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(extend("default" = false)))]
+    pub hide_on_empty_workspaces: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -180,6 +194,10 @@ pub struct ThemeOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = komorebi_themes::Base16Value::Base08)))]
     pub unfocused_locked_border: Option<komorebi_themes::Base16Value>,
+    /// Border colour when the window is pinned across all workspaces
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(extend("default" = komorebi_themes::Base16Value::Base0E)))]
+    pub pinned_border: Option<komorebi_themes::Base16Value>,
     /// Stackbar focused tab text colour
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = komorebi_themes::Base16Value::Base0B)))]
@@ -737,6 +755,9 @@ pub struct StaticConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = LOWER_IGNORED_WINDOWS_ON_FOCUS)))]
     pub lower_ignored_windows_on_focus: Option<bool>,
+    /// Pinning configuration options
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pinning: Option<PinningConfig>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -919,6 +940,7 @@ impl From<&WindowManager> for StaticConfig {
                 unfocused_locked: Option::from(Colour::from(
                     border_manager::UNFOCUSED_LOCKED.load(Ordering::SeqCst),
                 )),
+                pinned: Option::from(Colour::from(border_manager::PINNED.load(Ordering::SeqCst))),
             })
         };
 
@@ -1032,6 +1054,11 @@ impl From<&WindowManager> for StaticConfig {
             lower_ignored_windows_on_focus: Option::from(
                 LOWER_IGNORED_WINDOWS_ON_FOCUS.load(Ordering::SeqCst),
             ),
+            pinning: Option::from(PinningConfig {
+                hide_on_empty_workspaces: Some(
+                    HIDE_PINNED_ON_EMPTY_WORKSPACES.load(Ordering::SeqCst),
+                ),
+            }),
         }
     }
 }
@@ -1194,6 +1221,10 @@ impl StaticConfig {
                 border_manager::UNFOCUSED_LOCKED
                     .store(u32::from(unfocused_locked), Ordering::SeqCst);
             }
+
+            if let Some(pinned) = colours.pinned {
+                border_manager::PINNED.store(u32::from(pinned), Ordering::SeqCst);
+            }
         } else {
             border_manager::FOCUSED
                 .store(u32::from(Colour::Rgb(Rgb::new(66, 165, 245))), Ordering::SeqCst);
@@ -1207,6 +1238,8 @@ impl StaticConfig {
                 .store(u32::from(Colour::Rgb(Rgb::new(128, 128, 128))), Ordering::SeqCst);
             border_manager::UNFOCUSED_LOCKED
                 .store(u32::from(Colour::Rgb(Rgb::new(158, 8, 8))), Ordering::SeqCst);
+            border_manager::PINNED
+                .store(u32::from(Colour::Rgb(Rgb::new(179, 138, 249))), Ordering::SeqCst);
         }
 
         STYLE.store(self.border_style.unwrap_or_default());
@@ -1465,6 +1498,14 @@ impl StaticConfig {
             Ordering::SeqCst,
         );
 
+        HIDE_PINNED_ON_EMPTY_WORKSPACES.store(
+            self.pinning
+                .as_ref()
+                .and_then(|pinning| pinning.hide_on_empty_workspaces)
+                .unwrap_or(false),
+            Ordering::SeqCst,
+        );
+
         transparency_manager::send_notification();
 
         Ok(())
@@ -1559,6 +1600,7 @@ impl StaticConfig {
                 .workspace_layer_focus_behaviour
                 .unwrap_or_default(),
             layer_flip_suppress_until: None,
+            overlay_maintenance_until: None,
             hotwatch: Hotwatch::new()?,
             has_pending_raise_op: false,
             pending_move_op: Arc::new(None),
@@ -2269,6 +2311,8 @@ mod tests {
 use crate::core::config_generation::FloatingApplicationRule;
     use crate::core::config_generation::FloatingApplicationRuleSimple;
     use crate::core::config_generation::MatchingRule;
+    use crate::HIDE_PINNED_ON_EMPTY_WORKSPACES;
+    use std::sync::atomic::Ordering;
 
     #[test]
     #[ignore = "this fails on github actions due to rate limiting changes introduced in may 2025"]
@@ -2446,5 +2490,46 @@ use crate::core::config_generation::FloatingApplicationRule;
             }
             AscApplicationRulesOrSchema::Schema(_) => panic!("expected rules"),
         }
+    }
+
+    #[test]
+    fn pinning_config_is_optional_and_applies_to_globals() {
+        // Missing `pinning` key: nothing is stored and globals default to off
+        let mut config = serde_json::from_str::<StaticConfig>(r#"{ "name": "test" }"#).unwrap();
+        assert_eq!(config.pinning, None);
+        HIDE_PINNED_ON_EMPTY_WORKSPACES.store(true, Ordering::SeqCst);
+        config
+            .apply_globals()
+            .expect("default config applies without the pinning key");
+        assert!(!HIDE_PINNED_ON_EMPTY_WORKSPACES.load(Ordering::SeqCst));
+
+        // Optional nested option may be omitted
+        let config = serde_json::from_str::<StaticConfig>(r#"{ "pinning": {} }"#).unwrap();
+        assert_eq!(
+            config.pinning.unwrap().hide_on_empty_workspaces,
+            None
+        );
+
+        // Enabling the option stores it into the global the monitors read
+        let mut config = serde_json::from_str::<StaticConfig>(
+            r#"{ "pinning": { "hide_on_empty_workspaces": true } }"#,
+        )
+        .unwrap();
+        config
+            .apply_globals()
+            .expect("pinning config applies cleanly");
+        assert!(HIDE_PINNED_ON_EMPTY_WORKSPACES.load(Ordering::SeqCst));
+
+        // The config round-trips through serialization
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(serialized.contains("\"pinning\""));
+        assert!(serialized.contains("\"hide_on_empty_workspaces\":true"));
+        let round_tripped = serde_json::from_str::<StaticConfig>(&serialized).unwrap();
+        assert_eq!(
+            round_tripped.pinning.unwrap().hide_on_empty_workspaces,
+            Some(true)
+        );
+
+        HIDE_PINNED_ON_EMPTY_WORKSPACES.store(false, Ordering::SeqCst);
     }
 }

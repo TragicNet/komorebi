@@ -667,6 +667,14 @@ impl WindowsApi {
             return Ok(());
         }
 
+        // The window is already in the persistent TopMost band: it renders above
+        // the active window by definition, so the transient TopMost dance below
+        // would be pure churn (and can make the OS re-emit a SystemForeground
+        // event for the raised window, feeding a focus-change storm).
+        if Self::is_topmost_window(hwnd)? {
+            return Ok(());
+        }
+
         let flags = SetWindowPosition::NO_MOVE
             | SetWindowPosition::NO_SIZE
             | SetWindowPosition::NO_ACTIVATE
@@ -709,6 +717,33 @@ impl WindowsApi {
             HWND(as_ptr!(hwnd)),
             &Rect::default(),
             HWND_NOTOPMOST,
+            flags.bits(),
+        )
+    }
+
+    /// Place the window into the TopMost band persistently
+    /// (`WS_EX_TOPMOST`) without activating or focusing it, applied
+    /// synchronously regardless of `WINDOW_HANDLING_BEHAVIOUR`.
+    ///
+    /// Unlike the transient [`Self::raise_window_above_active`] raise, which
+    /// drops back out of the TopMost band, a TopMost window stays above every
+    /// normal-band window even when deactivated, exactly like an "always on top"
+    /// status bar. The window keeps its TopMost state until it is demoted again
+    /// with [`Self::clear_topmost_window`].
+    pub fn make_topmost_window(hwnd: isize) -> eyre::Result<()> {
+        if Self::skip_unresponsive_window(hwnd, "make topmost") {
+            return Ok(());
+        }
+
+        let flags = SetWindowPosition::NO_MOVE
+            | SetWindowPosition::NO_SIZE
+            | SetWindowPosition::NO_ACTIVATE
+            | SetWindowPosition::SHOW_WINDOW;
+
+        Self::set_window_pos(
+            HWND(as_ptr!(hwnd)),
+            &Rect::default(),
+            HWND_TOPMOST,
             flags.bits(),
         )
     }

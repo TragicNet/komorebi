@@ -189,6 +189,9 @@ impl Default for GlobalState {
                 unfocused_locked: Option::from(Colour::Rgb(Rgb::from(
                     border_manager::UNFOCUSED_LOCKED.load(Ordering::SeqCst),
                 ))),
+                pinned: Option::from(Colour::Rgb(Rgb::from(
+                    border_manager::PINNED.load(Ordering::SeqCst),
+                ))),
             },
             border_style: STYLE.load(),
             border_offset: border_manager::BORDER_OFFSET.load(Ordering::SeqCst),
@@ -312,6 +315,7 @@ impl From<&WindowManager> for State {
                 wallpaper: monitor.wallpaper.clone(),
                 floating_layer_behaviour: monitor.floating_layer_behaviour,
                 pinned_floating: monitor.pinned_floating.clone(),
+                pinned_always_on_top: monitor.pinned_always_on_top.clone(),
             })
             .collect::<VecDeque<_>>();
         stripped_monitors.focus(wm.monitors.focused_idx());

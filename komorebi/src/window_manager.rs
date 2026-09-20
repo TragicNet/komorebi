@@ -76,6 +76,12 @@ use crate::winevent_listener;
 use crate::workspace::Workspace;
 use crate::workspace::WorkspaceLayer;
 
+/// Minimum interval between Floating-overlay z-order maintenance passes.
+/// Re-tapping the overlay (the focused float, the floating band and the pinned
+/// band) on every FocusChange can make the OS re-emit a SystemForeground event
+/// for the raised window, feeding a self-sustaining focus-change storm.
+const OVERLAY_MAINTENANCE_INTERVAL: u64 = 250;
+
 #[derive(Debug)]
 pub struct WindowManager {
     pub monitors: Ring<Monitor>,
@@ -102,6 +108,14 @@ pub struct WindowManager {
     /// of flipping a Floating workspace to Tiling. Genuine user focus changes
     /// (clicks, keyboard focus, focus-follows-mouse) are never suppressed.
     pub(crate) layer_flip_suppress_until: Option<Instant>,
+    /// Deadline before which repeated Floating-overlay z-order maintenance on
+    /// focus changes is skipped. The overlay re-taps and focused-float lifts
+    /// use the transient TopMost-band raise; re-running them on every single
+    /// FocusChange can make the OS re-emit a SystemForeground event for the
+    /// raised window, feeding a focus-change storm (~50ms cadence) that renders
+    /// the window unresponsive. Throttling them collapses the cascade to a
+    /// single maintenance pass per interval without affecting layering.
+    pub(crate) overlay_maintenance_until: Option<Instant>,
     pub hotwatch: Hotwatch,
     pub virtual_desktop_id: Option<Vec<u8>>,
     pub has_pending_raise_op: bool,
@@ -178,6 +192,7 @@ impl WindowManager {
             cycle_focus_across_monitors: false,
             workspace_layer_focus_behaviour: WorkspaceLayerFocusBehaviour::default(),
             layer_flip_suppress_until: None,
+            overlay_maintenance_until: None,
             hotwatch: Hotwatch::new()?,
             has_pending_raise_op: false,
             keep_monocle_on_window_close: true,
@@ -3428,25 +3443,27 @@ impl WindowManager {
         let hwnd = WindowsApi::foreground_window()?;
 
         // Pins live on the monitor; a window may be toggled from any workspace.
-        let is_floating = self
-            .focused_workspace()?
-            .floating_windows()
-            .iter()
-            .any(|w| w.hwnd == hwnd);
+        let (is_floating, is_focused_tiled) = {
+            let workspace = self.focused_workspace()?;
+            // A tiled foreground window is floated on toggle before being
+            // pinned, so the command works on both floating and tiling
+            // windows; the float is driven by komorebi's focus, not the
+            // (possibly stale) live foreground.
+            let is_floating = workspace
+                .floating_windows()
+                .iter()
+                .any(|w| w.hwnd == hwnd);
+            let is_focused_tiled = workspace
+                .focused_container()
+                .and_then(|container| container.focused_window())
+                .map(|window| window.hwnd == hwnd)
+                .unwrap_or(false);
+            (is_floating, is_focused_tiled)
+        };
         let is_pinned = self
             .focused_monitor()
             .map(|monitor| monitor.is_pinned(hwnd))
             .unwrap_or(false);
-
-        // Only floating windows can be pinned; tiling windows are never pinned.
-        // Pinned windows can be unpinned from any workspace.
-        if !is_floating && !is_pinned {
-            tracing::warn!(
-                hwnd,
-                "ignoring toggle-pin command: only floating windows can be pinned"
-            );
-            return Ok(());
-        }
 
         if is_pinned {
             // Unpinning re-floats the window on the focused workspace.
@@ -3457,10 +3474,23 @@ impl WindowManager {
                 .floating_windows_mut()
                 .push_back(Window::from(hwnd));
             self.focused_workspace_mut()?.layer = WorkspaceLayer::Floating;
-        } else {
+        } else if is_floating {
             self.focused_monitor_mut()
                 .ok_or_eyre("there is no monitor")?
                 .pin_floating_window(hwnd);
+        } else if is_focused_tiled {
+            // Float the focused tiled window first, then pin it so it stays
+            // visible across all workspaces on this monitor.
+            self.float_window()?;
+            self.focused_monitor_mut()
+                .ok_or_eyre("there is no monitor")?
+                .pin_floating_window(hwnd);
+        } else {
+            tracing::warn!(
+                hwnd,
+                "ignoring toggle-pin command: the foreground window is neither floating nor the focused tiling window"
+            );
+            return Ok(());
         }
 
         // Refresh the monitor so visibility follows the new pin state
@@ -3468,6 +3498,29 @@ impl WindowManager {
         if let Some(monitor) = self.focused_monitor_mut() {
             monitor.load_focused_workspace(mouse_follows_focus, false)?;
         }
+
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub fn toggle_pin_always_on_top(&mut self) -> eyre::Result<()> {
+        let hwnd = WindowsApi::foreground_window()?;
+
+        let Some(monitor) = self.focused_monitor_mut() else {
+            bail!("there is no monitor");
+        };
+
+        // Only windows pinned on this monitor can be toggled; unpinned windows
+        // are never promoted to the always-on-top band.
+        if !monitor.is_pinned(hwnd) {
+            tracing::warn!(
+                hwnd,
+                "ignoring toggle-pin-always-on-top command: the foreground window is not pinned"
+            );
+            return Ok(());
+        }
+
+        monitor.toggle_pin_always_on_top(hwnd);
 
         Ok(())
     }
@@ -4655,6 +4708,23 @@ impl WindowManager {
             .unwrap_or(false)
     }
 
+    /// Record that a Floating-overlay maintenance pass just ran; the next one
+    /// is skipped for `OVERLAY_MAINTENANCE_INTERVAL` so a focus-change storm
+    /// (an OS SystemForeground echo caused by the transient TopMost raise)
+    /// cannot cascade at event rate.
+    pub(crate) fn note_overlay_maintenance(&mut self) {
+        self.overlay_maintenance_until =
+            Some(Instant::now() + Duration::from_millis(OVERLAY_MAINTENANCE_INTERVAL));
+    }
+
+    /// Whether a Floating-overlay maintenance pass is currently being throttled
+    /// because one ran very recently.
+    pub(crate) fn is_overlay_maintenance_suppressed(&self) -> bool {
+        self.overlay_maintenance_until
+            .map(|deadline| Instant::now() < deadline)
+            .unwrap_or(false)
+    }
+
     /// Lower every ignored window on the focused monitor below the managed
     /// windows, so that unmanaged windows (e.g. desktop widgets or fullscreen
     /// games) never visually occlude the tiling or floating base layer.
@@ -4867,6 +4937,34 @@ mod tests {
         // we should be able to successfully focus an existing workspace too
         wm.focus_workspace(0).unwrap();
         assert_eq!(wm.focused_workspace_idx().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_state_includes_pinned_always_on_top() {
+        use crate::state::State;
+
+        let (mut wm, _context) = setup_window_manager();
+
+        let m = monitor::new(
+            0,
+            Rect::default(),
+            Rect::default(),
+            "TestMonitor".to_string(),
+            "TestDevice".to_string(),
+            "TestDeviceID".to_string(),
+            Some("TestMonitorID".to_string()),
+        );
+        wm.monitors_mut().push_back(m);
+
+        {
+            let monitor = wm.focused_monitor_mut().unwrap();
+            monitor.pin_floating_window(10);
+            monitor.toggle_pin_always_on_top(10);
+        }
+
+        let state = State::from(&wm);
+        assert_eq!(state.monitors.elements()[0].pinned_floating, vec![10]);
+        assert_eq!(state.monitors.elements()[0].pinned_always_on_top, vec![10]);
     }
 
     #[test]

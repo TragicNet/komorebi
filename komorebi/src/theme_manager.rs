@@ -81,6 +81,7 @@ pub fn handle_notifications() -> color_eyre::Result<()> {
             stack_border,
             monocle_border,
             floating_border,
+            pinned_border,
             unfocused_border,
             unfocused_locked_border,
             stackbar_focused_text,
@@ -93,6 +94,7 @@ pub fn handle_notifications() -> color_eyre::Result<()> {
                 stack_border,
                 monocle_border,
                 floating_border,
+                pinned_border,
                 unfocused_border,
                 unfocused_locked_border,
                 stackbar_focused_text,
@@ -114,6 +116,10 @@ pub fn handle_notifications() -> color_eyre::Result<()> {
 
                 let floating_border = floating_border
                     .unwrap_or(komorebi_themes::CatppuccinValue::Yellow)
+                    .color32(name.as_theme());
+
+                let pinned_border = pinned_border
+                    .unwrap_or(komorebi_themes::CatppuccinValue::Mauve)
                     .color32(name.as_theme());
 
                 let unfocused_border = unfocused_border
@@ -141,6 +147,7 @@ pub fn handle_notifications() -> color_eyre::Result<()> {
                     stack_border,
                     monocle_border,
                     floating_border,
+                    pinned_border,
                     unfocused_border,
                     unfocused_locked_border,
                     stackbar_focused_text,
@@ -154,6 +161,7 @@ pub fn handle_notifications() -> color_eyre::Result<()> {
                 stack_border,
                 monocle_border,
                 floating_border,
+                pinned_border,
                 unfocused_border,
                 unfocused_locked_border,
                 stackbar_focused_text,
@@ -185,6 +193,10 @@ pub fn handle_notifications() -> color_eyre::Result<()> {
                     .unwrap_or(komorebi_themes::Base16Value::Base09)
                     .color32(Base16Wrapper::Base16(*name));
 
+                let pinned_border = pinned_border
+                    .unwrap_or(komorebi_themes::Base16Value::Base0E)
+                    .color32(Base16Wrapper::Base16(*name));
+
                 let stackbar_focused_text = stackbar_focused_text
                     .unwrap_or(komorebi_themes::Base16Value::Base0B)
                     .color32(Base16Wrapper::Base16(*name));
@@ -202,6 +214,7 @@ pub fn handle_notifications() -> color_eyre::Result<()> {
                     stack_border,
                     monocle_border,
                     floating_border,
+                    pinned_border,
                     unfocused_border,
                     unfocused_locked_border,
                     stackbar_focused_text,
@@ -215,6 +228,7 @@ pub fn handle_notifications() -> color_eyre::Result<()> {
                 stack_border,
                 monocle_border,
                 floating_border,
+                pinned_border,
                 unfocused_border,
                 unfocused_locked_border,
                 stackbar_focused_text,
@@ -246,6 +260,10 @@ pub fn handle_notifications() -> color_eyre::Result<()> {
                     .unwrap_or(komorebi_themes::Base16Value::Base09)
                     .color32(Base16Wrapper::Custom(colours.clone()));
 
+                let pinned_border = pinned_border
+                    .unwrap_or(komorebi_themes::Base16Value::Base0E)
+                    .color32(Base16Wrapper::Custom(colours.clone()));
+
                 let stackbar_focused_text = stackbar_focused_text
                     .unwrap_or(komorebi_themes::Base16Value::Base0B)
                     .color32(Base16Wrapper::Custom(colours.clone()));
@@ -263,6 +281,7 @@ pub fn handle_notifications() -> color_eyre::Result<()> {
                     stack_border,
                     monocle_border,
                     floating_border,
+                    pinned_border,
                     unfocused_border,
                     unfocused_locked_border,
                     stackbar_focused_text,
@@ -276,6 +295,7 @@ pub fn handle_notifications() -> color_eyre::Result<()> {
         border_manager::MONOCLE.store(u32::from(Colour::from(monocle_border)), Ordering::SeqCst);
         border_manager::STACK.store(u32::from(Colour::from(stack_border)), Ordering::SeqCst);
         border_manager::FLOATING.store(u32::from(Colour::from(floating_border)), Ordering::SeqCst);
+        border_manager::PINNED.store(u32::from(Colour::from(pinned_border)), Ordering::SeqCst);
         border_manager::UNFOCUSED
             .store(u32::from(Colour::from(unfocused_border)), Ordering::SeqCst);
         border_manager::UNFOCUSED_LOCKED.store(

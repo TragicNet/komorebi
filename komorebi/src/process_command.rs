@@ -456,6 +456,7 @@ impl WindowManager {
             SocketMessage::ToggleLock => self.toggle_lock()?,
             SocketMessage::ToggleFloat => self.toggle_float(false)?,
             SocketMessage::TogglePin => self.toggle_pin_floating_window()?,
+            SocketMessage::TogglePinAlwaysOnTop => self.toggle_pin_always_on_top()?,
             SocketMessage::ToggleMonocle => self.toggle_monocle()?,
             SocketMessage::ToggleMaximize => self.toggle_maximize()?,
             SocketMessage::ContainerPadding(monitor_idx, workspace_idx, size) => {
@@ -2543,6 +2544,9 @@ if (!(Get-Process komorebi-bar -ErrorAction SilentlyContinue))
                     }
                     WindowKind::Floating => {
                         border_manager::FLOATING.store(Rgb::new(r, g, b).into(), Ordering::SeqCst);
+                    }
+                    WindowKind::Pinned => {
+                        border_manager::PINNED.store(Rgb::new(r, g, b).into(), Ordering::SeqCst);
                     }
                 }
                 force_update_borders = true;

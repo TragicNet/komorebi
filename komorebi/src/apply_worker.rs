@@ -31,6 +31,9 @@ pub enum ApplyOp {
     Lower(Vec<Window>),
     /// Demote each window out of the TopMost band (synchronous `HWND_NOTOPMOST`).
     ClearTopmost(Vec<Window>),
+    /// Place each window into the persistent TopMost band (synchronous
+    /// `HWND_TOPMOST`), so it renders above every normal-band window.
+    MakeTopmost(Vec<Window>),
 }
 
 pub struct ApplyWorker;
@@ -100,6 +103,18 @@ impl ApplyWorker {
                     }
                 }
             }
+            ApplyOp::MakeTopmost(windows) => {
+                for window in windows {
+                    if let Err(error) = crate::windows_api::WindowsApi::make_topmost_window(
+                        window.hwnd,
+                    ) {
+                        tracing::warn!(
+                            hwnd = window.hwnd,
+                            "could not make window topmost: {error}"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -134,6 +149,13 @@ impl ApplyWorker {
     pub fn clear_topmost(windows: Vec<Window>) {
         if !windows.is_empty() {
             Self::enqueue(ApplyOp::ClearTopmost(windows));
+        }
+    }
+
+    /// Place the given windows into the persistent TopMost band, in order.
+    pub fn make_topmost(windows: Vec<Window>) {
+        if !windows.is_empty() {
+            Self::enqueue(ApplyOp::MakeTopmost(windows));
         }
     }
 }

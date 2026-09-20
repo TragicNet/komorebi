@@ -1422,8 +1422,11 @@ enum SubCommand {
     /// Toggle floating mode for the focused window
     ToggleFloat,
     /// Pin or unpin the focused window so it is visible across all workspaces.
-    /// Only floating windows can be pinned; tiling windows are never pinned.
+    /// Tiling windows are floated first, then pinned.
     TogglePin,
+    /// Toggle whether the focused pinned window is rendered above everything
+    /// else via the persistent TopMost band, like an "always on top" status bar.
+    TogglePinAlwaysOnTop,
     /// Toggle monocle mode for the focused container
     ToggleMonocle,
     /// Toggle native maximization for the focused window
@@ -2327,6 +2330,9 @@ fn main() -> eyre::Result<()> {
         }
         SubCommand::TogglePin => {
             send_message(&SocketMessage::TogglePin)?;
+        }
+        SubCommand::TogglePinAlwaysOnTop => {
+            send_message(&SocketMessage::TogglePinAlwaysOnTop)?;
         }
         SubCommand::ToggleMonocle => {
             send_message(&SocketMessage::ToggleMonocle)?;

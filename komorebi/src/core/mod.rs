@@ -119,8 +119,11 @@ pub enum SocketMessage {
     ToggleMonocle,
     ToggleMaximize,
     /// Pin or unpin the focused window so it is visible across all workspaces.
-    /// Only floating windows can be pinned; tiling windows are never pinned.
+    /// Tiling windows are floated first, then pinned.
     TogglePin,
+    /// Toggle whether the focused pinned window is rendered above everything
+    /// else via the persistent TopMost band, like an "always on top" status bar.
+    TogglePinAlwaysOnTop,
     ToggleWindowContainerBehaviour,
     ToggleFloatOverride,
     WindowHidingBehaviour(HidingBehaviour),
@@ -385,6 +388,8 @@ pub enum WindowKind {
     UnfocusedLocked,
     /// Floating window
     Floating,
+    /// Pinned floating window
+    Pinned,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, Display, EnumString, ValueEnum)]

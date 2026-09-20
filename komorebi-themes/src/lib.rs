@@ -452,6 +452,10 @@ pub struct KomorebiThemeCatppuccin {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = CatppuccinValue::Yellow)))]
     pub floating_border: Option<CatppuccinValue>,
+    /// Pinned floating window border colour
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(extend("default" = CatppuccinValue::Mauve)))]
+    pub pinned_border: Option<CatppuccinValue>,
     /// Unfocused window border colour
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = CatppuccinValue::Base)))]
@@ -503,6 +507,10 @@ pub struct KomorebiThemeBase16 {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = Base16Value::Base09)))]
     pub floating_border: Option<Base16Value>,
+    /// Pinned floating window border colour
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(extend("default" = Base16Value::Base0E)))]
+    pub pinned_border: Option<Base16Value>,
     /// Unfocused window border colour
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = Base16Value::Base01)))]
@@ -554,6 +562,10 @@ pub struct KomorebiThemeCustom {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = Base16Value::Base09)))]
     pub floating_border: Option<Base16Value>,
+    /// Pinned floating window border colour
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(extend("default" = Base16Value::Base0E)))]
+    pub pinned_border: Option<Base16Value>,
     /// Unfocused window border colour
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = Base16Value::Base01)))]

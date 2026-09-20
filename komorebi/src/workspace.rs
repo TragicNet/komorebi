@@ -589,6 +589,10 @@ impl Workspace {
                             .theme_options
                             .as_ref()
                             .and_then(|o| o.floating_border),
+                        pinned_border: wallpaper
+                            .theme_options
+                            .as_ref()
+                            .and_then(|o| o.pinned_border),
                         unfocused_border: wallpaper
                             .theme_options
                             .as_ref()

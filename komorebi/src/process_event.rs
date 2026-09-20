@@ -588,46 +588,68 @@ impl WindowManager {
                     }
                 }
 
+                // The overlay maintenance below re-taps the focused float, the
+                // floating band and the pinned band via the transient TopMost-
+                // band raise. The OS can answer each raise with a new
+                // SystemForeground event for the raised window, and re-running
+                // the raise on every single FocusChange then feeds a
+                // self-sustaining focus-change storm (a ~50ms cascade that
+                // renders the floated window unresponsive). Throttling the
+                // maintenance collapses that cascade to one pass per interval:
+                // the overlay's z-order does not degrade on a no-op focus event
+                // in between, so skipping the redundant re-tap is safe.
+                let overlay_maintenance_suppressed = self.is_overlay_maintenance_suppressed();
+
                 // Skip the re-assert when the focused window is itself part of the
                 // Floating overlay (an own floating window or a pinned window):
                 // tapping the overlay above it would visually cover the window that
                 // was just focused (e.g. when cycle-focusing between floating
                 // windows). The overlay is still re-tapped over an active tiled
                 // window so it stays in the Floating band.
-                let focused_workspace = self.focused_workspace()?;
-                if focused_workspace.layer == WorkspaceLayer::Floating
-                    && !focused_own_float
-                    && !is_pinned
                 {
-                    // Re-tap the whole Floating overlay (this workspace's own
-                    // floating windows, then the pinned band of the other
-                    // workspaces on this monitor) so it remains above the tiling
-                    // base across focus changes that settle on a tiling window.
-                    // This mirrors why the pinned band is reliable: it is
-                    // re-asserted here on every such focus change instead of
-                    // relying on a one-shot raise during the layer toggle.
-                    // The raises are posted to the apply worker so a Not
-                    // Responding window can never block the window-manager thread.
+                    let focused_workspace = self.focused_workspace()?;
+                    let layer = focused_workspace.layer;
                     let floats = focused_workspace
                         .floating_windows()
                         .iter()
                         .copied()
                         .collect::<Vec<_>>();
-                    ApplyWorker::raise_above_active(floats);
-                    self.focused_monitor()
-                        .ok_or_eyre("there is no monitor with this idx")?
-                        .raise_pinned_windows();
-                }
 
-                // The focused window is one of this workspace's own floating
-                // windows: lift it above the pinned band regardless of what raised
-                // the pins first (a re-tap over a focused tiled window, the layer
-                // flip, or the forward toggle), so the last-focused window is never
-                // covered by pins.
-                if focused_workspace.layer == WorkspaceLayer::Floating && focused_own_float {
-                    // Posted after the overlay re-tap above so the FIFO worker
-                    // lifts the focused float last, above the pinned band.
-                    ApplyWorker::raise_above_active(vec![window]);
+                    if !overlay_maintenance_suppressed
+                        && layer == WorkspaceLayer::Floating
+                        && !focused_own_float
+                        && !is_pinned
+                    {
+                        // Re-tap the whole Floating overlay (this workspace's own
+                        // floating windows, then the pinned band of the other
+                        // workspaces on this monitor) so it remains above the tiling
+                        // base across focus changes that settle on a tiling window.
+                        // This mirrors why the pinned band is reliable: it is
+                        // re-asserted here on every such focus change instead of
+                        // relying on a one-shot raise during the layer toggle.
+                        // The raises are posted to the apply worker so a Not
+                        // Responding window can never block the window-manager thread.
+                        ApplyWorker::raise_above_active(floats);
+                        self.focused_monitor()
+                            .ok_or_eyre("there is no monitor with this idx")?
+                            .raise_pinned_windows();
+                        self.note_overlay_maintenance();
+                    }
+
+                    // The focused window is one of this workspace's own floating
+                    // windows: lift it above the pinned band regardless of what raised
+                    // the pins first (a re-tap over a focused tiled window, the layer
+                    // flip, or the forward toggle), so the last-focused window is never
+                    // covered by pins.
+                    if !overlay_maintenance_suppressed
+                        && layer == WorkspaceLayer::Floating
+                        && focused_own_float
+                    {
+                        // Posted after the overlay re-tap above so the FIFO worker
+                        // lifts the focused float last, above the pinned band.
+                        ApplyWorker::raise_above_active(vec![window]);
+                        self.note_overlay_maintenance();
+                    }
                 }
 
                 if self.capture_native_maximize(window)? {
@@ -637,6 +659,24 @@ impl WindowManager {
             WindowManagerEvent::Show(_, window)
             | WindowManagerEvent::Manage(window)
             | WindowManagerEvent::Uncloak(_, window) => {
+                // Pinned windows live outside every workspace list
+                // (monitor.pinned_floating alone), so a Show/Uncloak event from
+                // their komorebi-driven hide/restore is unrecognisable as an
+                // already-managed window here and would be treated as a brand-new
+                // window: re-added to a workspace, focused and re-laid-out. That
+                // focuses the pin (flipping the layer to Floating), spawns
+                // phantom tiles and feeds a hide/show event storm. Their
+                // visibility is owned exclusively by apply_pin_visibility, so
+                // management events for them are dropped.
+                let is_pinned = self
+                    .monitors()
+                    .iter()
+                    .any(|monitor| monitor.is_pinned(window.hwnd));
+
+                if is_pinned {
+                    return Ok(());
+                }
+
                 if matches!(event, WindowManagerEvent::Uncloak(_, _))
                     && self.uncloack_to_ignore >= 1
                 {

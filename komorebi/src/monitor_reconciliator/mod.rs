@@ -804,6 +804,15 @@ where
                                         .into_iter()
                                         .filter(|hwnd| WindowsApi::is_window(*hwnd))
                                         .collect(),
+                                    pinned_always_on_top: cached
+                                        .pinned_always_on_top
+                                        .clone()
+                                        .into_iter()
+                                        .filter(|hwnd| {
+                                            WindowsApi::is_window(*hwnd)
+                                                && cached.pinned_floating.contains(hwnd)
+                                        })
+                                        .collect(),
                                 };
 
                                 let focused_workspace_idx = m.focused_workspace_idx();

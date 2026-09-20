@@ -1185,6 +1185,19 @@ impl Window {
         Ok(())
     }
 
+    /// Place the window into the persistent TopMost band (see
+    /// [`WindowsApi::make_topmost_window`]) so it renders above every
+    /// normal-band window, without activating or focusing it, applied
+    /// synchronously regardless of `WINDOW_HANDLING_BEHAVIOUR`.
+    /// Also raises the border attached to this window, if any.
+    pub fn make_topmost(self) -> eyre::Result<()> {
+        WindowsApi::make_topmost_window(self.hwnd)?;
+        if let Some(border_info) = crate::border_manager::window_border(self.hwnd) {
+            WindowsApi::make_topmost_window(border_info.border_hwnd)?;
+        }
+        Ok(())
+    }
+
     /// Lower the window to the bottom of the Z order, but do not activate or focus
     /// it.
     /// It also checks if there is a border attached to this window and if it is

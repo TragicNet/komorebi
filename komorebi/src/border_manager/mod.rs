@@ -1,6 +1,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
 mod border;
+use crate::Window;
 use crate::WindowManager;
 use crate::WindowsApi;
 use crate::core::BorderImplementation;
@@ -55,6 +56,8 @@ lazy_static! {
     pub static ref STACK: AtomicU32 = AtomicU32::new(u32::from(Colour::Rgb(Rgb::new(0, 165, 66))));
     pub static ref FLOATING: AtomicU32 =
         AtomicU32::new(u32::from(Colour::Rgb(Rgb::new(245, 245, 165))));
+    pub static ref PINNED: AtomicU32 =
+        AtomicU32::new(u32::from(Colour::Rgb(Rgb::new(179, 138, 249))));
 }
 
 lazy_static! {
@@ -180,6 +183,7 @@ fn window_kind_colour(focus_kind: WindowKind) -> u32 {
         WindowKind::Stack => STACK.load(Ordering::Relaxed),
         WindowKind::Monocle => MONOCLE.load(Ordering::Relaxed),
         WindowKind::Floating => FLOATING.load(Ordering::Relaxed),
+        WindowKind::Pinned => PINNED.load(Ordering::Relaxed),
     }
 }
 
@@ -263,6 +267,10 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
 
                                     window.set_accent(window_kind_colour(window_kind))?;
                                 }
+
+                                for window in m.pinned_windows() {
+                                    window.set_accent(window_kind_colour(WindowKind::Pinned))?;
+                                }
                             }
                             continue 'monitors;
                         }
@@ -296,6 +304,10 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
                             }
 
                             window.set_accent(window_kind_colour(window_kind))?;
+                        }
+
+                        for window in m.pinned_windows() {
+                            window.set_accent(window_kind_colour(WindowKind::Pinned))?;
                         }
                     }
                 }
@@ -479,6 +491,7 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
                             let border_hwnd = border.hwnd;
 
                             if ws.layer == WorkspaceLayer::Floating {
+                                let pins = m.pinned_windows();
                                 handle_floating_borders(
                                     &mut borders,
                                     &mut windows_borders,
@@ -487,6 +500,7 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
                                     foreground_window,
                                     layer_changed,
                                     forced_update,
+                                    &pins,
                                 )?;
 
                                 // Remove all borders on this monitor except monocle and floating borders
@@ -498,6 +512,9 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
                                         border_hwnd != b.hwnd
                                             && !ws
                                                 .floating_windows()
+                                                .iter()
+                                                .any(|w| w.hwnd == b.tracking_hwnd)
+                                            && !pins
                                                 .iter()
                                                 .any(|w| w.hwnd == b.tracking_hwnd)
                                     },
@@ -540,6 +557,12 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
                             .collect::<Vec<_>>();
 
                         for w in ws.floating_windows() {
+                            container_and_floating_window_ids.push(w.hwnd.to_string());
+                        }
+
+                        // Pinned windows belong to the monitor rather than any workspace,
+                        // so their borders are kept across the whole monitor.
+                        for w in m.pinned_windows() {
                             container_and_floating_window_ids.push(w.hwnd.to_string());
                         }
 
@@ -654,6 +677,7 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
                             foreground_window,
                             layer_changed,
                             forced_update,
+                            &m.pinned_windows(),
                         )?;
                     }
                 }
@@ -670,6 +694,7 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_floating_borders(
     borders: &mut HashMap<String, Box<Border>>,
     windows_borders: &mut HashMap<isize, String>,
@@ -678,59 +703,95 @@ fn handle_floating_borders(
     foreground_window: isize,
     layer_changed: bool,
     forced_update: bool,
+    monitor_pins: &[Window],
 ) -> color_eyre::Result<()> {
+    // Pinned windows belong to the monitor rather than any workspace's floating
+    // list, so they are border-managed separately from the workspace floats.
+    for window in monitor_pins {
+        handle_floating_border(
+            borders,
+            windows_borders,
+            window,
+            monitor_idx,
+            WindowKind::Pinned,
+            layer_changed,
+            forced_update,
+        )?;
+    }
+
     for window in ws.floating_windows() {
-        let mut new_border = false;
-        let id = window.hwnd.to_string();
-        let border = match borders.entry(id.clone()) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => {
-                if let Ok(border) =
-                    Border::create(&window.hwnd.to_string(), window.hwnd, monitor_idx)
-                {
-                    new_border = true;
-                    entry.insert(border)
-                } else {
-                    return Ok(());
-                }
-            }
-        };
-
-        let last_focus_state = border.window_kind;
-
         let new_focus_state = if foreground_window == window.hwnd {
             WindowKind::Floating
         } else {
             WindowKind::Unfocused
         };
-
-        border.window_kind = new_focus_state;
-
-        // Update the border's monitor idx in case it changed
-        border.monitor_idx = Some(monitor_idx);
-
-        let rect = WindowsApi::window_rect(window.hwnd)?;
-        border.window_rect = rect;
-
-        let should_invalidate =
-            new_border || (last_focus_state != new_focus_state) || layer_changed || forced_update;
-
-        if should_invalidate {
-            if forced_update && !new_border {
-                // Update the border brushes if there was a forced update
-                // notification and this is not a new border (new border's
-                // already have their brushes updated on creation).
-                // Post to the border's own thread to avoid a data race between
-                // this thread dropping the old render target and the window
-                // thread mid-render holding a reference to it.
-                border.request_brush_update();
-            }
-            border.set_position(&rect, window.hwnd)?;
-            border.invalidate();
-        }
-
-        windows_borders.insert(window.hwnd, id);
+        handle_floating_border(
+            borders,
+            windows_borders,
+            window,
+            monitor_idx,
+            new_focus_state,
+            layer_changed,
+            forced_update,
+        )?;
     }
+
+    Ok(())
+}
+
+/// Creates or updates the border for a single floating window.
+#[allow(clippy::too_many_arguments)]
+fn handle_floating_border(
+    borders: &mut HashMap<String, Box<Border>>,
+    windows_borders: &mut HashMap<isize, String>,
+    window: &Window,
+    monitor_idx: usize,
+    new_focus_state: WindowKind,
+    layer_changed: bool,
+    forced_update: bool,
+) -> color_eyre::Result<()> {
+    let mut new_border = false;
+    let id = window.hwnd.to_string();
+    let border = match borders.entry(id.clone()) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => {
+            if let Ok(border) = Border::create(&window.hwnd.to_string(), window.hwnd, monitor_idx) {
+                new_border = true;
+                entry.insert(border)
+            } else {
+                return Ok(());
+            }
+        }
+    };
+
+    let last_focus_state = border.window_kind;
+
+    border.window_kind = new_focus_state;
+
+    // Update the border's monitor idx in case it changed
+    border.monitor_idx = Some(monitor_idx);
+
+    let rect = WindowsApi::window_rect(window.hwnd)?;
+    border.window_rect = rect;
+
+    let should_invalidate =
+        new_border || (last_focus_state != new_focus_state) || layer_changed || forced_update;
+
+    if should_invalidate {
+        if forced_update && !new_border {
+            // Update the border brushes if there was a forced update
+            // notification and this is not a new border (new border's
+            // already have their brushes updated on creation).
+            // Post to the border's own thread to avoid a data race between
+            // this thread dropping the old render target and the window
+            // thread mid-render holding a reference to it.
+            border.request_brush_update();
+        }
+        border.set_position(&rect, window.hwnd)?;
+        border.invalidate();
+    }
+
+    windows_borders.insert(window.hwnd, id);
 
     Ok(())
 }

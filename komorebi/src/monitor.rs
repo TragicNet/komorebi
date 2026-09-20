@@ -20,6 +20,7 @@ use crate::DEFAULT_CONTAINER_PADDING;
 use crate::DEFAULT_WORKSPACE_PADDING;
 use crate::DefaultLayout;
 use crate::FloatingLayerBehaviour;
+use crate::HIDE_PINNED_ON_EMPTY_WORKSPACES;
 use crate::LOWER_IGNORED_WINDOWS_ON_FOCUS;
 use crate::Layout;
 use crate::OperationDirection;
@@ -65,6 +66,12 @@ pub struct Monitor {
     /// focused. Only floating windows can be pinned.
     #[serde(default)]
     pub pinned_floating: Vec<isize>,
+    /// Subset of `pinned_floating` rendered above everything else via the
+    /// persistent TopMost band (`WS_EX_TOPMOST`), like an "always on top"
+    /// status bar. Toggled per pinned window; never lowered or cleared by the
+    /// layer stack, only by the toggle itself or by unpinning.
+    #[serde(default)]
+    pub pinned_always_on_top: Vec<isize>,
 }
 
 impl_ring_elements!(Monitor, Workspace);
@@ -124,6 +131,7 @@ pub fn new(
         wallpaper: None,
         floating_layer_behaviour: None,
         pinned_floating: vec![],
+        pinned_always_on_top: vec![],
     }
 }
 
@@ -177,6 +185,7 @@ impl Monitor {
             wallpaper: None,
             floating_layer_behaviour: None,
             pinned_floating: vec![],
+            pinned_always_on_top: vec![],
         }
     }
 
@@ -251,6 +260,8 @@ impl Monitor {
         let Some(workspace) = self.focused_workspace() else {
             return Ok(());
         };
+
+        self.apply_pin_visibility()?;
 
         // The manual `ignored_windows_above_managed` layer toggle is always
         // respected: the user is in charge of the layer stack, including where
@@ -327,6 +338,12 @@ impl Monitor {
                     .into_iter()
                     .filter(|window| window.is_window())
                     .collect::<Vec<_>>();
+                // Always-on-top pins stay in the persistent TopMost band above
+                // the whole overlay: they are excluded from the demotion batch
+                // and re-asserted last so nothing can climb them.
+                let (always_on_top_pins, normal_pins): (Vec<Window>, Vec<Window>) = pins
+                    .iter()
+                    .partition(|window| self.is_pinned_always_on_top(window.hwnd));
                 let floats = workspace.floating_windows();
                 // A window in the TopMost band can never be climbed by a plain
                 // HWND_TOP raise from a normal-band window, so the pinned band
@@ -335,7 +352,7 @@ impl Monitor {
                 // windows) re-assert their own TopMost state; that shows up in
                 // the layered band diagnostics. Demoting runs on the apply
                 // worker ahead of the raises below, preserving the ordering.
-                let topmost_batch = pins
+                let topmost_batch = normal_pins
                     .iter()
                     .chain(floats.iter())
                     .copied()
@@ -346,12 +363,15 @@ impl Monitor {
                         self.raise_managed_window(window);
                     }
                 }
-                for window in &pins {
+                for window in &normal_pins {
                     self.raise_managed_window_above_active(window);
                 }
                 for window in floats.iter().rev() {
                     self.raise_managed_window_above_active(window);
                 }
+                // Raised last so the always-on-top pins top the whole overlay,
+                // including the focused window raised below.
+                ApplyWorker::make_topmost(always_on_top_pins);
             }
         }
 
@@ -452,6 +472,38 @@ impl Monitor {
         self.pinned_floating.contains(&hwnd)
     }
 
+    /// Hide every pinned floating window on this monitor while the focused
+    /// workspace is empty, and restore them once a workspace with managed
+    /// windows is focused. A no-op unless the `pinning` config key's
+    /// `hide_on_empty_workspaces` option is enabled: by default pins stay
+    /// visible across every workspace regardless of its contents.
+    pub fn apply_pin_visibility(&self) -> eyre::Result<()> {
+        if !HIDE_PINNED_ON_EMPTY_WORKSPACES.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        let hide = self
+            .focused_workspace()
+            .is_some_and(|workspace| workspace.is_empty());
+
+        for window in self.pinned_windows() {
+            if !window.is_window() {
+                continue;
+            }
+
+            // Idempotent: only drive a real visibility change. Redundant
+            // ShowWindow/SetCloak calls still emit Show/Hide events that re-enter
+            // the event handlers and round-trip back through this pass.
+            if hide && window.is_visible() {
+                window.hide();
+            } else if !hide && !window.is_visible() {
+                window.restore();
+            }
+        }
+
+        Ok(())
+    }
+
     /// Pin a floating window so it is visible across all workspaces on this
     /// monitor. Pinning removes the window from every workspace's floating
     /// list on this monitor: pinned windows live in `pinned_floating` alone.
@@ -470,6 +522,31 @@ impl Monitor {
     /// Unpin a floating window, leaving it floating on its current workspace.
     pub fn unpin_floating_window(&mut self, hwnd: isize) {
         self.pinned_floating.retain(|h| *h != hwnd);
+        if self.pinned_always_on_top.contains(&hwnd) {
+            self.pinned_always_on_top.retain(|h| *h != hwnd);
+            ApplyWorker::clear_topmost(vec![Window::from(hwnd)]);
+        }
+    }
+
+    /// Whether the given pinned window HWND is rendered above everything else
+    /// via the persistent TopMost band.
+    pub fn is_pinned_always_on_top(&self, hwnd: isize) -> bool {
+        self.pinned_always_on_top.contains(&hwnd)
+    }
+
+    /// Toggle a pinned window between the normal floating overlay band and the
+    /// persistent TopMost band that renders it above everything else, like an
+    /// "always on top" status bar. Posted to the apply worker so the
+    /// synchronous TopMost call never blocks the window-manager thread on a Not
+    /// Responding window.
+    pub fn toggle_pin_always_on_top(&mut self, hwnd: isize) {
+        if self.is_pinned_always_on_top(hwnd) {
+            self.pinned_always_on_top.retain(|h| *h != hwnd);
+            ApplyWorker::clear_topmost(vec![Window::from(hwnd)]);
+        } else {
+            self.pinned_always_on_top.push(hwnd);
+            ApplyWorker::make_topmost(vec![Window::from(hwnd)]);
+        }
     }
 
     /// Raise the pinned floating windows of all workspaces on this monitor so
@@ -485,7 +562,11 @@ impl Monitor {
             .into_iter()
             .filter(|window| window.is_window())
             .collect::<Vec<_>>();
-        ApplyWorker::raise_above_active(windows.clone());
+        let (always_on_top, normal) = windows
+            .iter()
+            .partition(|window| self.is_pinned_always_on_top(window.hwnd));
+        ApplyWorker::raise_above_active(normal);
+        ApplyWorker::make_topmost(always_on_top);
         windows
     }
 
@@ -500,7 +581,14 @@ impl Monitor {
             .into_iter()
             .filter(|window| window.is_window())
             .collect::<Vec<_>>();
-        ApplyWorker::lower(windows.clone());
+        let (always_on_top, normal) = windows
+            .iter()
+            .partition(|window| self.is_pinned_always_on_top(window.hwnd));
+        // Always-on-top pins are never lowered below the tiling base: they stay
+        // in the persistent TopMost band, so the lower pass simply re-asserts
+        // them there and lowers only the normal pinned band.
+        ApplyWorker::lower(normal);
+        ApplyWorker::make_topmost(always_on_top);
         windows
     }
 
@@ -1551,5 +1639,70 @@ mod tests {
         // Outside the stabilization window the game keeps its foreground:
         // stealing it there makes the game randomly lose focus during gameplay.
         assert!(!Monitor::should_steal_ignored_window_foreground(false, false));
+    }
+
+    #[test]
+    fn test_toggle_pin_always_on_top() {
+        let mut m = Monitor::new(
+            0,
+            Rect::default(),
+            Rect::default(),
+            "TestMonitor".to_string(),
+            "TestDevice".to_string(),
+            "TestDeviceID".to_string(),
+            Some("TestMonitorID".to_string()),
+        );
+
+        // Always-on-top only applies to already-pinned windows
+        m.pin_floating_window(10);
+        assert!(!m.is_pinned_always_on_top(10));
+
+        m.toggle_pin_always_on_top(10);
+        assert!(m.is_pinned_always_on_top(10));
+
+        // Toggling again removes the always-on-top state
+        m.toggle_pin_always_on_top(10);
+        assert!(!m.is_pinned_always_on_top(10));
+
+        // Re-assert then unpin: always-on-top state must be cleaned up
+        m.toggle_pin_always_on_top(10);
+        m.unpin_floating_window(10);
+        assert!(!m.is_pinned(10));
+        assert!(!m.is_pinned_always_on_top(10));
+    }
+
+    #[test]
+    fn test_apply_pin_visibility_gated_by_config() {
+        let mut m = Monitor::new(
+            0,
+            Rect::default(),
+            Rect::default(),
+            "TestMonitor".to_string(),
+            "TestDevice".to_string(),
+            "TestDeviceID".to_string(),
+            Some("TestMonitorID".to_string()),
+        );
+        m.pin_floating_window(10);
+
+        // Without the `pinning` config key (default) the method is a no-op
+        // and the pin list is untouched
+        HIDE_PINNED_ON_EMPTY_WORKSPACES.store(false, Ordering::SeqCst);
+        m.apply_pin_visibility().unwrap();
+        assert_eq!(m.pinned_floating, vec![10]);
+
+        // With the feature enabled the loop over pins runs (skipping
+        // non-window HWNDs) and never mutates the pin list
+        HIDE_PINNED_ON_EMPTY_WORKSPACES.store(true, Ordering::SeqCst);
+        m.apply_pin_visibility().unwrap();
+        assert_eq!(m.pinned_floating, vec![10]);
+
+        // A non-empty focused workspace also leaves the pins intact
+        m.focused_workspace_mut()
+            .unwrap()
+            .add_container_to_back(Container::default());
+        m.apply_pin_visibility().unwrap();
+        assert_eq!(m.pinned_floating, vec![10]);
+
+        HIDE_PINNED_ON_EMPTY_WORKSPACES.store(false, Ordering::SeqCst);
     }
 }
