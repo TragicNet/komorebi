@@ -1391,6 +1391,20 @@ impl WindowsApi {
         unsafe { IsWindowVisible(HWND(as_ptr!(hwnd))) }.into()
     }
 
+    /// Whether the window is actually rendered on screen: visible (WS_VISIBLE),
+    /// not minimized, and not DWM-cloaked. Unlike [`Self::is_window_visible`],
+    /// this reflects the `Cloak`/`Minimize` hiding behaviours as well as
+    /// `Hide`, so a window hidden by komorebi (e.g. a pin on an empty
+    /// workspace) reports `false` here even though `IsWindowVisible` stays
+    /// true.
+    pub fn is_window_shown(hwnd: isize) -> bool {
+        let visible: bool = unsafe { IsWindowVisible(HWND(as_ptr!(hwnd))) }.into();
+        let iconic: bool = unsafe { IsIconic(HWND(as_ptr!(hwnd))) }.into();
+        let cloaked = Self::is_window_cloaked(hwnd).unwrap_or_default();
+
+        visible && !iconic && !cloaked
+    }
+
     pub fn is_iconic(hwnd: isize) -> bool {
         unsafe { IsIconic(HWND(as_ptr!(hwnd))) }.into()
     }

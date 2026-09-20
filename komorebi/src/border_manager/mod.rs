@@ -707,7 +707,19 @@ fn handle_floating_borders(
 ) -> color_eyre::Result<()> {
     // Pinned windows belong to the monitor rather than any workspace's floating
     // list, so they are border-managed separately from the workspace floats.
+    // Only visibly-rendered pins are border-managed: a pin hidden by the
+    // visibility pass (cloaked or minimized on an empty workspace) must not get
+    // its border re-asserted, since border positioning uses a show-window
+    // SetWindowPos and would reveal the frame over the hidden window.
     for window in monitor_pins {
+        if !window.is_window() || !window.is_shown() {
+            // Clean up any stale visible border in one pass.
+            if let Some(border_info) = window_border(window.hwnd) {
+                WindowsApi::hide_window(border_info.border_hwnd);
+            }
+            continue;
+        }
+
         handle_floating_border(
             borders,
             windows_borders,

@@ -267,6 +267,9 @@ impl Monitor {
         // respected: the user is in charge of the layer stack, including where
         // the pinned windows sit.
         if workspace.ignored_windows_above_managed {
+            // Keep the hide-on-empty invariant intact even on the manual
+            // overlay toggle.
+            self.apply_pin_visibility()?;
             return Ok(());
         }
 
@@ -276,11 +279,13 @@ impl Monitor {
         if workspace.monocle_container.is_some() || workspace.maximized_window.is_some() {
             self.lower_ignored_windows_on_focus()?;
             self.reposition_pinned_windows(workspace.layer)?;
+            self.apply_pin_visibility()?;
             return Ok(());
         }
 
         if workspace.is_empty() {
             self.reposition_pinned_windows(workspace.layer)?;
+            self.apply_pin_visibility()?;
             return Ok(());
         }
 
@@ -434,6 +439,11 @@ impl Monitor {
             let _ = WindowsApi::raise_and_focus_window(window.hwnd);
         }
 
+        // Final enforcement of the hide-on-empty invariant: a raise or focus
+        // performed during the layer stack may have re-shown a hidden pin, so
+        // coerce visibility back to the configured state before returning.
+        self.apply_pin_visibility()?;
+
         Ok(())
     }
 
@@ -493,10 +503,13 @@ impl Monitor {
 
             // Idempotent: only drive a real visibility change. Redundant
             // ShowWindow/SetCloak calls still emit Show/Hide events that re-enter
-            // the event handlers and round-trip back through this pass.
-            if hide && window.is_visible() {
+            // the event handlers and round-trip back through this pass. The
+            // `is_shown` check reflects the actual rendered state across all
+            // hiding behaviours (cloaked/minimized pins report IsWindowVisible
+            // true, so `is_visible` could never detect them as hidden).
+            if hide && window.is_shown() {
                 window.hide();
-            } else if !hide && !window.is_visible() {
+            } else if !hide && !window.is_shown() {
                 window.restore();
             }
         }
@@ -557,10 +570,14 @@ impl Monitor {
     /// Uses the transient TopMost band so the pinned windows are displayed above
     /// the currently active window without activating them or stealing focus.
     pub fn raise_pinned_windows(&self) -> Vec<Window> {
+        // Pins that are not rendered (hidden by the visibility pass for an
+        // empty workspace) are never raised: the raise primitives use a
+        // show-window SetWindowPos and the focused window/band ordering would
+        // be an unintended resurrection of the hidden pin.
         let windows = self
             .pinned_windows()
             .into_iter()
-            .filter(|window| window.is_window())
+            .filter(|window| window.is_window() && window.is_shown())
             .collect::<Vec<_>>();
         let (always_on_top, normal) = windows
             .iter()
@@ -579,7 +596,7 @@ impl Monitor {
         let windows = self
             .pinned_windows()
             .into_iter()
-            .filter(|window| window.is_window())
+            .filter(|window| window.is_window() && window.is_shown())
             .collect::<Vec<_>>();
         let (always_on_top, normal) = windows
             .iter()

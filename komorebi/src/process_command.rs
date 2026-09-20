@@ -81,6 +81,7 @@ use crate::core::config_generation::MatchingRule;
 use crate::core::config_generation::MatchingStrategy;
 use crate::current_virtual_desktop;
 use crate::monitor::MonitorInformation;
+use crate::HIDE_PINNED_ON_EMPTY_WORKSPACES;
 use crate::notify_subscribers;
 use crate::stackbar_manager;
 use crate::stackbar_manager::STACKBAR_FONT_FAMILY;
@@ -1394,7 +1395,7 @@ impl WindowManager {
                 // events that must not immediately flip it back.
                 self.suppress_layer_flips();
 
-                let (workspace_layer, must_lower_ignored) = {
+                let (workspace_layer, must_lower_ignored, empty_and_hide_pins) = {
                     let workspace = self.focused_workspace()?;
 
                     // When toggling the workspace layer, demote any ignored windows
@@ -1404,7 +1405,15 @@ impl WindowManager {
                     let must_lower_ignored =
                         !workspace.ignored_windows_above_managed && !workspace.is_empty();
 
-                    (workspace.layer, must_lower_ignored)
+                    // Track whether the pinned hide-on-empty feature is active and
+                    // this workspace is empty: the monitor's pins are hidden by
+                    // `apply_pin_visibility`, and the toggle below must not
+                    // resurrect them.
+                    let empty_and_hide_pins = HIDE_PINNED_ON_EMPTY_WORKSPACES
+                        .load(Ordering::SeqCst)
+                        && workspace.is_empty();
+
+                    (workspace.layer, must_lower_ignored, empty_and_hide_pins)
                 };
 
                 match workspace_layer {
@@ -1418,6 +1427,16 @@ impl WindowManager {
                             .focused_monitor()
                             .ok_or_eyre("there is no monitor")?
                             .pinned_windows();
+
+                        // Hidden pins (hide-on-empty on an empty workspace) must not
+                        // be restored or focused by the toggle: restoring them re-shows
+                        // their borders (racing the trailing hide) and focusing one
+                        // steals focus to the pin on an otherwise empty layer. Drop them
+                        // from the overlay entirely so neither the focus-memory lookup
+                        // nor the restore loop below can touch them.
+                        if empty_and_hide_pins {
+                            pinned_overlay.retain(|window| window.is_shown());
+                        }
 
                         // The Floating layer remembers its own last-focused window;
                         // a pinned window is just a float, so it can be that memory

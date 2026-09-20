@@ -856,6 +856,13 @@ impl Window {
         WindowsApi::is_window_visible(self.hwnd)
     }
 
+    /// Whether the window is actually rendered on screen: `is_window_visible`
+    /// combined with not being minimized or DWM-cloaked (the `Cloak` and
+    /// `Minimize` hiding behaviours leave `IsWindowVisible` true).
+    pub fn is_shown(self) -> bool {
+        WindowsApi::is_window_shown(self.hwnd)
+    }
+
     pub fn hide_with_border(self, hide_border: bool) {
         let mut programmatically_hidden_hwnds = HIDDEN_HWNDS.lock();
         if !programmatically_hidden_hwnds.contains(&self.hwnd) {

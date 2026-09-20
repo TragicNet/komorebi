@@ -2862,7 +2862,10 @@ impl WindowManager {
         let pins = self
             .focused_monitor()
             .ok_or_eyre("there is no monitor")?
-            .pinned_windows();
+            .pinned_windows()
+            .into_iter()
+            .filter(|window| window.is_shown())
+            .collect::<Vec<Window>>();
         let own_floats = self
             .focused_workspace()?
             .floating_windows()
