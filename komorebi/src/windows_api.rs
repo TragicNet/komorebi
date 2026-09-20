@@ -496,6 +496,33 @@ impl WindowsApi {
         with_async_window_pos: bool,
         silent: bool,
     ) -> eyre::Result<()> {
+        Self::position_window_inner(hwnd, layout, top, with_async_window_pos, false, silent)
+    }
+
+    /// Like [`WindowsApi::position_window`] but always uses `SWP_ASYNCWINDOWPOS`
+    /// regardless of `WINDOW_HANDLING_BEHAVIOUR`.
+    ///
+    /// Use from per-frame animation renderers (and their final/cleanup
+    /// positions) so the animation thread never blocks on the target window's
+    /// WindowProc thread — a busy or unresponsive app must not stall komorebi's
+    /// animation arbitration.
+    pub fn position_window_async(
+        hwnd: isize,
+        layout: &Rect,
+        top: bool,
+        silent: bool,
+    ) -> eyre::Result<()> {
+        Self::position_window_inner(hwnd, layout, top, true, true, silent)
+    }
+
+    fn position_window_inner(
+        hwnd: isize,
+        layout: &Rect,
+        top: bool,
+        with_async_window_pos: bool,
+        force_async: bool,
+        silent: bool,
+    ) -> eyre::Result<()> {
         let hwnd = HWND(as_ptr!(hwnd));
 
         let mut flags = SetWindowPosition::NO_ACTIVATE
@@ -517,10 +544,11 @@ impl WindowsApi {
         // to process the message, so we have to use ASYNC_WINDOW_POS to avoid
         // blocking our thread in case the target window is not responding.
         if with_async_window_pos
-            && matches!(
-                WINDOW_HANDLING_BEHAVIOUR.load(),
-                WindowHandlingBehaviour::Async
-            )
+            && (force_async
+                || matches!(
+                    WINDOW_HANDLING_BEHAVIOUR.load(),
+                    WindowHandlingBehaviour::Async
+                ))
         {
             flags |= SetWindowPosition::ASYNC_WINDOW_POS;
         }

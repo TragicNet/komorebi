@@ -310,7 +310,7 @@ impl RenderDispatcher for MovementRenderDispatcher {
 
             if !is_chromium && !size_changes {
                 if let Err(error) =
-                    WindowsApi::position_window(self.hwnd, &self.target_rect, self.top, false, false)
+                    WindowsApi::position_window_async(self.hwnd, &self.target_rect, self.top, false)
                 {
                     tracing::warn!(
                         "ghost movement: failed to pre-position hwnd {}: {error}",
@@ -359,16 +359,30 @@ impl RenderDispatcher for MovementRenderDispatcher {
             }
             border_manager::animate_to(self.hwnd, logical);
         } else {
-            // Legacy path: animations always run on a separate thread, so we don't
-            // gate on WINDOW_HANDLING_BEHAVIOUR here.
-            WindowsApi::move_window(self.hwnd, &logical, false)?;
+            // Legacy path: animations always run on a separate thread. Move the
+            // window with an always-async SetWindowPos so we never block on the
+            // target window's WindowProc thread; a slow/hung app must not stall
+            // the animation slot (which previously wedged the whole arbitration
+            // chain forever).
+            WindowsApi::position_window_async(self.hwnd, &logical, false, true)?;
             WindowsApi::invalidate_rect(self.hwnd, None, false);
         }
 
         Ok(())
     }
 
-    fn post_render(&self) -> eyre::Result<()> {
+    fn post_render(&self, is_current: bool) -> eyre::Result<()> {
+        // If we lost the slot before reaching post_render (force-released just
+        // as the animation completed), a successor may already be operating on
+        // this hwnd. Never reposition, uncloak, or fade then; only discard our
+        // own ghost thumbnail.
+        if !is_current {
+            if let Some(ghost) = self.ghost.lock().take() {
+                let _ = ghost.dispose();
+            }
+            return Ok(());
+        }
+
         let used_ghost = self.ghost.lock().is_some();
         let pre_painted = self.pre_painted.load(Ordering::SeqCst);
         let size_changes = self.size_changes_during_animation();
@@ -378,8 +392,11 @@ impl RenderDispatcher for MovementRenderDispatcher {
         // this. For the Chromium ghost path (no pre-paint) the source is
         // still cloaked at start_rect and needs to be moved here. For the
         // legacy non-ghost path this is the original final reposition.
+        //
+        // Async so even this final call can't block the animation thread
+        // forever on an unresponsive app (see position_window_async).
         if !pre_painted {
-            WindowsApi::position_window(self.hwnd, &self.target_rect, self.top, false, false)?;
+            WindowsApi::position_window_async(self.hwnd, &self.target_rect, self.top, false)?;
         }
 
         // Uncloak BEFORE crossfade so the real window's first post-resize
@@ -452,7 +469,7 @@ impl RenderDispatcher for MovementRenderDispatcher {
         // down the ghost. Mirrors post_render but uses last_animated_rect.
         let target = *self.last_animated_rect.lock();
 
-        if let Err(error) = WindowsApi::position_window(self.hwnd, &target, false, false, false) {
+        if let Err(error) = WindowsApi::position_window_async(self.hwnd, &target, false, false) {
             tracing::warn!(
                 "ghost movement cancel: failed to snap hwnd {} to last rect: {error}",
                 self.hwnd
@@ -468,6 +485,17 @@ impl RenderDispatcher for MovementRenderDispatcher {
         }
 
         self.finalise_managers();
+    }
+
+    /// The render slot was taken away (force-release) and a newer animation
+    /// may already be running on this hwnd, so we must not reposition,
+    /// uncloak, or fade. The successor owns that state from here on (it
+    /// re-cloaks and creates its own ghost in its own pre_render). Only our
+    /// own DWM thumbnail can be disposed safely.
+    fn on_superseded(&self) {
+        if let Some(ghost) = self.ghost.lock().take() {
+            let _ = ghost.dispose();
+        }
     }
 }
 
@@ -524,7 +552,12 @@ impl RenderDispatcher for TransparencyRenderDispatcher {
         )
     }
 
-    fn post_render(&self) -> eyre::Result<()> {
+    fn post_render(&self, is_current: bool) -> eyre::Result<()> {
+        // The render slot was taken away; the successor owns the window state.
+        if !is_current {
+            return Ok(());
+        }
+
         //opaque
         if self.is_opaque {
             let window = Window::from(self.hwnd);
