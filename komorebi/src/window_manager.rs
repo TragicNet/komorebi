@@ -1437,7 +1437,13 @@ impl WindowManager {
         self.restore_all_windows(ignore_restore)?;
         AnimationEngine::wait_for_all_animations();
 
-        if WindowsApi::focus_follows_mouse()? {
+        // Only disable Windows' native active window tracking if komorebi's own
+        // (deprecated) focus follows mouse implementation is active; if an
+        // external integration such as masir is managing this system-wide
+        // setting, leave it untouched.
+        if self.focus_follows_mouse
+            == Some(FocusFollowsMouseImplementation::Windows)
+        {
             WindowsApi::disable_focus_follows_mouse()?;
         }
 

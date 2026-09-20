@@ -381,7 +381,12 @@ fn main() -> eyre::Result<()> {
     wm.lock().restore_all_windows(false)?;
     AnimationEngine::wait_for_all_animations();
 
-    if WindowsApi::focus_follows_mouse()? {
+    // Only disable Windows' native active window tracking if komorebi's own
+    // (deprecated) focus follows mouse implementation is active; if an
+    // external integration such as masir is managing this system-wide
+    // setting, leave it untouched.
+    if wm.lock().focus_follows_mouse == Some(komorebi::FocusFollowsMouseImplementation::Windows)
+    {
         WindowsApi::disable_focus_follows_mouse()?;
     }
 

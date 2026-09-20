@@ -1555,11 +1555,14 @@ impl StaticConfig {
 
         #[allow(deprecated)]
         match value.focus_follows_mouse {
-            None => WindowsApi::disable_focus_follows_mouse()?,
+            // Only enable Windows' native active window tracking when komorebi's
+            // own (deprecated) focus follows mouse implementation is configured.
+            // When it is not configured, leave the system-wide setting untouched
+            // so that external integrations such as masir are not broken.
             Some(FocusFollowsMouseImplementation::Windows) => {
                 WindowsApi::enable_focus_follows_mouse()?;
             }
-            Some(FocusFollowsMouseImplementation::Komorebi) => {}
+            None | Some(FocusFollowsMouseImplementation::Komorebi) => {}
         };
 
         let bytes = SocketMessage::ReloadStaticConfiguration(path.clone()).as_bytes()?;
@@ -1978,17 +1981,26 @@ impl StaticConfig {
             .keep_monocle_on_window_close
             .unwrap_or(DEFAULT_KEEP_MONOCLE_ON_WINDOW_CLOSE);
         wm.work_area_offset = value.global_work_area_offset;
+        let prev_focus_follows_mouse = wm.focus_follows_mouse;
         #[allow(deprecated)]
         {
             wm.focus_follows_mouse = value.focus_follows_mouse;
         }
 
-        match wm.focus_follows_mouse {
-            None => WindowsApi::disable_focus_follows_mouse()?,
-            Some(FocusFollowsMouseImplementation::Windows) => {
+        #[allow(deprecated)]
+        match (prev_focus_follows_mouse, value.focus_follows_mouse) {
+            // Only touch Windows' native active window tracking when komorebi's
+            // own (deprecated) focus follows mouse implementation is being
+            // changed, otherwise an external integration such as masir may be
+            // managing this system-wide setting and would be broken by komorebi
+            // stomping on it.
+            (_, Some(FocusFollowsMouseImplementation::Windows)) => {
                 WindowsApi::enable_focus_follows_mouse()?;
             }
-            Some(FocusFollowsMouseImplementation::Komorebi) => {}
+            (Some(FocusFollowsMouseImplementation::Windows), None) => {
+                WindowsApi::disable_focus_follows_mouse()?;
+            }
+            _ => {}
         };
 
         let monitor_count = wm.monitors().len();
