@@ -54,7 +54,6 @@ use crate::PINNED_FLOATING_APPLICATIONS;
 use crate::REGEX_IDENTIFIERS;
 use crate::SUBSCRIPTION_SOCKETS;
 use crate::WORKSPACE_MATCHING_RULES;
-use crate::apply_worker::ApplyWorker;
 use crate::border_manager;
 use crate::border_manager::BORDER_OFFSET;
 use crate::border_manager::BORDER_WIDTH;
@@ -4651,27 +4650,6 @@ impl WindowManager {
         self.focused_monitor()
             .ok_or_eyre("there is no monitor")?
             .lower_pinned_windows();
-
-        Ok(())
-    }
-
-    /// Keep the focused workspace's floating overlay intact while switching
-    /// the layer to Tiling (`WorkspaceLayerFocusBehaviour::SwitchLayerOverlay`):
-    /// raise the pinned band above the overlay, then raise the focused tiling
-    /// window on top of the band. Non-focused tiling windows stay lower in the
-    /// z-order but remain visible (no full layer re-stack is performed).
-    pub(crate) fn raise_pinned_band_above_tiled(
-        &self,
-        focused_tiled: Option<Window>,
-    ) -> eyre::Result<()> {
-        self.focused_monitor()
-            .ok_or_eyre("there is no monitor")?
-            .raise_pinned_windows();
-
-        if let Some(window) = focused_tiled {
-            ApplyWorker::raise(vec![window]);
-            WindowsApi::raise_and_focus_window(window.hwnd)?;
-        }
 
         Ok(())
     }

@@ -75,7 +75,6 @@ use crate::core::SocketMessage;
 use crate::core::StateQuery;
 use crate::core::WindowContainerBehaviour;
 use crate::core::WindowKind;
-use crate::core::WorkspaceLayerFocusBehaviour;
 use crate::core::config_generation::IdWithIdentifier;
 use crate::core::config_generation::MatchingRule;
 use crate::core::config_generation::MatchingStrategy;
@@ -1553,22 +1552,11 @@ impl WindowManager {
                             .and_then(|monocle| monocle.focused_window())
                             .copied();
 
-                        // If there are no floating windows to restore, focus the desktop instead so
-                        // that lowering the monocle window does not trigger an
-                        // auto-focus. Under SwitchLayerOverlay with no monocle
-                        // window being lowered, leave focus on the still-focused
-                        // tiling window: activating the desktop (or a pinned band
-                        // member) would steal focus when there is nothing to
-                        // restore.
+                        // If there are no floating windows to restore, focus the desktop
+                        // instead so that lowering the monocle window does not trigger an
+                        // auto-focus.
                         if let Some(window) = to_focus {
                             window.focus(mouse_follows_focus)?;
-                        } else if self.workspace_layer_focus_behaviour
-                            == WorkspaceLayerFocusBehaviour::SwitchLayerOverlay
-                            && monocle_window.is_none()
-                        {
-                            tracing::info!(
-                                "Tiling->Floating: no remembered floating window, keeping focus on the tiling window"
-                            );
                         } else {
                             WindowsApi::raise_and_focus_window(WindowsApi::desktop_window()?)?;
                         }
@@ -1683,7 +1671,6 @@ impl WindowManager {
                         }
                     }
                     WorkspaceLayer::Floating => {
-                        let focus_behaviour = self.workspace_layer_focus_behaviour;
                         {
                             let workspace = self.focused_workspace_mut()?;
                             workspace.layer = WorkspaceLayer::Tiling;
@@ -1707,31 +1694,11 @@ impl WindowManager {
                             }
                         }
 
-                        if matches!(
-                            focus_behaviour,
-                            WorkspaceLayerFocusBehaviour::SwitchLayerOverlay
-                        ) {
-                            // Keep the floating overlay intact (SwitchLayerOverlay): no
-                            // lowering, no full layer re-stack. Only the focused tiling
-                            // window is raised above the pinned band; non-focused tiling
-                            // windows stay lower in the z-order but remain visible.
-                            let focused_tiled = if let Some(monocle) =
-                                &self.focused_workspace()?.monocle_container
-                            {
-                                monocle.focused_window().copied()
-                            } else {
-                                self.focused_workspace()?
-                                    .focused_container()
-                                    .and_then(|container| container.focused_window())
-                                    .copied()
-                            };
-                            self.raise_pinned_band_above_tiled(focused_tiled)?;
-                        } else {
-                            // Lower the floating overlay below the intact base layer without
-                            // raising any tiled window, and drop the pinned floating windows of
-                            // other workspaces on this monitor back below the tiling base.
-                            self.lower_floating_overlay()?;
-                        }
+                        // Fully switch back to the base layer: lower the entire floating
+                        // overlay (this workspace's floating windows along with the pinned
+                        // floating windows of other workspaces on this monitor) below the
+                        // intact tiling base without raising any tiled window.
+                        self.lower_floating_overlay()?;
 
                         let workspace = self.focused_workspace()?;
                         tracing::info!(
