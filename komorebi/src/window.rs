@@ -967,13 +967,23 @@ impl Window {
 
             AnimationEngine::animate(render_dispatcher, duration)
         } else {
+            let target_alpha = transparency_manager::TRANSPARENCY_ALPHA.load_consume();
             let mut ex_style = self.ex_style()?;
+
+            // Skip redundant calls when the window is already layered at the target alpha; the
+            // marshalled SetWindowLongPtrW / SetLayeredWindowAttributes calls are expensive and can
+            // block on the target window's thread.
+            if ex_style.contains(ExtendedWindowStyle::LAYERED)
+                && WindowsApi::get_transparent(self.hwnd)
+                    .map(|alpha| alpha == target_alpha)
+                    .unwrap_or(false)
+            {
+                return Ok(());
+            }
+
             ex_style.insert(ExtendedWindowStyle::LAYERED);
             self.update_ex_style(&ex_style)?;
-            WindowsApi::set_transparent(
-                self.hwnd,
-                transparency_manager::TRANSPARENCY_ALPHA.load_consume(),
-            )
+            WindowsApi::set_transparent(self.hwnd, target_alpha)
         }
     }
 
@@ -1007,6 +1017,12 @@ impl Window {
             AnimationEngine::animate(render_dispatcher, duration)
         } else {
             let mut ex_style = self.ex_style()?;
+
+            // Skip redundant SetWindowLongPtrW calls when the window is already opaque (not layered).
+            if !ex_style.contains(ExtendedWindowStyle::LAYERED) {
+                return Ok(());
+            }
+
             ex_style.remove(ExtendedWindowStyle::LAYERED);
             self.update_ex_style(&ex_style)
         }
