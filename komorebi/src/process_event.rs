@@ -465,6 +465,11 @@ impl WindowManager {
                 // Copied out before the mutable workspace borrow (Copy enum).
                 let focus_behaviour = self.workspace_layer_focus_behaviour;
 
+                // Whether this focus change is the fallout of a komorebi-initiated
+                // focus operation (layer toggle, workspace/monitor switch); such
+                // events must not flip a Floating workspace to Tiling.
+                let flip_suppressed = self.is_layer_flip_suppressed();
+
                 {
                     let workspace = self.focused_workspace_mut()?;
                     let floating_window_idx = workspace
@@ -500,14 +505,18 @@ impl WindowManager {
                                             workspace.layer = WorkspaceLayer::Tiling;
                                         }
                                     }
-                                    WorkspaceLayerFocusBehaviour::AlwaysTile => {
-                                        workspace.layer = WorkspaceLayer::Tiling;
-                                        workspace.layer_lock = false;
-                                    }
-                                    WorkspaceLayerFocusBehaviour::AlwaysTileNoRaise => {
-                                        workspace.layer = WorkspaceLayer::Tiling;
-                                        workspace.layer_lock = false;
-                                        lower_floating_overlay = true;
+                                    WorkspaceLayerFocusBehaviour::AlwaysTile
+                                    | WorkspaceLayerFocusBehaviour::AlwaysTileNoRaise => {
+                                        if !flip_suppressed {
+                                            workspace.layer = WorkspaceLayer::Tiling;
+                                            workspace.layer_lock = false;
+                                            if matches!(
+                                                focus_behaviour,
+                                                WorkspaceLayerFocusBehaviour::AlwaysTileNoRaise
+                                            ) {
+                                                lower_floating_overlay = true;
+                                            }
+                                        }
                                     }
                                 }
 

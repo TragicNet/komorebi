@@ -1371,6 +1371,10 @@ impl WindowManager {
             SocketMessage::ToggleWorkspaceLayer => {
                 let mouse_follows_focus = self.mouse_follows_focus;
 
+                // The focus calls made to enter the new layer fire FocusChange
+                // events that must not immediately flip it back.
+                self.suppress_layer_flips();
+
                 let (workspace_layer, must_lower_ignored) = {
                     let workspace = self.focused_workspace()?;
 
@@ -1386,10 +1390,6 @@ impl WindowManager {
 
                 match workspace_layer {
                     WorkspaceLayer::Tiling => {
-                        tracing::info!(
-                            "suppressing FocusChange layer reversion for next events"
-                        );
-
                         // Pinned floating windows of every workspace on this monitor
                         // belong to the focused workspace's Floating overlay: they are
                         // treated as part of this workspace's floating set on whichever

@@ -9,6 +9,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
 
 use color_eyre::eyre;
 use color_eyre::eyre::OptionExt;
@@ -94,6 +96,11 @@ pub struct WindowManager {
     /// Behaviour when a managed (tiled) window is focused while the workspace
     /// is on the Floating layer
     pub workspace_layer_focus_behaviour: WorkspaceLayerFocusBehaviour,
+    /// Deadline before which focus changes caused directly by komorebi itself
+    /// (layer toggles, workspace/monitor switches) are ignored for the purpose
+    /// of flipping a Floating workspace to Tiling. Genuine user focus changes
+    /// (clicks, keyboard focus, focus-follows-mouse) are never suppressed.
+    pub(crate) layer_flip_suppress_until: Option<Instant>,
     pub hotwatch: Hotwatch,
     pub virtual_desktop_id: Option<Vec<u8>>,
     pub has_pending_raise_op: bool,
@@ -169,6 +176,7 @@ impl WindowManager {
             focus_new_windows: false,
             cycle_focus_across_monitors: false,
             workspace_layer_focus_behaviour: WorkspaceLayerFocusBehaviour::default(),
+            layer_flip_suppress_until: None,
             hotwatch: Hotwatch::new()?,
             has_pending_raise_op: false,
             keep_monocle_on_window_close: true,
@@ -4335,6 +4343,8 @@ impl WindowManager {
     pub fn focus_monitor(&mut self, idx: usize) -> eyre::Result<()> {
         tracing::info!("focusing monitor");
 
+        self.suppress_layer_flips();
+
         if self.monitors().get(idx).is_some() {
             self.monitors.focus(idx);
         } else {
@@ -4477,6 +4487,8 @@ impl WindowManager {
     pub fn focus_workspace(&mut self, idx: usize) -> eyre::Result<()> {
         tracing::info!("focusing workspace");
 
+        self.suppress_layer_flips();
+
         let mouse_follows_focus = self.mouse_follows_focus;
         let monitor = self
             .focused_monitor_mut()
@@ -4488,6 +4500,22 @@ impl WindowManager {
         self.update_focused_workspace(false, true)?;
 
         Ok(())
+    }
+
+    /// Nearby focus changes arriving in the next 200ms are treated as the
+    /// fallout of the komorebi-initiated focus operation that just ran (e.g.
+    /// a layer toggle or workspace switch) and are not allowed to flip a
+    /// Floating workspace to Tiling.
+    pub(crate) fn suppress_layer_flips(&mut self) {
+        self.layer_flip_suppress_until = Some(Instant::now() + Duration::from_millis(200));
+    }
+
+    /// Whether a focus change should currently skip flipping a Floating
+    /// workspace to Tiling because it was likely caused by komorebi itself.
+    pub fn is_layer_flip_suppressed(&self) -> bool {
+        self.layer_flip_suppress_until
+            .map(|deadline| Instant::now() < deadline)
+            .unwrap_or(false)
     }
 
     /// Lower every ignored window on the focused monitor below the managed

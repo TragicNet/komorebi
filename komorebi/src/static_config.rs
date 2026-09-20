@@ -1558,6 +1558,7 @@ impl StaticConfig {
             workspace_layer_focus_behaviour: value
                 .workspace_layer_focus_behaviour
                 .unwrap_or_default(),
+            layer_flip_suppress_until: None,
             hotwatch: Hotwatch::new()?,
             has_pending_raise_op: false,
             pending_move_op: Arc::new(None),
