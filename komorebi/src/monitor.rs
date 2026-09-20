@@ -297,11 +297,6 @@ impl Monitor {
             }
         }
 
-        // Keep the focused window of the top layer on the very top.
-        if let Some(window) = focused_window {
-            self.raise_managed_window(&window);
-        }
-
         // Pinned floating windows from other workspaces on this monitor belong
         // to the focused workspace's layer band: they join the Floating overlay
         // when the layer is Floating, and sit in the floating base below the
@@ -310,6 +305,15 @@ impl Monitor {
         // window just focused via cycle-focus or a layer flip) is never covered
         // by the pinned band.
         self.reposition_pinned_windows(workspace.layer)?;
+
+        // Keep the focused window of the top layer on the very top. Done after
+        // the pinned band is positioned so the raised (HWND_TOP) focused window
+        // ends up above the pinned floating windows, which the transient
+        // TopMost-style raise in `raise_pinned_windows` would otherwise leave
+        // covering the focused floating window on the Floating layer.
+        if let Some(window) = focused_window {
+            self.raise_managed_window(&window);
+        }
 
         // Demote ignored windows below the managed windows as the final z-order
         // operation, so that desktop widgets and unmanaged fullscreen windows can
