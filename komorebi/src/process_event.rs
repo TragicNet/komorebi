@@ -86,6 +86,28 @@ pub fn listen_for_events(wm: Arc<Mutex<WindowManager>>) {
     });
 }
 
+/// Determines whether a `MoveResizeEnd` should be treated as a move of a
+/// container rather than a resize or a plain click.
+///
+/// A "move" is a pure translation: the container keeps its width and height
+/// (`Rect::right`/`Rect::bottom` are dimensions, not absolute coordinates).
+///
+/// A plain click on a window (e.g. on its border) fires a `MoveResizeEnd`
+/// without any actual movement. This must not be treated as a move, otherwise
+/// the container would get swapped with whichever container sits under the
+/// cursor (typically its neighbour) even though the user only clicked on the
+/// border.
+fn is_container_translation_move(resize: Rect, moved_across_monitors: bool) -> bool {
+    if moved_across_monitors {
+        return true;
+    }
+
+    let nothing_changed =
+        resize.left == 0 && resize.top == 0 && resize.right == 0 && resize.bottom == 0;
+
+    !nothing_changed && resize.right == 0 && resize.bottom == 0
+}
+
 impl WindowManager {
     #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     #[tracing::instrument(skip(self, event), fields(event = event.title(), winevent = event.winevent(), hwnd = event.hwnd()))]
@@ -851,11 +873,7 @@ impl WindowManager {
 
                     // If we have moved across the monitors, use that override, otherwise determine
                     // if a move has taken place by ruling out a resize
-                    let right_bottom_constant = 0;
-
-                    let is_move = moved_across_monitors
-                        || resize.right.abs() == right_bottom_constant
-                            && resize.bottom.abs() == right_bottom_constant;
+                    let is_move = is_container_translation_move(resize, moved_across_monitors);
 
                     if is_move {
                         tracing::info!("moving with mouse");
@@ -1125,5 +1143,69 @@ impl WindowManager {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_container_translation_move;
+    use crate::core::Rect;
+
+    #[test]
+    fn plain_click_is_not_a_move() {
+        // A click on a window border fires a MoveResizeEnd with zero deltas.
+        let resize = Rect::default();
+        assert!(!is_container_translation_move(resize, false));
+    }
+
+    #[test]
+    fn title_bar_translation_is_a_move() {
+        // Dragging a window keeps its size while changing position.
+        let resize = Rect {
+            left: 40,
+            top: 20,
+            right: 0,
+            bottom: 0,
+        };
+        assert!(is_container_translation_move(resize, false));
+    }
+
+    #[test]
+    fn left_edge_resize_is_not_a_move() {
+        // Dragging the left border changes the width, not the position only.
+        let resize = Rect {
+            left: -30,
+            top: 0,
+            right: 30,
+            bottom: 0,
+        };
+        assert!(!is_container_translation_move(resize, false));
+    }
+
+    #[test]
+    fn top_edge_resize_is_not_a_move() {
+        let resize = Rect {
+            left: 0,
+            top: -30,
+            right: 0,
+            bottom: 30,
+        };
+        assert!(!is_container_translation_move(resize, false));
+    }
+
+    #[test]
+    fn corner_resize_is_not_a_move() {
+        let resize = Rect {
+            left: -30,
+            top: -20,
+            right: 30,
+            bottom: 20,
+        };
+        assert!(!is_container_translation_move(resize, false));
+    }
+
+    #[test]
+    fn cross_monitor_is_always_a_move() {
+        assert!(is_container_translation_move(Rect::default(), true));
     }
 }
