@@ -2431,6 +2431,21 @@ if (!(Get-Process komorebi-bar -ErrorAction SilentlyContinue))
             SocketMessage::TransparencyAlpha(alpha) => {
                 transparency_manager::TRANSPARENCY_ALPHA.store(alpha, Ordering::SeqCst);
             }
+            SocketMessage::ToggleTransparencyFloating => {
+                let current =
+                    transparency_manager::TRANSPARENCY_FLOATING.load(Ordering::SeqCst);
+                transparency_manager::TRANSPARENCY_FLOATING.store(!current, Ordering::SeqCst);
+            }
+            SocketMessage::TransparencyFloating(enable) => {
+                transparency_manager::TRANSPARENCY_FLOATING.store(enable, Ordering::SeqCst);
+            }
+            SocketMessage::ToggleTransparencyMonocle => {
+                let current = transparency_manager::TRANSPARENCY_MONOCLE.load(Ordering::SeqCst);
+                transparency_manager::TRANSPARENCY_MONOCLE.store(!current, Ordering::SeqCst);
+            }
+            SocketMessage::TransparencyMonocle(enable) => {
+                transparency_manager::TRANSPARENCY_MONOCLE.store(enable, Ordering::SeqCst);
+            }
             SocketMessage::StackbarMode(mode) => {
                 STACKBAR_MODE.store(mode);
                 self.retile_all(true)?;

@@ -87,6 +87,8 @@ struct AnimationConfig {
 struct TransparencyConfig {
     enabled: bool,
     alpha: u8,
+    floating: bool,
+    monocle: bool,
 }
 
 struct MonitorConfig {
@@ -273,8 +275,14 @@ impl KomorebiGui {
         let transparency_config = TransparencyConfig {
             enabled: global_state
                 .as_ref()
-                .map_or(false, |gs| gs.transparency_enabled),
+                .is_some_and(|gs| gs.transparency_enabled),
             alpha: global_state.as_ref().map_or(0, |gs| gs.transparency_alpha),
+            floating: global_state
+                .as_ref()
+                .is_some_and(|gs| gs.transparency_floating),
+            monocle: global_state
+                .as_ref()
+                .is_some_and(|gs| gs.transparency_monocle),
         };
 
         let resize_delta = state.as_ref().map_or(0, |s| s.resize_delta);
@@ -492,6 +500,8 @@ impl eframe::App for KomorebiGui {
                                         self.stackbar_config.width = gs.stackbar_tab_width;
                                         self.transparency_config.enabled = gs.transparency_enabled;
                                         self.transparency_config.alpha = gs.transparency_alpha;
+                                        self.transparency_config.floating = gs.transparency_floating;
+                                        self.transparency_config.monocle = gs.transparency_monocle;
                                     }
                                     self.refresh_debug_windows();
                                 }
@@ -971,6 +981,30 @@ impl eframe::App for KomorebiGui {
                     {
                         send_message(SocketMessage::Transparency(
                             self.transparency_config.enabled,
+                        ));
+                    }
+
+                    if ui
+                        .toggle_value(
+                            &mut self.transparency_config.floating,
+                            "Floating Window Transparency",
+                        )
+                        .changed()
+                    {
+                        send_message(SocketMessage::TransparencyFloating(
+                            self.transparency_config.floating,
+                        ));
+                    }
+
+                    if ui
+                        .toggle_value(
+                            &mut self.transparency_config.monocle,
+                            "Monocle Window Transparency",
+                        )
+                        .changed()
+                    {
+                        send_message(SocketMessage::TransparencyMonocle(
+                            self.transparency_config.monocle,
                         ));
                     }
 

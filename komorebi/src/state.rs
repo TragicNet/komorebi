@@ -41,6 +41,8 @@ use crate::stackbar_manager::STACKBAR_TAB_WIDTH;
 use crate::stackbar_manager::STACKBAR_UNFOCUSED_TEXT_COLOUR;
 use crate::transparency_manager::TRANSPARENCY_ALPHA;
 use crate::transparency_manager::TRANSPARENCY_ENABLED;
+use crate::transparency_manager::TRANSPARENCY_FLOATING;
+use crate::transparency_manager::TRANSPARENCY_MONOCLE;
 use crate::workspace::Workspace;
 use komorebi_themes::colour::Colour;
 use komorebi_themes::colour::Rgb;
@@ -141,6 +143,10 @@ pub struct GlobalState {
     pub stackbar_height: i32,
     pub transparency_enabled: bool,
     pub transparency_alpha: u8,
+    #[serde(default)]
+    pub transparency_floating: bool,
+    #[serde(default)]
+    pub transparency_monocle: bool,
     pub transparency_blacklist: Vec<MatchingRule>,
     pub remove_titlebars: bool,
     #[serde(alias = "float_identifiers")]
@@ -202,6 +208,8 @@ impl Default for GlobalState {
             stackbar_height: STACKBAR_TAB_HEIGHT.load(Ordering::SeqCst),
             transparency_enabled: TRANSPARENCY_ENABLED.load(Ordering::SeqCst),
             transparency_alpha: TRANSPARENCY_ALPHA.load(Ordering::SeqCst),
+            transparency_floating: TRANSPARENCY_FLOATING.load(Ordering::SeqCst),
+            transparency_monocle: TRANSPARENCY_MONOCLE.load(Ordering::SeqCst),
             transparency_blacklist: TRANSPARENCY_BLACKLIST.lock().clone(),
             remove_titlebars: REMOVE_TITLEBARS.load(Ordering::SeqCst),
             ignore_identifiers: IGNORE_IDENTIFIERS.lock().clone(),

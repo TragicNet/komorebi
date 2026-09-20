@@ -621,6 +621,20 @@ pub struct StaticConfig {
     /// Individual window transparency ignore rules
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transparency_ignore_rules: Option<Vec<MatchingRule>>,
+    /// Add transparency to unfocused floating windows
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(extend("default" = transparency_manager::TRANSPARENCY_FLOATING))
+    )]
+    pub transparency_floating: Option<bool>,
+    /// Add transparency to unfocused monocle windows
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(extend("default" = transparency_manager::TRANSPARENCY_MONOCLE))
+    )]
+    pub transparency_monocle: Option<bool>,
     /// Global default workspace padding
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = DEFAULT_WORKSPACE_PADDING)))]
@@ -947,6 +961,12 @@ impl From<&WindowManager> for StaticConfig {
             transparency_alpha: Option::from(
                 transparency_manager::TRANSPARENCY_ALPHA.load(Ordering::SeqCst),
             ),
+            transparency_floating: Option::from(
+                transparency_manager::TRANSPARENCY_FLOATING.load(Ordering::SeqCst),
+            ),
+            transparency_monocle: Option::from(
+                transparency_manager::TRANSPARENCY_MONOCLE.load(Ordering::SeqCst),
+            ),
             transparency_ignore_rules: None,
             border_style: Option::from(STYLE.load()),
             #[allow(deprecated)]
@@ -1209,6 +1229,16 @@ impl StaticConfig {
             Ordering::SeqCst,
         );
 
+        transparency_manager::TRANSPARENCY_FLOATING.store(
+            self.transparency_floating.unwrap_or(false),
+            Ordering::SeqCst,
+        );
+
+        transparency_manager::TRANSPARENCY_MONOCLE.store(
+            self.transparency_monocle.unwrap_or(false),
+            Ordering::SeqCst,
+        );
+
         transparency_manager::TRANSPARENCY_ALPHA.store(
             self.transparency_alpha.unwrap_or(200),
             Ordering::SeqCst,
@@ -1424,6 +1454,8 @@ impl StaticConfig {
             self.lower_ignored_windows_on_focus.unwrap_or(false),
             Ordering::SeqCst,
         );
+
+        transparency_manager::send_notification();
 
         Ok(())
     }

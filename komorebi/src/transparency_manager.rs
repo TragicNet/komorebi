@@ -4,6 +4,8 @@ use crossbeam_channel::Receiver;
 use crossbeam_channel::Sender;
 use crossbeam_utils::atomic::AtomicConsume;
 use parking_lot::Mutex;
+use regex::Regex;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -17,11 +19,14 @@ use crate::TRANSPARENCY_BLACKLIST;
 use crate::Window;
 use crate::WindowManager;
 use crate::WindowsApi;
+use crate::core::config_generation::MatchingRule;
 use crate::should_act;
 use crate::workspace::WorkspaceLayer;
 
 pub static TRANSPARENCY_ENABLED: AtomicBool = AtomicBool::new(false);
 pub static TRANSPARENCY_ALPHA: AtomicU8 = AtomicU8::new(200);
+pub static TRANSPARENCY_MONOCLE: AtomicBool = AtomicBool::new(false);
+pub static TRANSPARENCY_FLOATING: AtomicBool = AtomicBool::new(false);
 
 static KNOWN_HWNDS: OnceLock<Mutex<Vec<isize>>> = OnceLock::new();
 
@@ -49,6 +54,35 @@ fn event_rx() -> Receiver<Notification> {
 pub fn send_notification() {
     if event_tx().try_send(Notification).is_err() {
         tracing::warn!("channel is full; dropping notification")
+    }
+}
+
+fn is_transparency_blacklisted(
+    window: &Window,
+    transparency_blacklist: &[MatchingRule],
+    regex_identifiers: &HashMap<String, Regex>,
+) -> bool {
+    if transparency_blacklist.is_empty() {
+        return false;
+    }
+
+    if let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) = (
+        window.title(),
+        window.exe(),
+        window.class(),
+        window.path(),
+    ) {
+        should_act(
+            &title,
+            &exe_name,
+            &class,
+            &path,
+            transparency_blacklist,
+            regex_identifiers,
+        )
+        .is_some()
+    } else {
+        false
     }
 }
 
@@ -180,10 +214,27 @@ fn decide_targets(
                 continue 'workspaces;
             }
 
-            // Monocle container is never transparent
+            let transparency_blacklist = TRANSPARENCY_BLACKLIST.lock();
+            let regex_identifiers = REGEX_IDENTIFIERS.lock();
+
+            // The monocle container is never transparent unless the toggle is enabled and its
+            // monitor isn't focused: a monocle workspace is a fullscreen view of a single window,
+            // so it is only dimmed when the user is looking at another monitor.
             if let Some(monocle) = &ws.monocle_container {
                 if let Some(window) = monocle.focused_window() {
-                    opaque_targets.push(window.hwnd);
+                    let transparent = TRANSPARENCY_MONOCLE.load_consume()
+                        && monitor_idx != focused_monitor_idx
+                        && !is_transparency_blacklisted(
+                            window,
+                            &transparency_blacklist,
+                            &regex_identifiers,
+                        );
+
+                    if transparent {
+                        transparent_targets.push(window.hwnd);
+                    } else {
+                        opaque_targets.push(window.hwnd);
+                    }
                 }
 
                 continue 'monitors;
@@ -197,9 +248,6 @@ fn decide_targets(
 
                 continue 'monitors;
             }
-
-            let transparency_blacklist = TRANSPARENCY_BLACKLIST.lock();
-            let regex_identifiers = REGEX_IDENTIFIERS.lock();
 
             for (idx, c) in ws.containers().iter().enumerate() {
                 // Update the transparency for all containers on this workspace
@@ -215,39 +263,21 @@ fn decide_targets(
                     let focused_window_idx = c.focused_window_idx();
                     for (window_idx, window) in c.windows().iter().enumerate() {
                         if window_idx == focused_window_idx {
-                            let mut should_make_transparent = true;
-                            if !transparency_blacklist.is_empty()
-                                && let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) = (
-                                    window.title(),
-                                    window.exe(),
-                                    window.class(),
-                                    window.path(),
-                                )
-                            {
-                                let is_blacklisted = should_act(
-                                    &title,
-                                    &exe_name,
-                                    &class,
-                                    &path,
-                                    &transparency_blacklist,
-                                    &regex_identifiers,
-                                )
-                                .is_some();
+                            // Never paint the OS foreground window transparent: the container that
+                            // WM state considers 'focused' can lag behind the real foreground while
+                            // focus events are reconciled, so making the foreground window of an
+                            // unreconciled container transparent would flip the window the user is
+                            // interacting with to alpha < 255 - a flicker storm while clicking around.
+                            let opaque = is_transparency_blacklisted(
+                                window,
+                                &transparency_blacklist,
+                                &regex_identifiers,
+                            ) || window.hwnd == foreground_hwnd;
 
-                                should_make_transparent = !is_blacklisted;
-                            }
-
-                            if should_make_transparent {
-                                // Never paint the OS foreground window transparent: the container that
-                                // WM state considers 'focused' can lag behind the real foreground while
-                                // focus events are reconciled, so making the foreground window of an
-                                // unreconciled container transparent would flip the window the user is
-                                // interacting with to alpha < 255 - a flicker storm while clicking around.
-                                if window.hwnd == foreground_hwnd {
-                                    opaque_targets.push(window.hwnd);
-                                } else {
-                                    transparent_targets.push(window.hwnd);
-                                }
+                            if opaque {
+                                opaque_targets.push(window.hwnd);
+                            } else {
+                                transparent_targets.push(window.hwnd);
                             }
                         } else {
                             // just in case, this is useful when people are clicking around
@@ -266,6 +296,28 @@ fn decide_targets(
                         }
                     }
                 };
+            }
+
+            // Unfocused floating windows are transparent when the toggle is enabled. The focused
+            // floating window stays opaque (as does the OS foreground window, see above).
+            if TRANSPARENCY_FLOATING.load_consume() {
+                let focused_floating_idx = ws.focused_floating_window_idx();
+
+                for (window_idx, window) in ws.floating_windows().iter().enumerate() {
+                    let opaque = window_idx == focused_floating_idx
+                        || window.hwnd == foreground_hwnd
+                        || is_transparency_blacklisted(
+                            window,
+                            &transparency_blacklist,
+                            &regex_identifiers,
+                        );
+
+                    if opaque {
+                        opaque_targets.push(window.hwnd);
+                    } else {
+                        transparent_targets.push(window.hwnd);
+                    }
+                }
             }
         }
     }

@@ -711,6 +711,18 @@ struct Transparency {
 }
 
 #[derive(Parser)]
+struct TransparencyFloating {
+    #[clap(value_enum)]
+    boolean_state: BooleanState,
+}
+
+#[derive(Parser)]
+struct TransparencyMonocle {
+    #[clap(value_enum)]
+    boolean_state: BooleanState,
+}
+
+#[derive(Parser)]
 struct TransparencyAlpha {
     /// Alpha
     alpha: u8,
@@ -1543,6 +1555,16 @@ enum SubCommand {
     TransparencyAlpha(TransparencyAlpha),
     /// Toggle transparency for unfocused windows
     ToggleTransparency,
+    /// Enable or disable transparency for unfocused floating windows
+    #[clap(arg_required_else_help = true)]
+    TransparencyFloating(TransparencyFloating),
+    /// Toggle transparency for unfocused floating windows
+    ToggleTransparencyFloating,
+    /// Enable or disable transparency for unfocused monocle windows
+    #[clap(arg_required_else_help = true)]
+    TransparencyMonocle(TransparencyMonocle),
+    /// Toggle transparency for unfocused monocle windows
+    ToggleTransparencyMonocle,
     /// Enable or disable movement animations
     #[clap(arg_required_else_help = true)]
     Animation(Animation),
@@ -3274,6 +3296,18 @@ if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
         }
         SubCommand::ToggleTransparency => {
             send_message(&SocketMessage::ToggleTransparency)?;
+        }
+        SubCommand::TransparencyFloating(args) => {
+            send_message(&SocketMessage::TransparencyFloating(args.boolean_state.into()))?;
+        }
+        SubCommand::ToggleTransparencyFloating => {
+            send_message(&SocketMessage::ToggleTransparencyFloating)?;
+        }
+        SubCommand::TransparencyMonocle(args) => {
+            send_message(&SocketMessage::TransparencyMonocle(args.boolean_state.into()))?;
+        }
+        SubCommand::ToggleTransparencyMonocle => {
+            send_message(&SocketMessage::ToggleTransparencyMonocle)?;
         }
         SubCommand::Animation(args) => {
             send_message(&SocketMessage::Animation(
