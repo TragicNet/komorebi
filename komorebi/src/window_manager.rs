@@ -40,6 +40,7 @@ use crate::core::Rect;
 use crate::core::Sizing;
 use crate::core::WindowContainerBehaviour;
 use crate::core::WindowManagementBehaviour;
+use crate::core::WorkspaceLayerFocusBehaviour;
 use crate::core::config_generation::MatchingRule;
 
 use crate::CrossBoundaryBehaviour;
@@ -90,6 +91,9 @@ pub struct WindowManager {
     pub mouse_follows_focus: bool,
     pub focus_new_windows: bool,
     pub cycle_focus_across_monitors: bool,
+    /// Behaviour when a managed (tiled) window is focused while the workspace
+    /// is on the Floating layer
+    pub workspace_layer_focus_behaviour: WorkspaceLayerFocusBehaviour,
     pub hotwatch: Hotwatch,
     pub virtual_desktop_id: Option<Vec<u8>>,
     pub has_pending_raise_op: bool,
@@ -164,6 +168,7 @@ impl WindowManager {
             mouse_follows_focus: true,
             focus_new_windows: false,
             cycle_focus_across_monitors: false,
+            workspace_layer_focus_behaviour: WorkspaceLayerFocusBehaviour::default(),
             hotwatch: Hotwatch::new()?,
             has_pending_raise_op: false,
             keep_monocle_on_window_close: true,

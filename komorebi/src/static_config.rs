@@ -75,6 +75,7 @@ use crate::core::StackbarLabel;
 use crate::core::StackbarMode;
 use crate::core::WindowContainerBehaviour;
 use crate::core::WindowManagementBehaviour;
+use crate::core::WorkspaceLayerFocusBehaviour;
 use crate::core::config_generation::ApplicationConfiguration;
 use crate::core::config_generation::ApplicationConfigurationGenerator;
 use crate::core::config_generation::ApplicationOptions;
@@ -575,6 +576,14 @@ pub struct StaticConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = DEFAULT_KEEP_MONOCLE_ON_WINDOW_CLOSE)))]
     pub keep_monocle_on_window_close: Option<bool>,
+    /// What happens to the workspace layer when a managed (tiling) window is
+    /// focused while the workspace is on the Floating layer
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(extend("default" = WorkspaceLayerFocusBehaviour::RespectLock))
+    )]
+    pub workspace_layer_focus_behaviour: Option<WorkspaceLayerFocusBehaviour>,
     /// Path to applications.json from komorebi-application-specific-configurations
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_specific_configuration_path: Option<AppSpecificConfigurationPath>,
@@ -950,6 +959,7 @@ impl From<&WindowManager> for StaticConfig {
             focus_new_windows: Option::from(value.focus_new_windows),
             cycle_focus_across_monitors: Option::from(value.cycle_focus_across_monitors),
             keep_monocle_on_window_close: Option::from(value.keep_monocle_on_window_close),
+            workspace_layer_focus_behaviour: Option::from(value.workspace_layer_focus_behaviour),
             app_specific_configuration_path: None,
             border_width: Option::from(border_manager::BORDER_WIDTH.load(Ordering::SeqCst)),
             border_offset: Option::from(border_manager::BORDER_OFFSET.load(Ordering::SeqCst)),
@@ -1545,6 +1555,9 @@ impl StaticConfig {
             keep_monocle_on_window_close: value
                 .keep_monocle_on_window_close
                 .unwrap_or(DEFAULT_KEEP_MONOCLE_ON_WINDOW_CLOSE),
+            workspace_layer_focus_behaviour: value
+                .workspace_layer_focus_behaviour
+                .unwrap_or_default(),
             hotwatch: Hotwatch::new()?,
             has_pending_raise_op: false,
             pending_move_op: Arc::new(None),
@@ -1980,6 +1993,9 @@ impl StaticConfig {
         wm.keep_monocle_on_window_close = value
             .keep_monocle_on_window_close
             .unwrap_or(DEFAULT_KEEP_MONOCLE_ON_WINDOW_CLOSE);
+        wm.workspace_layer_focus_behaviour = value
+            .workspace_layer_focus_behaviour
+            .unwrap_or_default();
         wm.work_area_offset = value.global_work_area_offset;
         let prev_focus_follows_mouse = wm.focus_follows_mouse;
         #[allow(deprecated)]

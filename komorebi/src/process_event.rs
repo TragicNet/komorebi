@@ -41,6 +41,7 @@ use crate::window_manager_event::WindowManagerEvent;
 use crate::windows_api::WindowsApi;
 use crate::winevent::WinEvent;
 use crate::workspace::WorkspaceLayer;
+use crate::WorkspaceLayerFocusBehaviour;
 
 #[tracing::instrument]
 pub fn listen_for_events(wm: Arc<Mutex<WindowManager>>) {
@@ -455,6 +456,14 @@ impl WindowManager {
                 // windows; used to skip re-tapping the pinned band over it.
                 let focused_own_float;
 
+                // Set when the focus-driven layer flip must not re-order the
+                // window stack (e.g. `WorkspaceLayerFocusBehaviour::AlwaysTileNoRaise`),
+                // so the clicked window is left at its Windows-activated z-order.
+                let mut skip_layer_enforce = false;
+
+                // Copied out before the mutable workspace borrow (Copy enum).
+                let focus_behaviour = self.workspace_layer_focus_behaviour;
+
                 {
                     let workspace = self.focused_workspace_mut()?;
                     let floating_window_idx = workspace
@@ -484,13 +493,22 @@ impl WindowManager {
                                     workspace.focus_container_by_window(window.hwnd)?;
                                 }
 
-                                // Focusing a window on the tiling layer always
-                                // switches the workspace back to Tiling and
-                                // releases the lock left by a ToggleWorkspaceLayer,
-                                // so the floating overlay is lowered below the
-                                // tiled windows again.
-                                workspace.layer = WorkspaceLayer::Tiling;
-                                workspace.layer_lock = false;
+                                match focus_behaviour {
+                                    WorkspaceLayerFocusBehaviour::RespectLock => {
+                                        if !workspace.layer_lock {
+                                            workspace.layer = WorkspaceLayer::Tiling;
+                                        }
+                                    }
+                                    WorkspaceLayerFocusBehaviour::AlwaysTile => {
+                                        workspace.layer = WorkspaceLayer::Tiling;
+                                        workspace.layer_lock = false;
+                                    }
+                                    WorkspaceLayerFocusBehaviour::AlwaysTileNoRaise => {
+                                        workspace.layer = WorkspaceLayer::Tiling;
+                                        workspace.layer_lock = false;
+                                        skip_layer_enforce = true;
+                                    }
+                                }
 
                                 if matches!(
                                     self.focused_workspace()?.layout,
@@ -515,7 +533,7 @@ impl WindowManager {
                 // If the focus event flipped the workspace layer, re-establish the
                 // layer stack so the newly focused layer is raised above its base
                 // (e.g. floating windows above the tiling base after focusing one).
-                if previous_layer != self.focused_workspace()?.layer {
+                if previous_layer != self.focused_workspace()?.layer && !skip_layer_enforce {
                     self.focused_monitor()
                         .ok_or_eyre("there is no monitor with this idx")?
                         .enforce_layer_stack()?;

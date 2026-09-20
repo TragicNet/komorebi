@@ -507,6 +507,25 @@ impl FloatingLayerBehaviour {
     }
 }
 
+#[derive(
+    Clone, Copy, Debug, Default, Serialize, Deserialize, Display, EnumString, ValueEnum, PartialEq,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+/// Behaviour when a managed (tiled) window is focused while the workspace is
+/// on the Floating layer
+pub enum WorkspaceLayerFocusBehaviour {
+    /// Respect the workspace layer lock: only switch to Tiling when the layer
+    /// is not locked, then re-order the window stack (default)
+    #[default]
+    RespectLock,
+    /// Always switch the workspace to Tiling and release the layer lock, then
+    /// re-order the window stack
+    AlwaysTile,
+    /// Always switch the workspace to Tiling and release the layer lock without
+    /// re-ordering (raising/lowering) the windows
+    AlwaysTileNoRaise,
+}
+
 impl Placement {
     pub fn should_center(&self) -> bool {
         match self {
