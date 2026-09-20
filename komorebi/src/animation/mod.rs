@@ -2,13 +2,13 @@ use crate::animation::animation_manager::AnimationManager;
 use crate::core::animation::AnimationStyle;
 
 use lazy_static::lazy_static;
+use parking_lot::Condvar;
+use parking_lot::Mutex;
 use prefix::AnimationPrefix;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
-
-use parking_lot::Mutex;
 
 pub use engine::AnimationEngine;
 pub mod animation_manager;
@@ -78,6 +78,10 @@ lazy_static! {
     pub static ref ANIMATION_DURATION_PER_ANIMATION: Arc<Mutex<HashMap<AnimationPrefix, u64>>> =
         Arc::new(Mutex::new(HashMap::new()));
 }
+
+/// Signalled whenever the animation manager's state changes, so animations
+/// waiting for a render slot wake up immediately instead of polling.
+pub static ANIMATION_CONDVAR: Condvar = Condvar::new();
 
 pub static ANIMATION_FPS: AtomicU64 = AtomicU64::new(DEFAULT_ANIMATION_FPS);
 pub static GHOST_MOVEMENT_ENABLED: AtomicBool = AtomicBool::new(DEFAULT_GHOST_MOVEMENT);

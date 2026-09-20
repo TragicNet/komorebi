@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
+use super::ANIMATION_CONDVAR;
 use super::ANIMATION_DURATION_GLOBAL;
 use super::ANIMATION_FPS;
 use super::ANIMATION_MANAGER;
@@ -14,6 +15,15 @@ use super::RenderDispatcher;
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct AnimationEngine;
+
+enum WaitOutcome {
+    /// This animation claimed the render slot and may start.
+    Started,
+    /// The slot is busy; keep waiting.
+    Pending,
+    /// A newer animation superseded this one before it could start.
+    Superseded,
+}
 
 impl AnimationEngine {
     pub fn wait_for_all_animations() {
@@ -31,28 +41,6 @@ impl AnimationEngine {
         }
     }
 
-    /// Returns true if the animation needs to continue
-    pub fn cancel(animation_key: &str) -> bool {
-        // should be more than 0
-        let cancel_idx = ANIMATION_MANAGER.lock().init_cancel(animation_key);
-        let max_duration = Duration::from_secs(5);
-        let spent_duration = Instant::now();
-
-        while ANIMATION_MANAGER.lock().in_progress(animation_key) {
-            if spent_duration.elapsed() >= max_duration {
-                ANIMATION_MANAGER.lock().end(animation_key);
-            }
-
-            std::thread::sleep(Duration::from_millis(250 / 2));
-        }
-
-        let latest_cancel_idx = ANIMATION_MANAGER.lock().latest_cancel_idx(animation_key);
-
-        ANIMATION_MANAGER.lock().end_cancel(animation_key);
-
-        latest_cancel_idx == cancel_idx
-    }
-
     #[allow(clippy::cast_precision_loss)]
     pub fn animate(
         render_dispatcher: impl RenderDispatcher + Send + 'static,
@@ -61,28 +49,49 @@ impl AnimationEngine {
         std::thread::spawn(move || {
             let animation_key = render_dispatcher.get_animation_key();
 
-            // Hold the lock across both the check and the start so two threads
-            // can't both see in_progress=false and race into pre_render.
-            let was_in_progress = {
+            // Claim the newest token for this animation key. Any running or
+            // waiting animation for the same key is now superseded; only the
+            // holder of the newest token may eventually render.
+            let my_seq = {
                 let mut manager = ANIMATION_MANAGER.lock();
-                let running = manager.in_progress(animation_key.as_str());
-                if !running {
-                    manager.start(animation_key.as_str());
-                }
-                running
+                let seq = manager.request(animation_key.as_str());
+                // Wake waiters so they detect that they were superseded.
+                ANIMATION_CONDVAR.notify_all();
+                seq
             };
 
-            if was_in_progress {
-                let should_animate = Self::cancel(animation_key.as_str());
-                if !should_animate {
-                    return Ok(());
+            // Wait until we own the render slot: no animation is currently
+            // rendering and we are still the newest claim. Concede (without
+            // starting) if a newer animation superseded us while we waited.
+            loop {
+                let outcome = {
+                    let mut manager = ANIMATION_MANAGER.lock();
+                    let (is_latest, running) = manager.observe(animation_key.as_str(), my_seq);
+
+                    if !is_latest {
+                        WaitOutcome::Superseded
+                    } else if running {
+                        ANIMATION_CONDVAR.wait(&mut manager);
+                        WaitOutcome::Pending
+                    } else if manager.try_start(animation_key.as_str(), my_seq) {
+                        WaitOutcome::Started
+                    } else {
+                        WaitOutcome::Pending
+                    }
+                };
+
+                match outcome {
+                    WaitOutcome::Superseded => return Ok(()),
+                    WaitOutcome::Started => break,
+                    WaitOutcome::Pending => {}
                 }
-                ANIMATION_MANAGER.lock().start(animation_key.as_str());
             }
 
-            if let Err(e) = render_dispatcher.pre_render() {
-                ANIMATION_MANAGER.lock().end(animation_key.as_str());
-                return Err(e);
+            if let Err(error) = render_dispatcher.pre_render() {
+                ANIMATION_MANAGER
+                    .lock()
+                    .complete(animation_key.as_str(), my_seq);
+                return Err(error);
             }
 
             let target_frame_time =
@@ -92,14 +101,17 @@ impl AnimationEngine {
 
             // start animation
             while progress < 1.0 {
-                // check if animation is cancelled
-                if ANIMATION_MANAGER
+                // A newer animation superseded us; snap the renderer back to a
+                // consistent visible state so the successor can take over
+                // cleanly.
+                if !ANIMATION_MANAGER
                     .lock()
-                    .is_cancelled(animation_key.as_str())
+                    .is_current(animation_key.as_str(), my_seq)
                 {
-                    // cancel animation
-                    ANIMATION_MANAGER.lock().cancel(animation_key.as_str());
                     render_dispatcher.cleanup_on_cancel();
+                    ANIMATION_MANAGER
+                        .lock()
+                        .complete(animation_key.as_str(), my_seq);
                     return Ok(());
                 }
 
@@ -117,9 +129,8 @@ impl AnimationEngine {
                 }
             }
 
-            ANIMATION_MANAGER.lock().end(animation_key.as_str());
-
-            // limit progress to 1.0 if animation took longer
+            // Ensure the final frame sets the target position, in case the
+            // elapsed time never produced a clean 1.0 progress step.
             if progress != 1.0 {
                 progress = 1.0;
 
@@ -127,7 +138,13 @@ impl AnimationEngine {
                 render_dispatcher.render(progress).ok();
             }
 
-            render_dispatcher.post_render()
+            // Release the slot only after post-render/cleanup finishes so a
+            // successor never overlaps cloak/uncloak or ghost teardown.
+            let post_result = render_dispatcher.post_render();
+            ANIMATION_MANAGER
+                .lock()
+                .complete(animation_key.as_str(), my_seq);
+            post_result
         });
 
         Ok(())
