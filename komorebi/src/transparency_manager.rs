@@ -140,12 +140,25 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
         known_hwnds.lock().clear();
 
         // Decide phase: compute which windows need their transparency state changed. The
-        // WindowManager lock is held only while reading state, never while making the blocking
-        // layout WinAPI calls in the apply phase below.
+        // WindowManager lock is held only while reading state; the OS foreground window and
+        // maximized state are read before locking, and the blocking layout WinAPI calls are
+        // made only in the apply phase below.
+        let foreground_hwnd = WindowsApi::foreground_window().unwrap_or_default();
+        let is_maximized = WindowsApi::is_zoomed(foreground_hwnd);
+
         let (transparent_targets, opaque_targets) = {
             let state = wm.lock();
-            decide_targets(&state, known_hwnds)
+            decide_targets(&state, known_hwnds, foreground_hwnd, is_maximized)
         };
+
+        tracing::debug!(
+            transparency_enabled = TRANSPARENCY_ENABLED.load_consume(),
+            transparency_floating = TRANSPARENCY_FLOATING.load_consume(),
+            transparency_monocle = TRANSPARENCY_MONOCLE.load_consume(),
+            ?transparent_targets,
+            ?opaque_targets,
+            "decided window transparency targets",
+        );
 
         // Apply phase: the WM lock is released here. SetWindowLongPtrW / SetLayeredWindowAttributes
         // marshal synchronously to the target window's thread and can block indefinitely on a
@@ -194,6 +207,8 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
 fn decide_targets(
     state: &WindowManager,
     known_hwnds: &Mutex<Vec<isize>>,
+    foreground_hwnd: isize,
+    is_maximized: bool,
 ) -> (Vec<isize>, Vec<isize>) {
     let mut transparent_targets = Vec::new();
     let mut opaque_targets = Vec::new();
@@ -239,9 +254,6 @@ fn decide_targets(
 
                 continue 'monitors;
             }
-
-            let foreground_hwnd = WindowsApi::foreground_window().unwrap_or_default();
-            let is_maximized = WindowsApi::is_zoomed(foreground_hwnd);
 
             if is_maximized {
                 opaque_targets.push(foreground_hwnd);
@@ -298,14 +310,14 @@ fn decide_targets(
                 };
             }
 
-            // Unfocused floating windows are transparent when the toggle is enabled. The focused
-            // floating window stays opaque (as does the OS foreground window, see above).
+            // Floating windows are dimmed when the toggle is enabled, and only the OS foreground window
+            // is ever exempt. On a tiling workspace only the raised floating window is visible, so
+            // WM ring focus (focused_floating_window_idx) tracks that same window; keeping it
+            // crisp matters more than honoring ring focus, and ring focus can lag behind the real
+            // foreground the same way container focus does (see the container comment above).
             if TRANSPARENCY_FLOATING.load_consume() {
-                let focused_floating_idx = ws.focused_floating_window_idx();
-
-                for (window_idx, window) in ws.floating_windows().iter().enumerate() {
-                    let opaque = window_idx == focused_floating_idx
-                        || window.hwnd == foreground_hwnd
+                for window in ws.floating_windows() {
+                    let opaque = window.hwnd == foreground_hwnd
                         || is_transparency_blacklisted(
                             window,
                             &transparency_blacklist,
@@ -335,4 +347,162 @@ fn decide_targets(
     transparent_targets.retain(|hwnd| !seen_opaque.contains(hwnd));
 
     (transparent_targets, unique_opaque)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use crate::core::Rect;
+    use crate::monitor;
+    use crate::workspace::Workspace;
+    use parking_lot::MutexGuard;
+    use std::path::PathBuf;
+    use std::sync::atomic::Ordering;
+    use uuid::Uuid;
+
+    // The transparency statics are process-global, so tests that touch them must run one at a
+    // time; otherwise the toggles set by one test leak into another running in parallel.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct StateGuard {
+        _state_lock: MutexGuard<'static, ()>,
+        previous_enabled: bool,
+        previous_floating: bool,
+        previous_monocle: bool,
+    }
+
+    impl StateGuard {
+        fn enable() -> Self {
+            let guard = Self {
+                _state_lock: TEST_LOCK.lock(),
+                previous_enabled: TRANSPARENCY_ENABLED.load_consume(),
+                previous_floating: TRANSPARENCY_FLOATING.load_consume(),
+                previous_monocle: TRANSPARENCY_MONOCLE.load_consume(),
+            };
+
+            TRANSPARENCY_ENABLED.store(true, Ordering::SeqCst);
+            TRANSPARENCY_FLOATING.store(true, Ordering::SeqCst);
+            TRANSPARENCY_MONOCLE.store(false, Ordering::SeqCst);
+
+            guard
+        }
+
+        fn disable_floating(self) -> Self {
+            TRANSPARENCY_FLOATING.store(false, Ordering::SeqCst);
+            self
+        }
+    }
+
+    impl Drop for StateGuard {
+        fn drop(&mut self) {
+            TRANSPARENCY_ENABLED.store(self.previous_enabled, Ordering::SeqCst);
+            TRANSPARENCY_FLOATING.store(self.previous_floating, Ordering::SeqCst);
+            TRANSPARENCY_MONOCLE.store(self.previous_monocle, Ordering::SeqCst);
+        }
+    }
+
+    fn window_manager_with_floats(floats: &[&[isize]]) -> WindowManager {
+        let (_tx, rx) = crossbeam_channel::bounded(1);
+        let socket_path = PathBuf::from(format!(
+            "komorebi-transparency-test-{}.sock",
+            Uuid::new_v4()
+        ));
+
+        let mut wm = WindowManager::new(rx, Some(socket_path)).unwrap();
+
+        let mut m = monitor::new(
+            0,
+            Rect::default(),
+            Rect::default(),
+            "TestMonitor".to_string(),
+            "TestDevice".to_string(),
+            "TestDeviceID".to_string(),
+            Some("TestMonitorID".to_string()),
+        );
+
+        for workspace_floats in floats {
+            let workspace = m.workspaces_mut().back_mut().unwrap();
+
+            for hwnd in *workspace_floats {
+                workspace.floating_windows_mut().push_back(Window::from(*hwnd));
+            }
+
+            m.workspaces_mut().push_back(Workspace::default());
+        }
+
+        wm.monitors_mut().push_back(m);
+
+        wm
+    }
+
+    #[test]
+    fn test_unfocused_floating_windows_are_dimmed() {
+        let _guard = StateGuard::enable();
+        let wm = window_manager_with_floats(&[&[10, 20]]);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert_eq!(transparent, vec![10, 20]);
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_foreground_floating_window_stays_opaque() {
+        let _guard = StateGuard::enable();
+        let wm = window_manager_with_floats(&[&[10, 20]]);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 20, false);
+
+        assert_eq!(transparent, vec![10]);
+        assert_eq!(opaque, vec![20]);
+    }
+
+    #[test]
+    fn test_ring_focused_floating_window_is_dimmed_when_not_foreground() {
+        let _guard = StateGuard::enable();
+        let mut wm = window_manager_with_floats(&[&[10, 20]]);
+
+        let workspace = wm.focused_workspace_mut().unwrap();
+        assert!(workspace.focus_floating_window(0));
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert_eq!(transparent, vec![10, 20]);
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_floating_toggle_disabled_leaves_floating_windows_alone() {
+        let _guard = StateGuard::enable().disable_floating();
+        let wm = window_manager_with_floats(&[&[10, 20]]);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert!(transparent.is_empty());
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_pinned_floating_window_stays_opaque() {
+        let _guard = StateGuard::enable();
+        let wm = window_manager_with_floats(&[&[10], &[10]]);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert!(transparent.is_empty());
+        assert_eq!(opaque, vec![10]);
+    }
+
+    #[test]
+    fn test_maximized_foreground_skips_monitor_transparency() {
+        let _guard = StateGuard::enable();
+        let wm = window_manager_with_floats(&[&[10]]);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, true);
+
+        assert!(transparent.is_empty());
+        assert_eq!(opaque, vec![999]);
+    }
 }
