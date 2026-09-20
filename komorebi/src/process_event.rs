@@ -308,6 +308,12 @@ impl WindowManager {
 
                     already_moved_window_handles.remove(&window.hwnd);
                 }
+
+                // A pinned window is not in any workspace's list, so it was not
+                // removed above; prune it from the monitor's pinned set.
+                for monitor in self.monitors_mut() {
+                    monitor.unpin_floating_window(window.hwnd);
+                }
             }
             WindowManagerEvent::Minimize(_, window) => {
                 // During transient display connection changes (e.g. monitor
@@ -397,7 +403,16 @@ impl WindowManager {
                     .map(|(m, w)| m == focused_monitor_idx && w == focused_workspace_idx)
                     .unwrap_or(false);
 
-                if !on_current_workspace {
+                // A window pinned across this monitor's workspaces is part of
+                // the Floating overlay on every workspace, so focusing it is
+                // treated as focusing a floating window on the current
+                // workspace, regardless of which workspace it was homed on.
+                let is_pinned = self
+                    .focused_monitor()
+                    .map(|monitor| monitor.is_pinned(window.hwnd))
+                    .unwrap_or(false);
+
+                if !on_current_workspace && !is_pinned {
                     if let Some((m_idx, w_idx)) = window_owner {
                         tracing::debug!(
                             hwnd = window.hwnd,
@@ -440,27 +455,15 @@ impl WindowManager {
 
                 let previous_layer = self.focused_workspace()?.layer;
 
-                // A window pinned across this monitor's workspaces belongs to the
-                // Floating overlay even when it lives on another workspace: focusing
-                // it while the layer is Floating must not be treated as a tiling
-                // window, so no container focus or layer flip is performed.
-                let is_pinned_overlay = previous_layer == WorkspaceLayer::Floating
-                    && self
-                        .focused_monitor()
-                        .map(|monitor| {
-                            monitor.pinned_windows().iter().any(|w| w.hwnd == window.hwnd)
-                        })
-                        .unwrap_or(false);
-
                 // Whether the focused window is one of this workspace's own floating
-                // windows; used to skip re-tapping the pinned band over it.
+                // windows; used to skip re-tapping the overlay over it.
                 let focused_own_float;
 
-                // Set when the focus-driven flip to Tiling must not raise the tiled
-                // windows (`WorkspaceLayerFocusBehaviour::AlwaysTileNoRaise`):
-                // the floating overlay is lowered below the tiling base instead,
-                // which still switches the layer completely.
-                let mut lower_floating_overlay = false;
+                // Set when the focus-driven flip to Tiling keeps the floating
+                // overlay intact (`WorkspaceLayerFocusBehaviour::SwitchLayerOverlay`):
+                // instead of re-ordering the whole window stack, only the focused
+                // tiling window is raised above the overlay.
+                let mut keep_overlay_intact = false;
 
                 // Copied out before the mutable workspace borrow (Copy enum).
                 let focus_behaviour = self.workspace_layer_focus_behaviour;
@@ -486,7 +489,32 @@ impl WindowManager {
                                 return Ok(());
                             }
 
-                            if !is_pinned_overlay {
+                            if is_pinned {
+                                if flip_suppressed {
+                                    // Komorebi-initiated focus fallout (layer toggle,
+                                    // workspace/monitor switch): just-activated pinned
+                                    // windows that komorebi itself surfaced must not
+                                    // clobber the "last used float" memory nor flip
+                                    // the layer. A genuine user activation during this
+                                    // window is a rare race and loses.
+                                    tracing::debug!(
+                                        hwnd = window.hwnd,
+                                        "pin focus: skipping last-focused recording (komorebi-initiated focus fallout)"
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        hwnd = window.hwnd,
+                                        "pin focus: recording pinned window as last focused float"
+                                    );
+                                    // A pinned float is focused: remember it as the
+                                    // layer's last-used window and surface the
+                                    // Floating overlay, mirroring an own floating
+                                    // window.
+                                    workspace.last_focused_floating_hwnd = Some(window.hwnd);
+                                    workspace.last_focused_cycle_window_hwnd = Some(window.hwnd);
+                                    workspace.layer = WorkspaceLayer::Floating;
+                                }
+                            } else {
                                 if let Some(monocle) = &workspace.monocle_container {
                                     if let Some(window) = monocle.focused_window() {
                                         window.focus(false)?;
@@ -505,16 +533,16 @@ impl WindowManager {
                                             workspace.layer = WorkspaceLayer::Tiling;
                                         }
                                     }
-                                    WorkspaceLayerFocusBehaviour::AlwaysTile
-                                    | WorkspaceLayerFocusBehaviour::AlwaysTileNoRaise => {
+                                    WorkspaceLayerFocusBehaviour::SwitchLayer
+                                    | WorkspaceLayerFocusBehaviour::SwitchLayerOverlay => {
                                         if !flip_suppressed {
                                             workspace.layer = WorkspaceLayer::Tiling;
                                             workspace.layer_lock = false;
                                             if matches!(
                                                 focus_behaviour,
-                                                WorkspaceLayerFocusBehaviour::AlwaysTileNoRaise
+                                                WorkspaceLayerFocusBehaviour::SwitchLayerOverlay
                                             ) {
-                                                lower_floating_overlay = true;
+                                                keep_overlay_intact = true;
                                             }
                                         }
                                     }
@@ -544,10 +572,14 @@ impl WindowManager {
                 // layer stack so the newly focused layer is raised above its base
                 // (e.g. floating windows above the tiling base after focusing one).
                 if previous_layer != self.focused_workspace()?.layer {
-                    if lower_floating_overlay {
-                        // Switch to Tiling completely without raising any tiled
-                        // window: lower the floating overlay below the tiling base.
-                        self.lower_floating_overlay()?;
+                    if keep_overlay_intact {
+                        // Keep the floating overlay entirely intact: both the own
+                        // floats and the pinned band keep their relative z-order
+                        // (pins stay below the floats), and only the focused
+                        // tiling window that triggered the flip is synchronously
+                        // raised and re-activated on top of the overlay.
+                        window.raise_sync()?;
+                        WindowsApi::raise_and_focus_window(window.hwnd)?;
                     } else {
                         self.focused_monitor()
                             .ok_or_eyre("there is no monitor with this idx")?
@@ -557,18 +589,51 @@ impl WindowManager {
 
                 // Skip the re-assert when the focused window is itself part of the
                 // Floating overlay (an own floating window or a pinned window):
-                // tapping the pins above it would visually cover the window that
+                // tapping the overlay above it would visually cover the window that
                 // was just focused (e.g. when cycle-focusing between floating
-                // windows). The pin band is still re-tapped over an active tiled
-                // window so the pins stay in the Floating band.
+                // windows). The overlay is still re-tapped over an active tiled
+                // window so it stays in the Floating band.
                 let focused_workspace = self.focused_workspace()?;
                 if focused_workspace.layer == WorkspaceLayer::Floating
                     && !focused_own_float
-                    && !is_pinned_overlay
+                    && !is_pinned
                 {
+                    // Re-tap the whole Floating overlay (this workspace's own
+                    // floating windows, then the pinned band of the other
+                    // workspaces on this monitor) so it remains above the tiling
+                    // base across focus changes that settle on a tiling window.
+                    // This mirrors why the pinned band is reliable: it is
+                    // re-asserted here on every such focus change instead of
+                    // relying on a one-shot raise during the layer toggle.
+                    for window in focused_workspace.floating_windows() {
+                        if let Err(error) = window.raise_sync() {
+                            tracing::warn!(
+                                hwnd = window.hwnd,
+                                exe = window.exe().unwrap_or_default(),
+                                title = window.title().unwrap_or_default(),
+                                "could not re-tap floating window: {error}"
+                            );
+                        }
+                    }
                     self.focused_monitor()
                         .ok_or_eyre("there is no monitor with this idx")?
                         .raise_pinned_windows();
+                }
+
+                // The focused window is one of this workspace's own floating
+                // windows: lift it above the pinned band regardless of what raised
+                // the pins first (a re-tap over a focused tiled window, the layer
+                // flip, or the forward toggle), so the last-focused window is never
+                // covered by pins.
+                if focused_workspace.layer == WorkspaceLayer::Floating && focused_own_float {
+                    if let Err(error) = window.raise_sync() {
+                        tracing::warn!(
+                            hwnd = window.hwnd,
+                            exe = window.exe().unwrap_or_default(),
+                            title = window.title().unwrap_or_default(),
+                            "could not lift focused floating window: {error}"
+                        );
+                    }
                 }
 
                 if self.capture_native_maximize(window)? {
@@ -657,6 +722,7 @@ impl WindowManager {
                         let workspace_contains_window = workspace.contains_window(window.hwnd);
                         let monocle_container = workspace.monocle_container.clone();
                         let previous_layer = workspace.layer;
+                        let mut monitor_pinned_hwnd = None;
 
                         if !workspace_contains_window && needs_reconciliation.is_none() {
                             let floating_applications = FLOATING_APPLICATIONS.lock();
@@ -714,7 +780,7 @@ impl WindowManager {
                                 let center_spawned_floats =
                                     placement.should_center() && workspace.tile;
                                 if should_pin {
-                                    workspace.pin_floating_window(window.hwnd);
+                                    monitor_pinned_hwnd = Some(window.hwnd);
                                 }
                                 workspace.floating_windows_mut().push_back(window);
                                 workspace.layer = WorkspaceLayer::Floating;
@@ -724,6 +790,15 @@ impl WindowManager {
                                         .center(&workspace.globals.work_area, placement.should_resize())?;
                                 }
                                 self.update_focused_workspace(false, false)?;
+
+                                // Pinning re-homes the window from the workspace's
+                                // floating list into the monitor's pinned set once
+                                // the workspace borrow has ended.
+                                if let Some(hwnd) = monitor_pinned_hwnd {
+                                    if let Some(monitor) = self.focused_monitor_mut() {
+                                        monitor.pin_floating_window(hwnd);
+                                    }
+                                }
                             } else if let Some(monocle) = &mut workspace.monocle_container {
                                 monocle.add_window(window);
                                 if !workspace.layer_lock {

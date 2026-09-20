@@ -58,6 +58,12 @@ pub struct Monitor {
     pub workspace_padding: Option<i32>,
     pub wallpaper: Option<Wallpaper>,
     pub floating_layer_behaviour: Option<FloatingLayerBehaviour>,
+    /// HWNDs of floating windows pinned across all workspaces on this monitor.
+    /// Pinned windows live here (not in any workspace's `floating_windows`) and
+    /// are treated as part of the floating overlay of whichever workspace is
+    /// focused. Only floating windows can be pinned.
+    #[serde(default)]
+    pub pinned_floating: Vec<isize>,
 }
 
 impl_ring_elements!(Monitor, Workspace);
@@ -116,6 +122,7 @@ pub fn new(
         workspace_padding: None,
         wallpaper: None,
         floating_layer_behaviour: None,
+        pinned_floating: vec![],
     }
 }
 
@@ -168,6 +175,7 @@ impl Monitor {
             workspace_padding: None,
             wallpaper: None,
             floating_layer_behaviour: None,
+            pinned_floating: vec![],
         }
     }
 
@@ -201,10 +209,10 @@ impl Monitor {
             if i == focused_idx {
                 workspace.restore(mouse_follows_focus, trigger_focus, hmonitor, &monitor_wp)?;
             } else {
-                // hide() skips pinned floating windows, which remain visible across
-                // all workspaces on this monitor
+                // hide() hides the workspace's floats and containers; pinned
+                // windows are not in any workspace's floating list, so they
+                // remain visible across all workspaces on this monitor.
                 workspace.hide(None);
-                workspace.restore_pinned();
             }
         }
 
@@ -269,7 +277,21 @@ impl Monitor {
                 .focused_container()
                 .and_then(|container| container.focused_window())
                 .copied(),
-            WorkspaceLayer::Floating => workspace.focused_floating_window().copied(),
+            WorkspaceLayer::Floating => {
+                // Surface a pinned window only when it is the layer's remembered
+                // last-used float, i.e. the user's last float interaction was
+                // that pinned window. Do NOT consult the live foreground here:
+                // Window::focus() activates asynchronously via sendInput, so the
+                // foreground is stale mid-toggle and an incidentally active pin
+                // would wrongly be raised above the window that was focused.
+                if let Some(hwnd) = workspace.last_focused_floating_hwnd
+                    && self.is_pinned(hwnd)
+                {
+                    Some(Window::from(hwnd))
+                } else {
+                    workspace.focused_floating_window().copied()
+                }
+            }
         };
 
         match workspace.layer {
@@ -283,28 +305,45 @@ impl Monitor {
                         self.raise_managed_window(window);
                     }
                 }
+                self.reposition_pinned_windows(WorkspaceLayer::Tiling)?;
             }
             WorkspaceLayer::Floating => {
-                // Tiled windows form the base, floating windows the top layer.
+                // Tiled windows form the base, then the pinned band, then the
+                // working floats. Pinned windows are just floats reachable from
+                // every workspace, so they join the overlay's band BELOW the
+                // floats: raising the pins first makes the layer read
+                // base -> pins -> floats -> focused, with no pins-over-floats
+                // artifact. A focused pin still surfaces via the focused-window
+                // raise below.
+                let pins = self.pinned_windows();
+                let floats = workspace.floating_windows();
+                // A window in the TopMost band can never be climbed by a plain
+                // HWND_TOP raise from a normal-band window, so the pinned band
+                // and the working floats must be demoted out of the TopMost band
+                // first. Some applications (e.g. pinned/always-on-top tool
+                // windows) re-assert their own TopMost state; that shows up in
+                // the layered band diagnostics.
+                for window in pins.iter().chain(floats.iter()) {
+                    if let Err(error) = WindowsApi::clear_topmost_window(window.hwnd) {
+                        tracing::warn!(
+                            hwnd = window.hwnd,
+                            "could not clear topmost state of layer window: {error}"
+                        );
+                    }
+                }
                 for window in workspace.containers() {
                     if let Some(window) = window.focused_window() {
                         self.raise_managed_window(window);
                     }
                 }
-                for window in workspace.floating_windows().iter().rev() {
+                for window in &pins {
+                    self.raise_managed_window(window);
+                }
+                for window in floats.iter().rev() {
                     self.raise_managed_window(window);
                 }
             }
         }
-
-        // Pinned floating windows from other workspaces on this monitor belong
-        // to the focused workspace's layer band: they join the Floating overlay
-        // when the layer is Floating, and sit in the floating base below the
-        // tiled top layer when it is Tiling. They are positioned here, below
-        // the focused top-layer window, so the focused window (e.g. a floating
-        // window just focused via cycle-focus or a layer flip) is never covered
-        // by the pinned band.
-        self.reposition_pinned_windows(workspace.layer)?;
 
         // Keep the focused window of the top layer on the very top. Done after
         // the pinned band is positioned so the raised (HWND_TOP) focused window
@@ -382,20 +421,40 @@ impl Monitor {
         Ok(())
     }
 
-    /// Returns the pinned floating windows of every workspace on this monitor,
-    /// deduplicated by HWND. Pinned windows belong to the monitor as a whole:
-    /// they are treated as part of the floating overlay of whichever workspace
-    /// is currently focused.
+    /// Returns the pinned floating windows of this monitor, in pin order.
+    /// Pinned windows belong to the monitor as a whole: they are treated as
+    /// part of the floating overlay of whichever workspace is currently
+    /// focused.
     pub fn pinned_windows(&self) -> Vec<Window> {
-        let mut windows: Vec<Window> = vec![];
-        for workspace in self.workspaces() {
-            for window in workspace.pinned_floating_windows() {
-                if !windows.iter().any(|w| w.hwnd == window.hwnd) {
-                    windows.push(window);
-                }
-            }
+        self.pinned_floating
+            .iter()
+            .map(|hwnd| Window::from(*hwnd))
+            .collect()
+    }
+
+    /// Whether the given window HWND is pinned across all workspaces on this monitor.
+    pub fn is_pinned(&self, hwnd: isize) -> bool {
+        self.pinned_floating.contains(&hwnd)
+    }
+
+    /// Pin a floating window so it is visible across all workspaces on this
+    /// monitor. Pinning removes the window from every workspace's floating
+    /// list on this monitor: pinned windows live in `pinned_floating` alone.
+    pub fn pin_floating_window(&mut self, hwnd: isize) {
+        if !self.is_pinned(hwnd) {
+            self.pinned_floating.push(hwnd);
         }
-        windows
+
+        for workspace in self.workspaces_mut() {
+            workspace
+                .floating_windows_mut()
+                .retain(|window| window.hwnd != hwnd);
+        }
+    }
+
+    /// Unpin a floating window, leaving it floating on its current workspace.
+    pub fn unpin_floating_window(&mut self, hwnd: isize) {
+        self.pinned_floating.retain(|h| *h != hwnd);
     }
 
     /// Raise the pinned floating windows of all workspaces on this monitor so
@@ -918,6 +977,14 @@ impl Monitor {
         follow: bool,
         direction: Option<OperationDirection>,
     ) -> eyre::Result<()> {
+        let foreground_hwnd = WindowsApi::foreground_window()?;
+
+        // A pinned window is already visible on every workspace of this
+        // monitor, so there is nothing to move within the monitor.
+        if self.is_pinned(foreground_hwnd) {
+            return Ok(());
+        }
+
         let workspace = self
             .focused_workspace_mut()
             .ok_or_eyre("there is no workspace")?;
@@ -926,7 +993,6 @@ impl Monitor {
             bail!("cannot move native maximized window to another monitor or workspace");
         }
 
-        let foreground_hwnd = WindowsApi::foreground_window()?;
         let floating_window_index = workspace
             .floating_windows()
             .iter()

@@ -218,17 +218,18 @@ fn decide_targets(
     'monitors: for (monitor_idx, m) in state.monitors.elements().iter().enumerate() {
         let focused_workspace_idx = m.focused_workspace_idx();
 
+        // Pinned floating windows stay visible across all workspaces on the
+        // monitor, so they are always kept opaque.
+        for window in m.pinned_windows() {
+            opaque_targets.push(window.hwnd);
+        }
+
         'workspaces: for (workspace_idx, ws) in m.workspaces().iter().enumerate() {
             // Non-focused workspaces are hidden; leave their windows at the transparency computed
             // when they were last focused. Force-opaquing them here would reveal them fully opaque
             // for one pass when the user switches to them, because the workspace is restored
-            // before the next async pass runs. Only pinned floating windows, which stay visible
-            // across all workspaces on the monitor, are kept opaque.
+            // before the next async pass runs.
             if workspace_idx != focused_workspace_idx {
-                for window in ws.pinned_floating_windows() {
-                    opaque_targets.push(window.hwnd);
-                }
-
                 continue 'workspaces;
             }
 
@@ -519,9 +520,8 @@ mod tests {
         let _guard = StateGuard::enable();
         let mut wm = window_manager_with_floats(&[&[10], &[]]);
 
-        // Pin float 10 on ws0, then move focus to ws1 so ws0 is hidden but 10 stays visible.
-        let workspace = &mut wm.monitors_mut()[0].workspaces_mut()[0];
-        workspace.pin_floating_window(10);
+        // Pin float 10 on the monitor, then move focus to ws1 so ws0 is hidden but 10 stays visible.
+        wm.monitors_mut()[0].pin_floating_window(10);
 
         wm.focused_monitor_mut()
             .unwrap()

@@ -88,6 +88,19 @@ pub extern "system" fn enum_ignored_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
     true.into()
 }
 
+/// Records every visible top-level window handle, in the order EnumWindows
+/// reports them (top-to-bottom Z order). Diagnostic helper for inspecting
+/// the layer stack after a transition.
+pub extern "system" fn enum_all_visible_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let hwnds = unsafe { &mut *(lparam.0 as *mut Vec<isize>) };
+
+    if WindowsApi::is_window(hwnd.0 as isize) && WindowsApi::is_window_visible(hwnd.0 as isize) {
+        hwnds.push(hwnd.0 as isize);
+    }
+
+    true.into()
+}
+
 pub extern "system" fn alt_tab_windows(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let windows = unsafe { &mut *(lparam.0 as *mut Vec<Window>) };
 

@@ -6,6 +6,7 @@ use miow::pipe::connect;
 use net2::TcpStreamExt;
 use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::BufRead;
@@ -72,6 +73,7 @@ use crate::core::SocketMessage;
 use crate::core::StateQuery;
 use crate::core::WindowContainerBehaviour;
 use crate::core::WindowKind;
+use crate::core::WorkspaceLayerFocusBehaviour;
 use crate::core::config_generation::IdWithIdentifier;
 use crate::core::config_generation::MatchingRule;
 use crate::core::config_generation::MatchingStrategy;
@@ -1400,13 +1402,21 @@ impl WindowManager {
                             .ok_or_eyre("there is no monitor")?
                             .pinned_windows();
 
+                        // The Floating layer remembers its own last-focused window;
+                        // a pinned window is just a float, so it can be that memory
+                        // too. Snapshot it before the mutable workspace borrow.
+                        let last_focused_floating_hwnd =
+                            self.focused_workspace()?.last_focused_floating_hwnd;
+
                         let workspace = self.focused_workspace_mut()?;
                         workspace.layer = WorkspaceLayer::Floating;
                         workspace.layer_lock = true;
 
-                        // Show the floating overlay on top of the intact base layer. The base
-                        // (tiling) layer is never lowered or hidden, so it remains fully
-                        // visible underneath the raised floating windows.
+                        // Show the floating overlay on top of the base layer. The base (tiling)
+                        // layer keeps its positions, but the focused window of every tiling
+                        // container is synchronously lowered to the bottom of the z-order
+                        // after the floats are raised, so the overlay is guaranteed to sit
+                        // above the base even if a float's raise fails.
                         let focused_idx = workspace.focused_floating_window_idx();
                         let mut window_idx_pairs = workspace
                             .floating_windows_mut()
@@ -1422,13 +1432,59 @@ impl WindowManager {
                         });
                         window_idx_pairs.reverse();
 
+                        // Restore the layer's remembered window focus on toggle: prefer the
+                        // last-focused floating window recorded by the layer (an
+                        // own float or a pinned window - both are floats), and
+                        // fall back to the floating ring's focused element when
+                        // that handle is no longer around.
                         let mut to_focus = None;
-                        for (i, window) in window_idx_pairs {
-                            if i == focused_idx {
-                                to_focus = Some(*window);
-                            } else {
-                                window.restore();
-                                window.raise_above_active()?;
+                        let mut focus_source = "none";
+                        for (_, window) in window_idx_pairs.iter() {
+                            if Some(window.hwnd) == last_focused_floating_hwnd {
+                                to_focus = Some(**window);
+                                focus_source = "own-float-memory";
+                                break;
+                            }
+                        }
+                        if to_focus.is_none()
+                            && let Some(hwnd) = last_focused_floating_hwnd
+                            && let Some(window) = pinned_overlay
+                                .iter()
+                                .find(|window| window.hwnd == hwnd)
+                        {
+                            to_focus = Some(*window);
+                            focus_source = "pinned-memory";
+                        }
+                        if to_focus.is_none() {
+                            for (i, window) in window_idx_pairs.iter() {
+                                if *i == focused_idx {
+                                    to_focus = Some(**window);
+                                    focus_source = "ring-fallback";
+                                    break;
+                                }
+                            }
+                        }
+
+                        tracing::info!(
+                            "toggle_to_floating: to_focus_hwnd={:?} source={} last_focused_floating_hwnd={:?}",
+                            to_focus.map(|w| w.hwnd),
+                            focus_source,
+                            last_focused_floating_hwnd,
+                        );
+
+                        for (_, window) in window_idx_pairs.iter() {
+                            let window = **window;
+                            if to_focus.is_some_and(|w| w.hwnd == window.hwnd) {
+                                continue;
+                            }
+                            window.restore();
+                            if let Err(error) = window.raise_above_active() {
+                                tracing::warn!(
+                                    hwnd = window.hwnd,
+                                    exe = window.exe().unwrap_or_default(),
+                                    title = window.title().unwrap_or_default(),
+                                    "could not raise floating window: {error}"
+                                );
                             }
                         }
 
@@ -1436,13 +1492,20 @@ impl WindowManager {
                             // The focused window should be the last one raised to make sure it is
                             // on top
                             focused_window.restore();
-                            focused_window.raise_above_active()?;
+                            if let Err(error) = focused_window.raise_above_active() {
+                                tracing::warn!(
+                                    hwnd = focused_window.hwnd,
+                                    exe = focused_window.exe().unwrap_or_default(),
+                                    title = focused_window.title().unwrap_or_default(),
+                                    "could not raise focused floating window: {error}"
+                                );
+                            }
                         }
 
                         // Show the monitor's pinned windows from other workspaces alongside
                         // this workspace's own floating windows. Their deterministic z-order
-                        // is fixed by the synchronous pinned band raise at the end of this
-                        // arm.
+                        // is fixed by the layer re-stack (`enforce_layer_stack`) at the end
+                        // of this arm.
                         let own_hwnds = workspace
                             .floating_windows()
                             .iter()
@@ -1454,28 +1517,30 @@ impl WindowManager {
                         }
 
                         // Hoist the monocle window so the workspace borrow ends here,
-                        // before the pinned-band raise takes its own monitor borrow.
+                        // before the monitor borrows taken by the focus step and the
+                        // final layer re-stack (`enforce_layer_stack`).
                         let monocle_window = workspace
                             .monocle_container
                             .as_ref()
                             .and_then(|monocle| monocle.focused_window())
                             .copied();
 
-                        // Deterministically place the pinned floating band before the focus
-                        // step: the whole Floating overlay (own floats plus pins from other
-                        // workspaces on this monitor) is raised above the intact tiling base,
-                        // synchronously, so no pending async window-thread raises can land
-                        // above the pinned windows. The focused floating window is then
-                        // activated last so it sits on top of the pinned band.
-                        self.focused_monitor()
-                            .ok_or_eyre("there is no monitor")?
-                            .raise_pinned_windows();
-
-                        // If there are no floating windows to focus, focus the desktop
-                        // instead so that lowering the monocle window does not trigger an
-                        // auto-focus.
+                        // If there are no floating windows to restore, focus the desktop instead so
+                        // that lowering the monocle window does not trigger an
+                        // auto-focus. Under SwitchLayerOverlay with no monocle
+                        // window being lowered, leave focus on the still-focused
+                        // tiling window: activating the desktop (or a pinned band
+                        // member) would steal focus when there is nothing to
+                        // restore.
                         if let Some(window) = to_focus {
                             window.focus(mouse_follows_focus)?;
+                        } else if self.workspace_layer_focus_behaviour
+                            == WorkspaceLayerFocusBehaviour::SwitchLayerOverlay
+                            && monocle_window.is_none()
+                        {
+                            tracing::info!(
+                                "Tiling->Floating: no remembered floating window, keeping focus on the tiling window"
+                            );
                         } else {
                             WindowsApi::raise_and_focus_window(WindowsApi::desktop_window()?)?;
                         }
@@ -1488,10 +1553,115 @@ impl WindowManager {
                                 hwnd = window.hwnd,
                                 "Tiling->Floating: lowering monocle window",
                             );
-                            window.lower()?;
+                            if let Err(error) = window.lower() {
+                                tracing::warn!(
+                                    hwnd = window.hwnd,
+                                    exe = window.exe().unwrap_or_default(),
+                                    title = window.title().unwrap_or_default(),
+                                    "could not lower monocle window: {error}"
+                                );
+                            }
+                        }
+
+                        // Deterministically re-assert the whole layer stack using the
+                        // same synchronous re-stacker that workspace/monitor switches
+                        // rely on: base (tiled) windows are raised, then the floating
+                        // windows above them, then the focused top-layer window on top
+                        // of the pinned band, with ignored windows demoted last. This
+                        // is independent of the transient TopMost-band raise used for
+                        // the instantaneous effect above, so the overlay is guaranteed
+                        // to sit above the tiling base as long as this call succeeds.
+                        self.focused_monitor()
+                            .ok_or_eyre("there is no monitor")?
+                            .enforce_layer_stack()?;
+
+                        // Deterministically re-assert foreground on the remembered
+                        // float AFTER the whole layer stack has settled. Windows can
+                        // otherwise leave the foreground on a pinned band window that
+                        // ended up at the top of the managed stack (e.g. because the
+                        // application re-asserts its own TopMost state), which both
+                        // steals the keyboard focus from the last-used float AND
+                        // records the pin as the last-used float for the next toggle.
+                        if let Ok(foreground) = WindowsApi::foreground_window() {
+                            tracing::info!(
+                                foreground,
+                                "Tiling->Floating: foreground before last-used-float re-assert"
+                            );
+                        }
+                        if let Some(window) = to_focus {
+                            match WindowsApi::raise_and_focus_window(window.hwnd) {
+                                Ok(()) => tracing::info!(
+                                    hwnd = window.hwnd,
+                                    "Tiling->Floating: re-asserted foreground on last used float"
+                                ),
+                                Err(error) => tracing::warn!(
+                                    hwnd = window.hwnd,
+                                    "could not re-assert foreground on last used float: {error}"
+                                ),
+                            }
+                            if let Ok(foreground) = WindowsApi::foreground_window() {
+                                tracing::info!(
+                                    foreground,
+                                    "Tiling->Floating: foreground after re-assert"
+                                );
+                            }
+                        }
+
+                        // DIAGNOSTIC: dump the top-to-bottom top-level z-order (own
+                        // floating, tiling base, pinned, and anything else that ended
+                        // up in the way) so the layer result is observable in the
+                        // RUST_LOG output. Remove once the toggle reliably raises
+                        // every floating window.
+                        {
+                            let workspace = self.focused_workspace()?;
+                            let float_hwnds = workspace
+                                .floating_windows()
+                                .iter()
+                                .map(|window| window.hwnd)
+                                .collect::<HashSet<_>>();
+                            let base_hwnds = workspace
+                                .containers()
+                                .iter()
+                                .filter_map(|container| container.focused_window())
+                                .map(|window| window.hwnd)
+                                .collect::<HashSet<_>>();
+                            let pinned_hwnds = self
+                                .focused_monitor()
+                                .map(|monitor| monitor.pinned_windows())
+                                .unwrap_or_default()
+                                .iter()
+                                .map(|window| window.hwnd)
+                                .collect::<HashSet<_>>();
+                            let mut zorder_hwnds = Vec::new();
+                            WindowsApi::enum_windows(
+                                Some(crate::windows_callbacks::enum_all_visible_window),
+                                &mut zorder_hwnds as *mut Vec<isize> as isize,
+                            )?;
+                            for hwnd in zorder_hwnds {
+                                let role = if float_hwnds.contains(&hwnd) {
+                                    "float"
+                                } else if base_hwnds.contains(&hwnd) {
+                                    "base"
+                                } else if pinned_hwnds.contains(&hwnd) {
+                                    "pin"
+                                } else {
+                                    "other"
+                                };
+                                let is_topmost =
+                                    WindowsApi::is_topmost_window(hwnd).unwrap_or(false);
+                                tracing::info!(
+                                    hwnd,
+                                    role,
+                                    is_topmost,
+                                    title = Window::from(hwnd).title().unwrap_or_default(),
+                                    exe = Window::from(hwnd).exe().unwrap_or_default(),
+                                    "Tiling->Floating: z-order (top to bottom)",
+                                );
+                            }
                         }
                     }
                     WorkspaceLayer::Floating => {
+                        let focus_behaviour = self.workspace_layer_focus_behaviour;
                         {
                             let workspace = self.focused_workspace_mut()?;
                             workspace.layer = WorkspaceLayer::Tiling;
@@ -1515,10 +1685,31 @@ impl WindowManager {
                             }
                         }
 
-                        // Lower the floating overlay below the intact base layer without
-                        // raising any tiled window, and drop the pinned floating windows of
-                        // other workspaces on this monitor back below the tiling base.
-                        self.lower_floating_overlay()?;
+                        if matches!(
+                            focus_behaviour,
+                            WorkspaceLayerFocusBehaviour::SwitchLayerOverlay
+                        ) {
+                            // Keep the floating overlay intact (SwitchLayerOverlay): no
+                            // lowering, no full layer re-stack. Only the focused tiling
+                            // window is raised above the pinned band; non-focused tiling
+                            // windows stay lower in the z-order but remain visible.
+                            let focused_tiled = if let Some(monocle) =
+                                &self.focused_workspace()?.monocle_container
+                            {
+                                monocle.focused_window().copied()
+                            } else {
+                                self.focused_workspace()?
+                                    .focused_container()
+                                    .and_then(|container| container.focused_window())
+                                    .copied()
+                            };
+                            self.raise_pinned_band_above_tiled(focused_tiled)?;
+                        } else {
+                            // Lower the floating overlay below the intact base layer without
+                            // raising any tiled window, and drop the pinned floating windows of
+                            // other workspaces on this monitor back below the tiling base.
+                            self.lower_floating_overlay()?;
+                        }
 
                         let workspace = self.focused_workspace()?;
                         tracing::info!(

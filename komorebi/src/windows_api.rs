@@ -664,6 +664,37 @@ impl WindowsApi {
         )
     }
 
+    /// Move the window out of the TopMost band without activating or focusing
+    /// it, applied synchronously regardless of `WINDOW_HANDLING_BEHAVIOUR`.
+    ///
+    /// Raising another window with `HWND_TOP` cannot place it above a remaining
+    /// TopMost window, so the pinned band and working floats must be demoted out
+    /// of the TopMost band before the layer stack (base -> pins -> floats ->
+    /// focused) can be assembled deterministically. Some applications (e.g.
+    /// pinned/always-on-top tool windows) re-assert their own TopMost state; that
+    /// is observable in the layered band via the topmost diagnostics.
+    pub fn clear_topmost_window(hwnd: isize) -> eyre::Result<()> {
+        let flags = SetWindowPosition::NO_MOVE
+            | SetWindowPosition::NO_SIZE
+            | SetWindowPosition::NO_ACTIVATE
+            | SetWindowPosition::SHOW_WINDOW;
+
+        Self::set_window_pos(
+            HWND(as_ptr!(hwnd)),
+            &Rect::default(),
+            HWND_NOTOPMOST,
+            flags.bits(),
+        )
+    }
+
+    /// Whether the window currently carries the TopMost (`WS_EX_TOPMOST`) extended
+    /// style, i.e. it is placed in the TopMost band above every normal-band
+    /// window. Used by the layer stack diagnostics.
+    pub fn is_topmost_window(hwnd: isize) -> eyre::Result<bool> {
+        let ex_style = unsafe { GetWindowLongPtrW(HWND(as_ptr!(hwnd)), GWL_EXSTYLE) };
+        Ok(((ex_style as u64) & (WS_EX_TOPMOST.0 as u64)) != 0)
+    }
+
     /// Lower the window to the bottom of the Z order, but do not activate or focus
     /// it.
     pub fn lower_window(hwnd: isize) -> eyre::Result<()> {

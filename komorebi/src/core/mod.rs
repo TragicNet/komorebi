@@ -520,10 +520,14 @@ pub enum WorkspaceLayerFocusBehaviour {
     RespectLock,
     /// Always switch the workspace to Tiling and release the layer lock, then
     /// re-order the window stack
-    AlwaysTile,
-    /// Always switch the workspace to Tiling and release the layer lock without
-    /// re-ordering (raising/lowering) the windows
-    AlwaysTileNoRaise,
+    #[serde(alias = "AlwaysTile")]
+    SwitchLayer,
+    /// Always switch the workspace to Tiling and release the layer lock
+    /// without re-ordering (raising/lowering) the whole window stack: the
+    /// floating overlay is kept intact and only the focused tiling window is
+    /// raised above it
+    #[serde(alias = "AlwaysTileNoRaise")]
+    SwitchLayerOverlay,
 }
 
 impl Placement {

@@ -798,6 +798,7 @@ where
                                     workspace_padding: cached.workspace_padding,
                                     wallpaper: cached.wallpaper.clone(),
                                     floating_layer_behaviour: cached.floating_layer_behaviour,
+                                    pinned_floating: cached.pinned_floating.clone(),
                                 };
 
                                 let focused_workspace_idx = m.focused_workspace_idx();

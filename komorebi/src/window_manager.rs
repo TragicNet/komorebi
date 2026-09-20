@@ -276,21 +276,18 @@ impl WindowManager {
                             workspace.workspace_padding = workspace_padding;
                             workspace.layout_options = layout_options;
 
-                            // Prune any stale pinned HWNDs that are no longer managed as floating
-                            let floating_hwnds: Vec<isize> = workspace
-                                .floating_windows()
-                                .iter()
-                                .map(|w| w.hwnd)
-                                .collect();
-                            workspace
-                                .pinned_floating
-                                .retain(|hwnd| floating_hwnds.contains(hwnd));
-
                             if state_monitor.focused_workspace_idx() == workspace_idx {
                                 focused_workspace = workspace_idx;
                             }
                         }
                     }
+
+                    // Restore this monitor's pinned floating windows and prune
+                    // any stale pinned HWNDs whose windows no longer exist.
+                    monitor.pinned_floating = state_monitor.pinned_floating.clone();
+                    monitor
+                        .pinned_floating
+                        .retain(|hwnd| Window::from(*hwnd).exe().is_ok());
                 }
 
                 if let Err(error) = monitor.focus_workspace(focused_workspace) {
@@ -1583,6 +1580,7 @@ impl WindowManager {
             &mut untracked as *mut Vec<isize> as isize,
         )?;
 
+        let mut pinned_to_apply: Vec<isize> = Vec::new();
         {
             let ws = self.focused_workspace_mut()?;
             let floating_applications = FLOATING_APPLICATIONS.lock();
@@ -1637,14 +1635,23 @@ impl WindowManager {
                 WindowsApi::restore_window_sync(hwnd);
 
                 if should_float {
-                    if should_pin {
-                        ws.pin_floating_window(window.hwnd);
-                    }
+                    let win_hwnd = window.hwnd;
                     ws.floating_windows_mut().push_back(window);
                     ws.layer = WorkspaceLayer::Floating;
+                    if should_pin {
+                        pinned_to_apply.push(win_hwnd);
+                    }
                 } else {
                     ws.new_container_for_window(window);
                 }
+            }
+        }
+
+        // Pinning moves the window out of every workspace's floating list into
+        // the monitor's pinned set, so it stays visible across all workspaces.
+        for pinned_hwnd in pinned_to_apply {
+            if let Some(monitor) = self.focused_monitor_mut() {
+                monitor.pin_floating_window(pinned_hwnd);
             }
         }
 
@@ -1865,6 +1872,14 @@ impl WindowManager {
         let offset = self.work_area_offset;
         let mouse_follows_focus = self.mouse_follows_focus;
 
+        // Pinned windows are not in any workspace's floating list; detect them
+        // before the mutable monitor borrow so the pin can be re-homed.
+        let foreground_hwnd = WindowsApi::foreground_window()?;
+        let is_pinned_float = self
+            .focused_monitor()
+            .map(|m| m.is_pinned(foreground_hwnd))
+            .unwrap_or(false);
+
         let monitor = self
             .focused_monitor_mut()
             .ok_or_eyre("there is no monitor")?;
@@ -1879,7 +1894,6 @@ impl WindowManager {
             bail!("cannot move native maximized window to another monitor or workspace");
         }
 
-        let foreground_hwnd = WindowsApi::foreground_window()?;
         let floating_window_index = workspace
             .floating_windows()
             .iter()
@@ -1887,7 +1901,9 @@ impl WindowManager {
 
         let floating_window =
             floating_window_index.and_then(|idx| workspace.floating_windows_mut().remove(idx));
-        let container = if floating_window_index.is_none() {
+        let container = if is_pinned_float {
+            None
+        } else if floating_window_index.is_none() {
             if workspace
                 .focused_container()
                 .is_some_and(|container| container.windows().len() > 1)
@@ -1904,6 +1920,10 @@ impl WindowManager {
         } else {
             None
         };
+
+        if is_pinned_float {
+            monitor.unpin_floating_window(foreground_hwnd);
+        }
         monitor.update_focused_workspace(offset)?;
 
         let target_monitor = self
@@ -1934,7 +1954,11 @@ impl WindowManager {
             target_workspace.reintegrate_monocle_container()?;
         }
 
-        if let Some(window) = floating_window {
+        if is_pinned_float {
+            target_monitor.pin_floating_window(foreground_hwnd);
+            Window::from(foreground_hwnd)
+                .move_to_area(&current_area, &target_monitor.work_area_size)?;
+        } else if let Some(window) = floating_window {
             target_workspace.floating_windows_mut().push_back(window);
             target_workspace.layer = WorkspaceLayer::Floating;
             target_workspace.layer_lock = false;
@@ -3351,10 +3375,21 @@ impl WindowManager {
     #[tracing::instrument(skip(self))]
     pub fn toggle_pin_floating_window(&mut self) -> eyre::Result<()> {
         let hwnd = WindowsApi::foreground_window()?;
-        let workspace = self.focused_workspace_mut()?;
 
-        // Only floating windows can be pinned; tiling windows are never pinned
-        if !workspace.is_floating(hwnd) {
+        // Pins live on the monitor; a window may be toggled from any workspace.
+        let is_floating = self
+            .focused_workspace()?
+            .floating_windows()
+            .iter()
+            .any(|w| w.hwnd == hwnd);
+        let is_pinned = self
+            .focused_monitor()
+            .map(|monitor| monitor.is_pinned(hwnd))
+            .unwrap_or(false);
+
+        // Only floating windows can be pinned; tiling windows are never pinned.
+        // Pinned windows can be unpinned from any workspace.
+        if !is_floating && !is_pinned {
             tracing::warn!(
                 hwnd,
                 "ignoring toggle-pin command: only floating windows can be pinned"
@@ -3362,7 +3397,20 @@ impl WindowManager {
             return Ok(());
         }
 
-        workspace.toggle_pin_floating_window(hwnd);
+        if is_pinned {
+            // Unpinning re-floats the window on the focused workspace.
+            self.focused_monitor_mut()
+                .ok_or_eyre("there is no monitor")?
+                .unpin_floating_window(hwnd);
+            self.focused_workspace_mut()?
+                .floating_windows_mut()
+                .push_back(Window::from(hwnd));
+            self.focused_workspace_mut()?.layer = WorkspaceLayer::Floating;
+        } else {
+            self.focused_monitor_mut()
+                .ok_or_eyre("there is no monitor")?
+                .pin_floating_window(hwnd);
+        }
 
         // Refresh the monitor so visibility follows the new pin state
         let mouse_follows_focus = self.mouse_follows_focus;
@@ -3410,6 +3458,23 @@ impl WindowManager {
     #[tracing::instrument(skip(self))]
     pub fn unfloat_window(&mut self) -> eyre::Result<()> {
         tracing::info!("unfloating window");
+
+        let foreground_hwnd = WindowsApi::foreground_window()?;
+
+        // A pinned window is not in the workspace's floating list; unpin it and
+        // re-float it on the focused workspace first so it can be containerized.
+        let is_pinned = self
+            .focused_monitor()
+            .map(|monitor| monitor.is_pinned(foreground_hwnd))
+            .unwrap_or(false);
+        if is_pinned {
+            self.focused_monitor_mut()
+                .ok_or_eyre("there is no monitor")?
+                .unpin_floating_window(foreground_hwnd);
+            self.focused_workspace_mut()?
+                .floating_windows_mut()
+                .push_back(Window::from(foreground_hwnd));
+        }
 
         let workspace = self.focused_workspace_mut()?;
         workspace.new_container_for_floating_window()
@@ -4479,6 +4544,27 @@ impl WindowManager {
         self.focused_monitor()
             .ok_or_eyre("there is no monitor")?
             .lower_pinned_windows();
+
+        Ok(())
+    }
+
+    /// Keep the focused workspace's floating overlay intact while switching
+    /// the layer to Tiling (`WorkspaceLayerFocusBehaviour::SwitchLayerOverlay`):
+    /// raise the pinned band above the overlay, then raise the focused tiling
+    /// window on top of the band. Non-focused tiling windows stay lower in the
+    /// z-order but remain visible (no full layer re-stack is performed).
+    pub(crate) fn raise_pinned_band_above_tiled(
+        &self,
+        focused_tiled: Option<Window>,
+    ) -> eyre::Result<()> {
+        self.focused_monitor()
+            .ok_or_eyre("there is no monitor")?
+            .raise_pinned_windows();
+
+        if let Some(window) = focused_tiled {
+            window.raise_sync()?;
+            WindowsApi::raise_and_focus_window(window.hwnd)?;
+        }
 
         Ok(())
     }

@@ -264,7 +264,6 @@ impl From<&WindowManager> for State {
                             maximized_window: workspace.maximized_window,
                             maximized_window_restore_idx: workspace.maximized_window_restore_idx,
                             floating_windows: workspace.floating_windows.clone(),
-                            pinned_floating: workspace.pinned_floating.clone(),
                             layout: workspace.layout.clone(),
                             layout_options: workspace.layout_options,
                             layout_rules: workspace.layout_rules.clone(),
@@ -312,6 +311,7 @@ impl From<&WindowManager> for State {
                 workspace_padding: monitor.workspace_padding,
                 wallpaper: monitor.wallpaper.clone(),
                 floating_layer_behaviour: monitor.floating_layer_behaviour,
+                pinned_floating: monitor.pinned_floating.clone(),
             })
             .collect::<VecDeque<_>>();
         stripped_monitors.focus(wm.monitors.focused_idx());
