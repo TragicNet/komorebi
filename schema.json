@@ -339,7 +339,7 @@
       }
     },
     "lower_ignored_windows_on_focus": {
-      "description": "Whether to lower ignored windows below managed windows when focusing a\nworkspace. Enabled windows like fullscreen borderless games will no\nlonger occlude tiled windows when switching workspaces.",
+      "description": "Deprecated. Ignored windows are never moved by komorebi on their own;\nthis key is parsed and validated for compatibility but has no effect,\nand the manual `toggle-ignored-window-layer` command is the only way to\nreorder them.",
       "type": [
         "boolean",
         "null"

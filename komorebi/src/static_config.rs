@@ -749,9 +749,10 @@ pub struct StaticConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = WindowHandlingBehaviour::Sync)))]
     pub window_handling_behaviour: Option<WindowHandlingBehaviour>,
-    /// Whether to lower ignored windows below managed windows when focusing a
-    /// workspace. Enabled windows like fullscreen borderless games will no
-    /// longer occlude tiled windows when switching workspaces.
+    /// Deprecated. Ignored windows are never moved by komorebi on their own;
+    /// this key is parsed and validated for compatibility but has no effect,
+    /// and the manual `toggle-ignored-window-layer` command is the only way to
+    /// reorder them.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = LOWER_IGNORED_WINDOWS_ON_FOCUS)))]
     pub lower_ignored_windows_on_focus: Option<bool>,

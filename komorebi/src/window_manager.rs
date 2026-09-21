@@ -4846,17 +4846,6 @@ impl WindowManager {
             .unwrap_or(false)
     }
 
-    /// Lower every ignored window on the focused monitor below the managed
-    /// windows, so that unmanaged windows (e.g. desktop widgets or fullscreen
-    /// games) never visually occlude the tiling or floating base layer.
-    pub fn lower_ignored_windows(&self) -> eyre::Result<()> {
-        let monitor = self
-            .focused_monitor()
-            .ok_or_eyre("there is no focused monitor")?;
-
-        monitor.lower_ignored_windows()
-    }
-
     #[tracing::instrument(skip(self))]
     pub fn monitor_workspace_index_by_name(&mut self, name: &str) -> Option<(usize, usize)> {
         tracing::info!("looking up workspace by name");

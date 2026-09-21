@@ -1392,15 +1392,8 @@ impl WindowManager {
                 // events that must not immediately flip it back.
                 self.suppress_layer_flips();
 
-                let (workspace_layer, must_lower_ignored, empty_and_hide_pins) = {
+                let (workspace_layer, empty_and_hide_pins) = {
                     let workspace = self.focused_workspace()?;
-
-                    // When toggling the workspace layer, demote any ignored windows
-                    // (e.g. desktop widgets) so they never sit above the tiled base
-                    // layer. Skipped when the ignored windows have been manually
-                    // raised above managed or there are no managed windows to cover.
-                    let must_lower_ignored =
-                        !workspace.ignored_windows_above_managed && !workspace.is_empty();
 
                     // Track whether the pinned hide-on-empty feature is active and
                     // this workspace is empty: the monitor's pins are hidden by
@@ -1410,7 +1403,7 @@ impl WindowManager {
                         .load(Ordering::SeqCst)
                         && workspace.is_empty();
 
-                    (workspace.layer, must_lower_ignored, empty_and_hide_pins)
+                    (workspace.layer, empty_and_hide_pins)
                 };
 
                 match workspace_layer {
@@ -1694,11 +1687,6 @@ impl WindowManager {
                         }
                     }
                 };
-
-                if must_lower_ignored {
-                    tracing::info!("lowering ignored windows below managed windows");
-                    self.lower_ignored_windows()?;
-                }
             }
             SocketMessage::ToggleIgnoredWindowLayer => {
                 // Reuse the same predicate as automatic demotion so that always-on-top
