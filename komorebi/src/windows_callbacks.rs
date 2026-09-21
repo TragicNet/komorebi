@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use crate::border_manager;
 use crate::container::Container;
@@ -196,7 +197,16 @@ pub extern "system" fn win_event_hook(
         Some(event) => event,
     };
 
-    winevent_listener::event_tx()
-        .send(event_type)
-        .expect("could not send message on winevent_listener::event_tx");
+    // If the queue is saturated (e.g. during a window event storm) do not panic
+    // or block the hook forever: drop the event and let the window manager
+    // rebuild state from source-of-truth Win32 probes on the next delivered
+    // event. WinEvent hooks run on the thread that placed them for out-of-context
+    // hooks and must return promptly.
+    let event_tx = winevent_listener::event_tx();
+    if event_tx
+        .send_timeout(event_type, Duration::from_millis(50))
+        .is_err()
+    {
+        tracing::debug!(event = ?event_type, "dropped winevent under overload");
+    }
 }
