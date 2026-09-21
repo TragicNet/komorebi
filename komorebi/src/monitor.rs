@@ -728,54 +728,87 @@ impl Monitor {
         self.lower_ignored_windows_filtered(|_| true)
     }
 
+    /// Decides whether an ignored window should be physically lowered to the
+    /// bottom of the Z order by [`lower_ignored_windows_filtered`]. Topmost
+    /// windows are never lowered (HWND_BOTTOM would strip the app-owned
+    /// `WS_EX_TOPMOST` flag), and widget windows under the cursor are left
+    /// alone so an in-progress interaction is not swallowed.
+    fn should_lower_ignored_window(
+        should_lower: bool,
+        is_always_on_top: bool,
+        is_widget: bool,
+        cursor_over_window: bool,
+    ) -> bool {
+        should_lower && !is_always_on_top && !(is_widget && cursor_over_window)
+    }
+
     /// Shared lowering implementation, restricted to the windows that satisfy
     /// `should_lower`.
     ///
     /// Each SetWindowPos(HWND_BOTTOM) call pushes the window below all the
-    /// ones lowered before it, so the ordering below controls the stacking
-    /// between the ignored windows themselves. Unmanaged fullscreen games
-    /// and application windows are lowered first so they end up above the
-    /// desktop widgets (e.g. Rainmeter meters), which are lowered last and
-    /// therefore end up at the very bottom. Within each group the largest
-    /// window is lowered first so it remains highest, keeping a fullscreen
-    /// game above a near-fullscreen visualizer of the same footprint.
+    /// ones lowered before it, so the iteration order controls the stacking
+    /// between the ignored windows themselves. `ignored_windows()` enumerates
+    /// in top-to-bottom Z order, so lowering in that order preserves each
+    /// ignored window's original relative stacking: the window that was
+    /// topmost stays highest among the ignored windows, and all of them end up
+    /// below the managed base with no reordering. Ignored windows therefore
+    /// always form a stable bottom band, and only a window the app itself
+    /// pinned to the TopMost band is left untouched.
+    ///
+    /// Two windows are never lowered at all:
+    /// - a window carrying `WS_EX_TOPMOST`: lowering it with HWND_BOTTOM would
+    ///   permanently strip the app-owned topmost flag (a state mutation that is
+    ///   out of komorebi's scope) purely to move it within a band that renders
+    ///   above every normal-band window anyway;
+    /// - a widget window the cursor is currently over, so an in-progress
+    ///   interaction is never swallowed by the demotion.
     fn lower_ignored_windows_filtered(
         &self,
         should_lower: impl Fn(&Window) -> bool,
     ) -> eyre::Result<()> {
-        let mut ignored_windows = self.ignored_windows();
-        ignored_windows.sort_by_key(|window| {
-            let is_widget = window.is_widget_window();
-            let area = WindowsApi::window_rect(window.hwnd)
-                .map(|rect| (rect.right - rect.left).max(0) * (rect.bottom - rect.top).max(0))
-                .unwrap_or_default();
-            (is_widget, std::cmp::Reverse(area))
-        });
+        let ignored_windows = self.ignored_windows();
 
         let mut windows_to_lower = Vec::with_capacity(ignored_windows.len());
         for window in ignored_windows {
-            if !should_lower(&window) {
-                continue;
-            }
+            let is_always_on_top = window.is_always_on_top();
+            let is_widget = window.is_widget_window();
+            let cursor_over_window = WindowsApi::window_at_cursor_pos()
+                .ok()
+                .is_some_and(|hwnd| hwnd == window.hwnd);
 
-            // Never demote a widget window the cursor is currently over: it is
-            // being interacted with (e.g. a yasb popup or status bar), and
-            // dropping it below the managed base would swallow the user's
-            // clicks or pull the pointer onto a managed window beneath it.
-            // Fullscreen games and regular application windows are always
-            // demoted, even under the cursor, so they can never occlude the
-            // status bar.
-            if window.is_widget_window()
-                && WindowsApi::window_at_cursor_pos()
-                    .ok()
-                    .is_some_and(|hwnd| hwnd == window.hwnd)
-            {
-                tracing::trace!(
-                    hwnd = window.hwnd,
-                    exe = window.exe().unwrap_or_default(),
-                    title = window.title().unwrap_or_default(),
-                    "skipping ignored widget window under the cursor"
-                );
+            if !Self::should_lower_ignored_window(
+                should_lower(&window),
+                is_always_on_top,
+                is_widget,
+                cursor_over_window,
+            ) {
+                if is_always_on_top {
+                    // Never demote a TopMost window. HWND_BOTTOM on a topmost
+                    // window removes its WS_EX_TOPMOST status and sinks it below
+                    // the rest of the stack, so lowering it here would
+                    // permanently destroy a flag the owning application (e.g. a
+                    // status bar with always_on_top) set and does not re-assert.
+                    // It would also be pointless: the TopMost band renders above
+                    // every normal-band window, so no managed raise can climb it.
+                    tracing::trace!(
+                        hwnd = window.hwnd,
+                        exe = window.exe().unwrap_or_default(),
+                        title = window.title().unwrap_or_default(),
+                        "skipping topmost ignored window (never strip WS_EX_TOPMOST via HWND_BOTTOM)"
+                    );
+                } else if is_widget && cursor_over_window {
+                    // Never demote a widget the cursor is currently over: it is
+                    // being interacted with (e.g. a yasb popup or status bar),
+                    // and dropping it below the managed base would swallow the
+                    // user's clicks or pull the pointer onto a managed window
+                    // beneath it.
+                    tracing::trace!(
+                        hwnd = window.hwnd,
+                        exe = window.exe().unwrap_or_default(),
+                        title = window.title().unwrap_or_default(),
+                        "skipping ignored widget window under the cursor"
+                    );
+                }
                 continue;
             }
 
@@ -1665,6 +1698,27 @@ mod tests {
         // Topmost widgets (e.g. a yasb bar with always_on_top) are never
         // demoted by automatic focus/switch demotions.
         assert!(!Monitor::should_auto_demote_predicate(true, true));
+    }
+
+    #[test]
+    fn test_should_lower_ignored_window_skips_topmost_and_interacted() {
+        // Eligible windows (passing the caller filter) are lowered.
+        assert!(Monitor::should_lower_ignored_window(true, false, false, false));
+        assert!(Monitor::should_lower_ignored_window(true, false, true, false));
+
+        // A TopMost ignored window (e.g. a status bar with always_on_top) must
+        // never be lowered: HWND_BOTTOM would permanently strip the app-owned
+        // WS_EX_TOPMOST flag, leaving the bar hiding behind other windows.
+        assert!(!Monitor::should_lower_ignored_window(true, true, false, false));
+        assert!(!Monitor::should_lower_ignored_window(true, true, true, false));
+
+        // A widget under the cursor is being interacted with and is skipped;
+        // fullscreen games / application windows are always demoted.
+        assert!(!Monitor::should_lower_ignored_window(true, false, true, true));
+        assert!(Monitor::should_lower_ignored_window(true, false, false, true));
+
+        // The caller-side filter (e.g. `should_auto_demote`) is still respected.
+        assert!(!Monitor::should_lower_ignored_window(false, false, false, false));
     }
 
     #[test]
