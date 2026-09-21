@@ -2292,7 +2292,13 @@ if (!(Get-Process komorebi-bar -ErrorAction SilentlyContinue))
             SocketMessage::MonitorWorkAreaOffset(monitor_idx, rect) => {
                 if let Some(monitor) = self.monitors_mut().get_mut(monitor_idx) {
                     monitor.work_area_offset = Option::from(rect);
-                    self.retile_all(false)?;
+                }
+
+                // Only the affected monitor's focused workspace needs to be
+                // re-rendered; leave all other monitors untouched.
+                if let Some(monitor) = self.monitors().get(monitor_idx) {
+                    let workspace_idx = monitor.focused_workspace_idx();
+                    self.retile_workspace_on_monitor(monitor_idx, workspace_idx, false)?;
                 }
             }
             SocketMessage::WorkspaceWorkAreaOffset(monitor_idx, workspace_idx, rect) => {
@@ -2300,15 +2306,17 @@ if (!(Get-Process komorebi-bar -ErrorAction SilentlyContinue))
                     && let Some(workspace) = monitor.workspaces_mut().get_mut(workspace_idx)
                 {
                     workspace.work_area_offset = Option::from(rect);
-                    self.retile_all(false)?
+                    self.retile_workspace_on_monitor(monitor_idx, workspace_idx, false)?
                 }
             }
             SocketMessage::ToggleWindowBasedWorkAreaOffset => {
+                let monitor_idx = self.focused_monitor_idx();
                 let workspace = self.focused_workspace_mut()?;
                 workspace.apply_window_based_work_area_offset =
                     !workspace.apply_window_based_work_area_offset;
 
-                self.retile_all(true)?;
+                let workspace_idx = self.focused_workspace_idx()?;
+                self.retile_workspace_on_monitor(monitor_idx, workspace_idx, true)?;
             }
             SocketMessage::QuickSave => {
                 let workspace = self.focused_workspace()?;

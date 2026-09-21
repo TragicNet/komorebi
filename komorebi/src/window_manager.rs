@@ -897,6 +897,57 @@ impl WindowManager {
         Ok(())
     }
 
+    /// Retiles a single workspace on a single monitor, mirroring what
+    /// [`WindowManager::retile_all`] would have done for that monitor but
+    /// leaving every other monitor and workspace untouched. Used by commands
+    /// that only change one monitor's or one workspace's layout so unrelated
+    /// monitors are not re-rendered in full.
+    #[tracing::instrument(skip(self))]
+    pub fn retile_workspace_on_monitor(
+        &mut self,
+        monitor_idx: usize,
+        workspace_idx: usize,
+        preserve_resize_dimensions: bool,
+    ) -> eyre::Result<()> {
+        let offset = self.work_area_offset;
+
+        let Some(monitor) = self.monitors_mut().get_mut(monitor_idx) else {
+            return Ok(());
+        };
+
+        let offset = if monitor.work_area_offset.is_some() {
+            monitor.work_area_offset
+        } else {
+            offset
+        };
+
+        monitor.update_workspace_globals(workspace_idx, offset);
+
+        let hmonitor = monitor.id;
+        let monitor_wp = monitor.wallpaper.clone();
+        let workspace = monitor
+            .workspaces_mut()
+            .get_mut(workspace_idx)
+            .ok_or_eyre("there is no workspace")?;
+
+        // Reset any resize adjustments if we want to force a retile
+        if !preserve_resize_dimensions {
+            for resize in &mut workspace.resize_dimensions {
+                *resize = None;
+            }
+        }
+
+        if (workspace.wallpaper.is_some() || monitor_wp.is_some())
+            && let Err(error) = workspace.apply_wallpaper(hmonitor, &monitor_wp)
+        {
+            tracing::error!("failed to apply wallpaper: {}", error);
+        }
+
+        workspace.update()?;
+
+        Ok(())
+    }
+
     #[tracing::instrument(skip(self))]
     pub fn manage_focused_window(&mut self) -> eyre::Result<()> {
         let hwnd = WindowsApi::foreground_window()?;
