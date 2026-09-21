@@ -74,6 +74,13 @@ pub enum ApplyOp {
     /// `EndDeferWindowPos`), so the whole batch drops behind the tiling base in
     /// a single screen-refreshing cycle instead of window by window.
     LowerBatch(Vec<CapturedWindow>),
+    /// Raise every window to the top of the Z order in ONE deferred window-pos
+    /// pass (`BeginDeferWindowPos`/`DeferWindowPos`/`EndDeferWindowPos`), so
+    /// the whole batch rises above the band beneath it in a single
+    /// screen-refreshing cycle instead of window by window. Entries are applied
+    /// in slice order, so later windows land above earlier ones: pass the band
+    /// bottom-to-top.
+    RaiseBatch(Vec<CapturedWindow>),
     /// Demote each window out of the TopMost band (synchronous `HWND_NOTOPMOST`).
     ClearTopmost(Vec<CapturedWindow>),
     /// Place each window into the persistent TopMost band (synchronous
@@ -194,6 +201,32 @@ impl ApplyWorker {
                     tracing::warn!(
                         windows = hwnds.len(),
                         "could not lower windows in a single pass: {error}"
+                    );
+                }
+            }
+            ApplyOp::RaiseBatch(windows) => {
+                let hwnds = windows
+                    .iter()
+                    .filter(|captured| {
+                        if captured.is_still_owned() {
+                            true
+                        } else {
+                            tracing::debug!(
+                                hwnd = captured.hwnd(),
+                                "apply worker skipping raise batch entry for recycled or \
+                                 destroyed window"
+                            );
+                            false
+                        }
+                    })
+                    .map(|captured| captured.hwnd())
+                    .collect::<Vec<_>>();
+                if !hwnds.is_empty()
+                    && let Err(error) = crate::windows_api::WindowsApi::raise_windows_sync(&hwnds)
+                {
+                    tracing::warn!(
+                        windows = hwnds.len(),
+                        "could not raise windows in a single pass: {error}"
                     );
                 }
             }
@@ -373,6 +406,16 @@ impl ApplyWorker {
     pub fn lower_batch(windows: Vec<Window>) {
         if !windows.is_empty() {
             Self::enqueue(ApplyOp::LowerBatch(Self::capture(windows)));
+        }
+    }
+
+    /// Raise the given windows in a single atomic deferred window-pos pass so
+    /// the whole band rises together, without the window-by-window stagger of
+    /// [`Self::raise`]. Entries are applied in slice order, so later windows
+    /// land above earlier ones: pass the band bottom-to-top.
+    pub fn raise_batch(windows: Vec<Window>) {
+        if !windows.is_empty() {
+            Self::enqueue(ApplyOp::RaiseBatch(Self::capture(windows)));
         }
     }
 

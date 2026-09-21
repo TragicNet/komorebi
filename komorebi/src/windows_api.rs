@@ -927,6 +927,70 @@ impl WindowsApi {
         Ok(())
     }
 
+    /// Raise several windows to the top of the Z order in a single atomic pass
+    /// using deferred window positioning (`BeginDeferWindowPos` +
+    /// `DeferWindowPos` + `EndDeferWindowPos`).
+    ///
+    /// `EndDeferWindowPos` applies every change in one screen-refreshing cycle,
+    /// so a whole band (floating overlay, tiled base) rises together instead of
+    /// one window at a time. Raising windows individually with [`raise_window_sync`]
+    /// reads as a visible stagger when window threads are slow to process the
+    /// marshaled `SetWindowPos`; the single pass collapses the whole rise into
+    /// one frame.
+    ///
+    /// Entries are applied in slice order, so later windows land above earlier
+    /// ones: pass the band bottom-to-top. The raises cannot climb the active
+    /// (foreground) window or the persistent TopMost band, matching the
+    /// [`raise_window_sync`] semantics.
+    ///
+    /// Unresponsive windows are probed and dropped from the batch, matching
+    /// [`raise_window_sync`]. If every window is skipped, no deferred pass is
+    /// started.
+    pub fn raise_windows_sync(hwnds: &[isize]) -> eyre::Result<()> {
+        // Probe every window up front and defer only the responsive ones,
+        // matching the per-window skip behaviour of `raise_window_sync`. If
+        // nothing is responsive, no deferred pass is started at all.
+        let responsive = hwnds
+            .iter()
+            .copied()
+            .filter(|hwnd| !Self::skip_unresponsive_window(*hwnd, "raise sync"))
+            .collect::<Vec<_>>();
+        if responsive.is_empty() {
+            return Ok(());
+        }
+
+        let flags = SetWindowPosition::NO_MOVE
+            | SetWindowPosition::NO_SIZE
+            | SetWindowPosition::NO_ACTIVATE
+            | SetWindowPosition::SHOW_WINDOW;
+
+        let mut hdwp =
+            unsafe { BeginDeferWindowPos(i32::try_from(responsive.len()).unwrap_or(i32::MAX)) }
+                .process()?;
+
+        for hwnd in responsive {
+            hdwp = unsafe {
+                DeferWindowPos(
+                    hdwp,
+                    HWND(as_ptr!(hwnd)),
+                    Some(HWND_TOP),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SET_WINDOW_POS_FLAGS(flags.bits()),
+                )
+            }
+            .process()?;
+        }
+
+        // Applies every deferred change in a single screen-refreshing cycle and
+        // frees the HDWP block, even when the application itself fails.
+        unsafe { EndDeferWindowPos(hdwp) }.process()?;
+
+        Ok(())
+    }
+
     pub fn set_border_pos(hwnd: isize, layout: &Rect, position: isize) -> eyre::Result<()> {
         let mut flags = SetWindowPosition::NO_SEND_CHANGING
             | SetWindowPosition::NO_ACTIVATE

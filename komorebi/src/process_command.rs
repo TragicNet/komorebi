@@ -1648,13 +1648,17 @@ impl WindowManager {
                         }
                     }
                     WorkspaceLayer::Floating => {
-                        // The base layer was never moved during the toggle, so it needs
-                        // no restoration. Decide which tiling window will take the
-                        // foreground, but do not activate it yet: the activation is
-                        // deferred to the end of the arm as the final apply-worker
-                        // operation, so the foreground changes only once the floating
-                        // overlay has actually been lowered and the single activation
-                        // cannot be bounced by an in-flight SetWindowPos.
+                        // The overlay was revealed on top during the Floating
+                        // layer and stays put: the stack is rebuilt by raising
+                        // the tiled base above it, never by lowering the overlay
+                        // (an absolute-bottom lower would bury the floats beneath
+                        // the untouched ignored band). Decide which tiling window
+                        // will take the foreground, but do not activate it yet:
+                        // the activation is deferred to the end of the arm as the
+                        // final apply-worker operation, so the foreground changes
+                        // only once the overlay band has actually been
+                        // re-positioned and the single activation cannot be
+                        // bounced by an in-flight SetWindowPos.
                         let focus_target = {
                             let workspace = self.focused_workspace_mut()?;
                             workspace.layer = WorkspaceLayer::Tiling;
@@ -1663,7 +1667,6 @@ impl WindowManager {
                             if let Some(monocle) = &workspace.monocle_container
                                 && let Some(window) = monocle.focused_window()
                             {
-                                window.raise()?;
                                 Some(window.hwnd)
                             } else {
                                 workspace
@@ -1673,15 +1676,19 @@ impl WindowManager {
                             }
                         };
 
-                        // Fully switch back to the base layer: lower the entire floating
-                        // overlay (this workspace's floating windows along with the pinned
-                        // floating windows of other workspaces on this monitor) below the
-                        // intact tiling base without raising any tiled window.
-                        self.lower_floating_overlay()?;
+                        // Fully switch back to the base layer: the overlay (this
+                        // workspace's floating windows along with the pinned
+                        // floating windows of other workspaces on this monitor)
+                        // is re-asserted in its band below the tiling base by
+                        // raising, never lowered to the bottom of the Z order, so
+                        // the ignored band is never disturbed and therefore can
+                        // never end up above the overlay.
+                        self.restore_tiling_layer_stack()?;
 
-                        // Restore the foreground on the tiling target as the physically
-                        // final operation of the toggle, after the overlay lowers above
-                        // have been applied by the worker FIFO.
+                        // Restore the foreground on the tiling target as the
+                        // physically final operation of the toggle, after the
+                        // overlay band raises above have been applied by the
+                        // worker FIFO.
                         if let Some(hwnd) = focus_target {
                             ApplyWorker::raise_and_focus_hwnd(hwnd, mouse_follows_focus);
                         }

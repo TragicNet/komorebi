@@ -4743,14 +4743,33 @@ impl WindowManager {
             .ok_or_eyre("there is no workspace")
     }
 
-    /// Lower the focused workspace's floating overlay below the tiling base
-    /// without raising any tiled windows. Used to switch the layer to Tiling
-    /// completely while leaving the tiled windows at their current z-order.
+    /// Assemble the Tiling layer stack by raising, leaving the ignored
+    /// (unmanaged) windows untouched. Used to switch the layer back to Tiling
+    /// completely while placing the overlay deterministically above the ignored
+    /// band and below the tiled base.
     ///
-    /// Sorting by area means the largest floating windows end up on the bottom
-    /// of the z-order. The pinned floating windows of other workspaces on this
-    /// monitor drop back below the tiling base together with the overlay.
-    pub(crate) fn lower_floating_overlay(&mut self) -> eyre::Result<()> {
+    /// The overlay must never be lowered to the absolute bottom of the Z order
+    /// (`HWND_BOTTOM`): the ignored band is never reordered anymore, so a plain
+    /// lower would leave the floating and pinned windows buried beneath ignored
+    /// windows (a fullscreen game or desktop widgets). Instead the stack is
+    /// rebuilt upwards, one atomic deferred window-pos pass per band:
+    ///
+    ///    1. demote the overlay out of any residual TopMost state so the raises
+    ///       can climb it and the band can be assembled deterministically,
+    ///    2. raise the normal pinned band,
+    ///    3. raise the sorted floating windows above the pins (the largest ending
+    ///       up on the bottom of the band),
+    ///    4. raise the tiled base (monocle, or the focused windows of every
+    ///       container in reverse order) above the overlay AND the foreground via
+    ///       the transient TopMost-band raise, since a plain HWND_TOP raise cannot
+    ///       climb the active window,
+    ///    5. re-assert the always-on-top pinned band in front of everything.
+    ///
+    /// Nothing is ever lowered, so an ignored window can never end up above the
+    /// overlay. Sorting by area means the largest floating windows end up on the
+    /// bottom of the z-order. The pinned floating windows of other workspaces on
+    /// this monitor join the overlay band below the floats.
+    pub(crate) fn restore_tiling_layer_stack(&mut self) -> eyre::Result<()> {
         let floats = {
             let workspace = self.focused_workspace_mut()?;
 
@@ -4777,18 +4796,47 @@ impl WindowManager {
             .ok_or_eyre("there is no monitor")?
             .pinned_window_bands();
 
-        // Drop the entire overlay (this workspace's floating windows along with
-        // the normal pinned band) in ONE deferred window-pos pass, ahead of the
-        // layer activation that the toggle enqueues afterwards. Lowering the
-        // overlay window by window lets each synchronous SetWindowPos marshal
-        // to its own window thread, so the overlay visibly staggers down over
-        // multiple frames whenever a window thread is slow (or skips the raise
-        // probe); the single pass reorders the whole overlay to the bottom in
-        // one screen-refreshing cycle so it can never linger for a split
-        // second above the tiling base.
-        let mut batch = floats;
-        batch.extend(normal_pins);
-        ApplyWorker::lower_batch(batch);
+        let base = {
+            let workspace = self.focused_workspace_mut()?;
+
+            if let Some(monocle) = &workspace.monocle_container
+                && let Some(window) = monocle.focused_window()
+            {
+                vec![*window]
+            } else {
+                workspace
+                    .containers()
+                    .iter()
+                    .rev()
+                    .filter_map(|container| container.focused_window().copied())
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        // Assemble the overlay band (this workspace's floating windows along
+        // with the normal pinned band) and the tiled base above it in ONE
+        // deferred window-pos pass per band, ahead of the layer activation that
+        // the toggle enqueues afterwards. Reordering the overlay band by
+        // window-by-window synchronous SetWindowPos lets each call marshal to
+        // its own window thread, so the overlay visibly staggers over multiple
+        // frames whenever a window thread is slow; the single pass per band
+        // reorders it in one screen-refreshing cycle. Nothing is lowered, so
+        // the untouched ignored band always ends up below the overlay.
+        ApplyWorker::clear_topmost({
+            let mut overlay = floats.clone();
+            overlay.extend(normal_pins.iter().copied());
+            overlay
+        });
+        ApplyWorker::raise_batch(normal_pins);
+        ApplyWorker::raise_batch(floats);
+        // The tiled base must end up above the remembered float that currently
+        // holds the foreground (a plain HWND_TOP raise can never climb the
+        // active window, for the same reason the Floating reveal uses the
+        // transient TopMost-band raise), so the base band is popped above it
+        // via the TopMost dance. The terminal activation enqueued by the toggle
+        // then hands the foreground to the focused tiling window on top of the
+        // whole stack.
+        ApplyWorker::raise_above_active(base);
         ApplyWorker::make_topmost(always_on_top_pins);
 
         Ok(())

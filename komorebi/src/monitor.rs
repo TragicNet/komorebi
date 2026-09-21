@@ -230,7 +230,26 @@ impl Monitor {
         // monitor switch. Skipped while the ignored windows have been manually
         // raised above managed with `toggle-ignored-window-layer`. Ignored
         // (unmanaged) windows are never moved by komorebi on their own.
-        self.enforce_layer_stack()?;
+        //
+        // The raise primitives clamp below the active (foreground) window,
+        // which during a switch is usually still the window that held focus
+        // before the switch: `Window::focus` activates asynchronously via
+        // sendInput, so by the time the stack is rebuilt the foreground has
+        // rarely landed on the newly focused managed window. When the stale
+        // foreground is not one of this monitor's managed windows (an ignored
+        // fullscreen game, a widget, the shell), the stack is raised via the
+        // transient TopMost-band raise instead, so the reloaded workspace
+        // deterministically renders above it without ever reordering the
+        // ignored window. When the foreground already belongs to this monitor
+        // the plain raise is used, keeping the focus-event hot paths cheap.
+        let climb_active = !WindowsApi::foreground_window()
+            .ok()
+            .is_some_and(|foreground| {
+                self.workspaces()
+                    .iter()
+                    .any(|workspace| workspace.contains_window(foreground))
+            });
+        self.enforce_layer_stack_inner(climb_active)?;
 
         Ok(())
     }
@@ -249,6 +268,22 @@ impl Monitor {
     /// `toggle-ignored-window-layer` toggle is always respected.
     #[tracing::instrument(skip(self))]
     pub fn enforce_layer_stack(&self) -> eyre::Result<()> {
+        self.enforce_layer_stack_inner(false)
+    }
+
+    /// Re-establishes the workspace layer stack with the raise primitive
+    /// selected per band.
+    ///
+    /// With `climb_active` the managed bands are raised via the transient
+    /// TopMost-band raise so they deterministically pop above the active
+    /// (foreground) window — used when a workspace/monitor switch rebuilds the
+    /// stack while an unmanaged window (an ignored fullscreen game, a widget)
+    /// still holds the foreground and a plain `HWND_TOP` raise could not climb
+    /// it. The focused-window raise climbs too, so the top-layer window is
+    /// asserted above the whole stack even before its asynchronous activation
+    /// lands.
+    #[tracing::instrument(skip(self))]
+    fn enforce_layer_stack_inner(&self, climb_active: bool) -> eyre::Result<()> {
         let Some(workspace) = self.focused_workspace() else {
             return Ok(());
         };
@@ -301,21 +336,27 @@ impl Monitor {
             }
         };
 
-// The overlay raise must clear the active window to sit above the
-        // tiling base: a plain HWND_TOP raise cannot climb the foreground
-        // window, so the pins, floats and focused window are raised via the
-        // transient TopMost-band raise instead.
-        let layer_is_floating = matches!(workspace.layer, WorkspaceLayer::Floating);
+        // With `climb_active` every managed band is raised via the transient
+        // TopMost-band raise so the layer stack can be assembled above the
+        // active window; otherwise the plain HWND_TOP raise is used and the
+        // active window stays above the raised bands.
+        let raise = |window: &Window| {
+            if climb_active {
+                self.raise_managed_window_above_active(window);
+            } else {
+                self.raise_managed_window(window);
+            }
+        };
 
         match workspace.layer {
             WorkspaceLayer::Tiling => {
                 // Floating windows form the base, tiled windows the top layer.
                 for window in workspace.floating_windows() {
-                    self.raise_managed_window(window);
+                    raise(window);
                 }
                 for window in workspace.containers().iter().rev() {
                     if let Some(window) = window.focused_window() {
-                        self.raise_managed_window(window);
+                        raise(window);
                     }
                 }
                 self.reposition_pinned_windows(WorkspaceLayer::Tiling)?;
@@ -355,7 +396,7 @@ impl Monitor {
                 ApplyWorker::clear_topmost(topmost_batch);
                 for window in workspace.containers() {
                     if let Some(window) = window.focused_window() {
-                        self.raise_managed_window(window);
+                        raise(window);
                     }
                 }
                 for window in &normal_pins {
@@ -372,16 +413,13 @@ impl Monitor {
 
         // Keep the focused window of the top layer on the very top. Done after
         // the pinned band is positioned so the raised focused window ends up
-        // above the pinned floating windows and the rest of the overlay. On the
-        // Floating layer the raise must also clear the active window so the last
-        // focused window tops the whole overlay regardless of which window holds
-        // the foreground.
+        // above the pinned floating windows and the rest of the overlay. On
+        // the Floating layer, and whenever the stack is assembled climbing the
+        // active window, the raise must clear the active window so the last
+        // focused window tops the whole overlay regardless of which window
+        // holds the foreground.
         if let Some(window) = focused_window {
-            if layer_is_floating {
-                self.raise_managed_window_above_active(&window);
-            } else {
-                self.raise_managed_window(&window);
-            }
+            raise(&window);
         }
 
         // If a window was auto-promoted to the foreground while the switch was
