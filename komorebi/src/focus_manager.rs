@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 
 use crate::Window;
 use crate::WindowManager;
+use crate::windows_api::WindowsApi;
 
 pub struct Notification(isize);
 
@@ -65,7 +66,22 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
 
     for notification in receiver {
         let mouse_follows_focus = wm.lock().mouse_follows_focus;
-        let _ = Window::from(*notification).focus(mouse_follows_focus);
+        let hwnd = *notification;
+
+        // The notification was sent for a hwnd that was the foreground at the
+        // time; by the time this thread acts on it the window may have been
+        // destroyed and its hwnd recycled into a completely different window.
+        // Acting on the recycled handle would teleport the cursor to and
+        // activate an unrelated window, so a dead handle is skipped.
+        if !WindowsApi::is_window(hwnd) {
+            tracing::debug!(
+                hwnd,
+                "focus manager skipping notification for destroyed window"
+            );
+            continue;
+        }
+
+        let _ = Window::from(hwnd).focus(mouse_follows_focus);
     }
 
     Ok(())

@@ -1651,12 +1651,7 @@ impl WindowManager {
                         // foreground across the floating windows before the layer
                         // settles.
                         if let Some(window) = to_focus {
-                            ApplyWorker::raise_and_focus_hwnd(window.hwnd);
-                            if mouse_follows_focus {
-                                WindowsApi::center_cursor_in_rect(&WindowsApi::window_rect(
-                                    window.hwnd,
-                                )?)?;
-                            }
+                            ApplyWorker::raise_and_focus_hwnd(window.hwnd, mouse_follows_focus);
                         }
                     }
                     WorkspaceLayer::Floating => {
@@ -1695,10 +1690,7 @@ impl WindowManager {
                         // final operation of the toggle, after the overlay lowers above
                         // have been applied by the worker FIFO.
                         if let Some(hwnd) = focus_target {
-                            if mouse_follows_focus {
-                                WindowsApi::center_cursor_in_rect(&WindowsApi::window_rect(hwnd)?)?;
-                            }
-                            ApplyWorker::raise_and_focus_hwnd(hwnd);
+                            ApplyWorker::raise_and_focus_hwnd(hwnd, mouse_follows_focus);
                         }
                     }
                 };

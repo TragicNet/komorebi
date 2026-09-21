@@ -1,9 +1,46 @@
 use std::sync::OnceLock;
 
-use crossbeam_channel::unbounded;
 use crossbeam_channel::Sender;
+use crossbeam_channel::unbounded;
 
 use crate::Window;
+use crate::windows_api::WindowsApi;
+
+/// A [`Window`] with a snapshot of the identity (owning process id) taken at
+/// enqueue time.
+///
+/// The apply worker runs on a dedicated thread and can apply an op long after
+/// it was queued. Windows recycles hwnds constantly (komorebi's own border,
+/// stackbar, ghost and hidden windows churn handles all the time), so a stale
+/// capture could otherwise raise, lower or focus a *completely different*
+/// window than the one the operation was queued for. Every op re-validates the
+/// handle before touching it and silently skips handles that died or were
+/// recycled in the meantime.
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub struct CapturedWindow {
+    window: Window,
+    process_id: u32,
+}
+
+impl CapturedWindow {
+    pub(crate) fn from_window(window: Window) -> Self {
+        let process_id = WindowsApi::window_thread_process_id(window.hwnd).0;
+        Self { window, process_id }
+    }
+
+    pub(crate) fn hwnd(&self) -> isize {
+        self.window.hwnd
+    }
+
+    /// Whether the captured hwnd still belongs to the same window it did at
+    /// enqueue time. `IsWindow` on its own cannot detect a recycled handle,
+    /// so the owning process id is compared against the enqueue-time snapshot.
+    pub(crate) fn is_still_owned(&self) -> bool {
+        WindowsApi::is_window(self.window.hwnd)
+            && WindowsApi::window_thread_process_id(self.window.hwnd).0 == self.process_id
+    }
+}
 
 /// A synchronous z-order operation applied on a dedicated worker thread, never
 /// on the window-manager thread.
@@ -17,38 +54,57 @@ use crate::Window;
 /// blocking calls off the WM lock while preserving the relative z-order of a
 /// pass, because a single FIFO worker applies them in submission order.
 ///
-/// The underlying raise/lower/clear helpers still probe each window's thread
-/// (`WindowsApi::is_window_thread_responding`) and skip unresponsive windows,
-/// so the worker itself never blocks indefinitely either.
+/// Every operation re-validates the window identity it was captured with
+/// before applying (see [`CapturedWindow`]), so a queued op can never act on a
+/// handle that was recycled into a different window while it waited in the
+/// queue. The underlying raise/lower/clear helpers still probe each window's
+/// thread (`WindowsApi::is_window_thread_responding`) and skip unresponsive
+/// windows, so the worker itself never blocks indefinitely either.
 pub enum ApplyOp {
     /// Raise each window above the currently active window via the transient
     /// TopMost-band raise (`HWND_TOPMOST` then `HWND_NOTOPMOST`).
-    RaiseAboveActive(Vec<Window>),
+    RaiseAboveActive(Vec<CapturedWindow>),
     /// Raise each window to the top of the normal band (synchronous `HWND_TOP`).
-    Raise(Vec<Window>),
+    Raise(Vec<CapturedWindow>),
     /// Lower each window to the bottom of the Z order (synchronous
     /// `HWND_BOTTOM`).
-    Lower(Vec<Window>),
+    Lower(Vec<CapturedWindow>),
     /// Lower every window to the bottom of the Z order in ONE deferred
     /// window-pos pass (`BeginDeferWindowPos`/`DeferWindowPos`/
     /// `EndDeferWindowPos`), so the whole batch drops behind the tiling base in
     /// a single screen-refreshing cycle instead of window by window.
-    LowerBatch(Vec<Window>),
+    LowerBatch(Vec<CapturedWindow>),
     /// Demote each window out of the TopMost band (synchronous `HWND_NOTOPMOST`).
-    ClearTopmost(Vec<Window>),
+    ClearTopmost(Vec<CapturedWindow>),
     /// Place each window into the persistent TopMost band (synchronous
     /// `HWND_TOPMOST`), so it renders above every normal-band window.
-    MakeTopmost(Vec<Window>),
+    MakeTopmost(Vec<CapturedWindow>),
     /// Raise a window immediately below another window in the Z order
     /// (synchronous relative insert), so it can never end up above the target
     /// even if the target holds the foreground.
-    RaiseBelow { window: Window, target: Window },
+    RaiseBelow {
+        window: CapturedWindow,
+        target: CapturedWindow,
+    },
     /// Bring each window to the foreground (activate it) as the physically
     /// final operation of a pass, after every earlier z-order op has been
     /// applied. Enqueueing the activation on this FIFO guarantees the
     /// foreground change can never race an in-flight raise/lower and get
     /// bounced by a later SetWindowPos.
-    RaiseAndFocus(Vec<Window>),
+    ///
+    /// The activation is deferred, so the user may have focused another window
+    /// while the pass drained. `enqueue_foreground` is the foreground at
+    /// enqueue time: if it has moved to a third window by apply time, the
+    /// activation was overtaken by an external focus change and is skipped so
+    /// the OS foreground is never yanked away from a window the user just
+    /// focused. `center_cursor` moves the cursor to the activated window's
+    /// rect, on the worker, so the cursor only follows once the activation
+    /// actually lands instead of teleporting ahead of the deferred activation.
+    RaiseAndFocus {
+        windows: Vec<CapturedWindow>,
+        center_cursor: bool,
+        enqueue_foreground: Option<isize>,
+    },
 }
 
 pub struct ApplyWorker;
@@ -74,61 +130,87 @@ impl ApplyWorker {
         }
     }
 
+    /// Apply `apply_one` to each still-valid window in the batch, skipping any
+    /// window whose handle died or was recycled since it was captured.
+    fn apply_on_valid(windows: &[CapturedWindow], apply_one: impl Fn(Window)) {
+        for captured in windows {
+            if !captured.is_still_owned() {
+                tracing::debug!(
+                    hwnd = captured.hwnd(),
+                    "apply worker skipping operation for recycled or destroyed window"
+                );
+                continue;
+            }
+            apply_one(captured.window);
+        }
+    }
+
     fn apply(op: ApplyOp) {
         match op {
             ApplyOp::RaiseAboveActive(windows) => {
-                for window in windows {
+                Self::apply_on_valid(&windows, |window| {
                     if let Err(error) = window.raise_above_active() {
                         tracing::warn!(
                             hwnd = window.hwnd,
                             "could not raise window above active: {error}"
                         );
                     }
-                }
+                });
             }
             ApplyOp::Raise(windows) => {
-                for window in windows {
+                Self::apply_on_valid(&windows, |window| {
                     if let Err(error) = window.raise_sync() {
-                        tracing::warn!(
-                            hwnd = window.hwnd,
-                            "could not raise window: {error}"
-                        );
+                        tracing::warn!(hwnd = window.hwnd, "could not raise window: {error}");
                     }
-                }
+                });
             }
             ApplyOp::Lower(windows) => {
-                for window in windows {
+                Self::apply_on_valid(&windows, |window| {
                     if let Err(error) = window.lower_sync() {
-                        tracing::warn!(
-                            hwnd = window.hwnd,
-                            "could not lower window: {error}"
-                        );
+                        tracing::warn!(hwnd = window.hwnd, "could not lower window: {error}");
                     }
-                }
+                });
             }
             ApplyOp::LowerBatch(windows) => {
-                let hwnds = windows.iter().map(|window| window.hwnd).collect::<Vec<_>>();
-                if let Err(error) = crate::windows_api::WindowsApi::lower_windows_sync(&hwnds) {
+                let hwnds = windows
+                    .iter()
+                    .filter(|captured| {
+                        if captured.is_still_owned() {
+                            true
+                        } else {
+                            tracing::debug!(
+                                hwnd = captured.hwnd(),
+                                "apply worker skipping lower batch entry for recycled or \
+                                 destroyed window"
+                            );
+                            false
+                        }
+                    })
+                    .map(|captured| captured.hwnd())
+                    .collect::<Vec<_>>();
+                if !hwnds.is_empty()
+                    && let Err(error) = crate::windows_api::WindowsApi::lower_windows_sync(&hwnds)
+                {
                     tracing::warn!(
-                        windows = windows.len(),
+                        windows = hwnds.len(),
                         "could not lower windows in a single pass: {error}"
                     );
                 }
             }
             ApplyOp::ClearTopmost(windows) => {
-                for window in windows {
-                    if let Err(error) = crate::windows_api::WindowsApi::clear_topmost_window(
-                        window.hwnd,
-                    ) {
+                Self::apply_on_valid(&windows, |window| {
+                    if let Err(error) =
+                        crate::windows_api::WindowsApi::clear_topmost_window(window.hwnd)
+                    {
                         tracing::warn!(
                             hwnd = window.hwnd,
                             "could not clear topmost state of window: {error}"
                         );
                     }
-                }
+                });
             }
             ApplyOp::MakeTopmost(windows) => {
-                for window in windows {
+                Self::apply_on_valid(&windows, |window| {
                     if let Err(error) =
                         crate::windows_api::WindowsApi::make_topmost_window(window.hwnd)
                     {
@@ -137,31 +219,86 @@ impl ApplyWorker {
                             "could not make window topmost: {error}"
                         );
                     }
-                }
+                });
             }
             ApplyOp::RaiseBelow { window, target } => {
-                if let Err(error) =
-                    crate::windows_api::WindowsApi::raise_window_below(window.hwnd, target.hwnd)
-                {
-                    tracing::warn!(
-                        hwnd = window.hwnd,
-                        target = target.hwnd,
-                        "could not raise window below target: {error}"
+                if window.is_still_owned() && target.is_still_owned() {
+                    if let Err(error) = crate::windows_api::WindowsApi::raise_window_below(
+                        window.hwnd(),
+                        target.hwnd(),
+                    ) {
+                        tracing::warn!(
+                            hwnd = window.hwnd(),
+                            target = target.hwnd(),
+                            "could not raise window below target: {error}"
+                        );
+                    }
+                } else {
+                    tracing::debug!(
+                        hwnd = window.hwnd(),
+                        target = target.hwnd(),
+                        "apply worker skipping raise-below for recycled or destroyed window"
                     );
                 }
             }
-            ApplyOp::RaiseAndFocus(windows) => {
-                for window in windows {
-                    match crate::windows_api::WindowsApi::raise_and_focus_window(window.hwnd) {
-                        Ok(()) => tracing::info!(
-                            hwnd = window.hwnd,
-                            "raised and focused window as final pass operation"
-                        ),
-                        Err(error) => tracing::warn!(
-                            hwnd = window.hwnd,
-                            "could not raise and focus window: {error}"
-                        ),
+            ApplyOp::RaiseAndFocus {
+                windows,
+                center_cursor,
+                enqueue_foreground,
+            } => {
+                let mut kept_any = false;
+                for captured in &windows {
+                    if !captured.is_still_owned() {
+                        tracing::debug!(
+                            hwnd = captured.hwnd(),
+                            "apply worker skipping deferred activation for recycled or \
+                             destroyed window"
+                        );
+                        continue;
                     }
+                    kept_any = true;
+
+                    let hwnd = captured.hwnd();
+                    // If the foreground has moved to a third window since the
+                    // activation was enqueued, the operation was overtaken by an
+                    // external focus change (e.g. the user clicked another tile
+                    // while the pass drained). Forcing the foreground without
+                    // releasing it first would steal focus back from a window
+                    // the user just chose, so the stale activation is skipped.
+                    let current_foreground = WindowsApi::foreground_window().unwrap_or_default();
+                    let overtaken = current_foreground != hwnd
+                        && enqueue_foreground
+                            .is_some_and(|foreground| current_foreground != foreground);
+                    if overtaken {
+                        tracing::info!(
+                            hwnd,
+                            current_foreground,
+                            enqueue_foreground = enqueue_foreground.unwrap_or_default(),
+                            "skipping deferred activation: foreground changed since enqueue"
+                        );
+                        continue;
+                    }
+
+                    match WindowsApi::raise_and_focus_window(hwnd) {
+                        Ok(()) => {
+                            tracing::info!(
+                                hwnd,
+                                "raised and focused window as final pass operation"
+                            );
+                            if center_cursor && let Ok(rect) = WindowsApi::window_rect(hwnd) {
+                                let _ = WindowsApi::center_cursor_in_rect(&rect);
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(hwnd, "could not raise and focus window: {error}")
+                        }
+                    }
+                }
+
+                if !kept_any {
+                    tracing::debug!(
+                        "apply worker dropped a deferred activation batch with no valid windows"
+                    );
                 }
             }
         }
@@ -173,10 +310,17 @@ impl ApplyWorker {
         }
     }
 
+    fn capture(windows: Vec<Window>) -> Vec<CapturedWindow> {
+        windows
+            .into_iter()
+            .map(CapturedWindow::from_window)
+            .collect()
+    }
+
     /// Raise the given windows above the currently active window, in order.
     pub fn raise_above_active(windows: Vec<Window>) {
         if !windows.is_empty() {
-            Self::enqueue(ApplyOp::RaiseAboveActive(windows));
+            Self::enqueue(ApplyOp::RaiseAboveActive(Self::capture(windows)));
         }
     }
 
@@ -184,30 +328,42 @@ impl ApplyWorker {
     /// stays on top of it no matter which window currently holds the
     /// foreground.
     pub fn raise_below(window: Window, target: Window) {
-        Self::enqueue(ApplyOp::RaiseBelow { window, target });
+        Self::enqueue(ApplyOp::RaiseBelow {
+            window: CapturedWindow::from_window(window),
+            target: CapturedWindow::from_window(target),
+        });
     }
 
     /// Bring the given window to the foreground as the final operation of the
     /// current pass, after all previously enqueued z-order work has been
-    /// applied. This is the only deterministic way to reset the foreground
-    /// once a batch of raises/lowers has been in flight: a synchronous
-    /// activation issued from the caller races those async operations and
-    /// Windows can hand the foreground to a window whose raise landed last.
-    pub fn raise_and_focus_hwnd(hwnd: isize) {
-        Self::enqueue(ApplyOp::RaiseAndFocus(vec![Window::from(hwnd)]));
+    /// applied.
+    ///
+    /// `center_cursor` additionally moves the cursor to the window's current
+    /// rect, applied on the worker only once the activation actually lands, so
+    /// a mouse-follows-focus cursor never teleports ahead of the deferred
+    /// activation. The activation is skipped entirely if the foreground moved
+    /// to a third window while the pass drained, so a stale activation can
+    /// never yank focus away from a window the user focused in the meantime.
+    pub fn raise_and_focus_hwnd(hwnd: isize, center_cursor: bool) {
+        let enqueue_foreground = WindowsApi::foreground_window().ok();
+        Self::enqueue(ApplyOp::RaiseAndFocus {
+            windows: Self::capture(vec![Window::from(hwnd)]),
+            center_cursor,
+            enqueue_foreground,
+        });
     }
 
     /// Raise the given windows to the top of the normal band, in order.
     pub fn raise(windows: Vec<Window>) {
         if !windows.is_empty() {
-            Self::enqueue(ApplyOp::Raise(windows));
+            Self::enqueue(ApplyOp::Raise(Self::capture(windows)));
         }
     }
 
     /// Lower the given windows below the managed base, in order.
     pub fn lower(windows: Vec<Window>) {
         if !windows.is_empty() {
-            Self::enqueue(ApplyOp::Lower(windows));
+            Self::enqueue(ApplyOp::Lower(Self::capture(windows)));
         }
     }
 
@@ -216,21 +372,35 @@ impl ApplyWorker {
     /// window-by-window stagger of [`Self::lower`].
     pub fn lower_batch(windows: Vec<Window>) {
         if !windows.is_empty() {
-            Self::enqueue(ApplyOp::LowerBatch(windows));
+            Self::enqueue(ApplyOp::LowerBatch(Self::capture(windows)));
         }
     }
 
     /// Demote the given windows out of the TopMost band.
     pub fn clear_topmost(windows: Vec<Window>) {
         if !windows.is_empty() {
-            Self::enqueue(ApplyOp::ClearTopmost(windows));
+            Self::enqueue(ApplyOp::ClearTopmost(Self::capture(windows)));
         }
     }
 
     /// Place the given windows into the persistent TopMost band, in order.
     pub fn make_topmost(windows: Vec<Window>) {
         if !windows.is_empty() {
-            Self::enqueue(ApplyOp::MakeTopmost(windows));
+            Self::enqueue(ApplyOp::MakeTopmost(Self::capture(windows)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CapturedWindow;
+    use crate::Window;
+
+    #[test]
+    fn test_captured_window_rejects_invalid_hwnd() {
+        // A handle that was never allocated can never pass the liveness check,
+        // so an op captured for it must be skipped at apply time.
+        let captured = CapturedWindow::from_window(Window::from(0xbeef));
+        assert!(!captured.is_still_owned());
     }
 }

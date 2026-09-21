@@ -270,7 +270,11 @@ pub struct WindowsApi;
 /// `Window::class` so rule matching and serialization don't open and close a
 /// process handle (2-3 Win32 calls each) on every event. Entries are
 /// invalidated on window destruction and expire after ~2s, so a recycled hwnd
-/// or a changed window class can never be served stale data indefinitely.
+/// or a changed window class can never be served stale data indefinitely. Each
+/// entry also carries the owning process id, checked on every hit, so a hwnd
+/// that was recycled before the TTL elapsed (destroyed through a path that
+/// never invalidated the cache, e.g. an orphan reaped without a Destroy event)
+/// is never served the previous window's exe/class.
 const WINDOW_METADATA_CACHE_TTL: Duration = Duration::from_secs(2);
 const WINDOW_METADATA_CACHE_CAPACITY: usize = 2048;
 
@@ -279,6 +283,7 @@ struct CachedWindowMetadata {
     path: String,
     exe: String,
     class: String,
+    process_id: u32,
     fetched_at: Instant,
 }
 
@@ -731,12 +736,17 @@ impl WindowsApi {
             | SetWindowPosition::NO_ACTIVATE
             | SetWindowPosition::SHOW_WINDOW;
 
-        Self::set_window_pos(
+        // The TopMost band entry is transient: it must always be cleared again
+        // immediately, otherwise the window is left sticky-TopMost and owned
+        // windows that briefly inherited it stay above every normal-band
+        // window. The promote error is intentionally ignored so the demote
+        // below always runs, even if the promote failed midway.
+        let _ = Self::set_window_pos(
             HWND(as_ptr!(hwnd)),
             &Rect::default(),
             HWND_TOPMOST,
             flags.bits(),
-        )?;
+        );
         Self::set_window_pos(
             HWND(as_ptr!(hwnd)),
             &Rect::default(),
@@ -1395,9 +1405,15 @@ impl WindowsApi {
     pub fn window_metadata(hwnd: isize) -> eyre::Result<(String, String, String)> {
         let now = Instant::now();
 
+        // The process id is resolved first (a cheap, non-marshalling call) so
+        // every cache hit can verify the hwnd is still owned by the same
+        // process before trusting the cached exe/class.
+        let (process_id, _) = Self::window_thread_process_id(hwnd);
+
         {
             let cache = WINDOW_METADATA_CACHE.lock();
             if let Some(meta) = cache.get(&hwnd)
+                && meta.process_id == process_id
                 && now.duration_since(meta.fetched_at) <= WINDOW_METADATA_CACHE_TTL
             {
                 return Ok((meta.exe.clone(), meta.path.clone(), meta.class.clone()));
@@ -1406,7 +1422,6 @@ impl WindowsApi {
 
         // Compute outside the cache lock so a slow process probe never
         // contends the shared cache.
-        let (process_id, _) = Self::window_thread_process_id(hwnd);
         let handle = Self::process_handle(process_id)?;
         let path = match Self::exe_path(handle) {
             Ok(path) => path,
@@ -1435,6 +1450,7 @@ impl WindowsApi {
                 path: path.clone(),
                 exe: exe.clone(),
                 class: class.clone(),
+                process_id,
                 fetched_at: now,
             },
         );
