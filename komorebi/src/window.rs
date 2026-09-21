@@ -1111,19 +1111,11 @@ impl Window {
     }
 
     pub fn path(self) -> eyre::Result<String> {
-        let (process_id, _) = WindowsApi::window_thread_process_id(self.hwnd);
-        let handle = WindowsApi::process_handle(process_id)?;
-        let path = WindowsApi::exe_path(handle);
-        WindowsApi::close_process(handle)?;
-        path
+        Ok(WindowsApi::window_metadata(self.hwnd)?.1)
     }
 
     pub fn exe(self) -> eyre::Result<String> {
-        let (process_id, _) = WindowsApi::window_thread_process_id(self.hwnd);
-        let handle = WindowsApi::process_handle(process_id)?;
-        let exe = WindowsApi::exe(handle);
-        WindowsApi::close_process(handle)?;
-        exe
+        Ok(WindowsApi::window_metadata(self.hwnd)?.0)
     }
 
     pub fn process_id(self) -> u32 {
@@ -1132,7 +1124,7 @@ impl Window {
     }
 
     pub fn class(self) -> eyre::Result<String> {
-        WindowsApi::real_window_class_w(self.hwnd)
+        Ok(WindowsApi::window_metadata(self.hwnd)?.2)
     }
 
     pub fn is_cloaked(self) -> eyre::Result<bool> {

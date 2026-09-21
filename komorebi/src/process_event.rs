@@ -29,6 +29,7 @@ use crate::border_manager;
 use crate::border_manager::BORDER_OFFSET;
 use crate::border_manager::BORDER_WIDTH;
 use crate::current_virtual_desktop;
+use crate::has_subscribers;
 use crate::notify_subscribers;
 use crate::splash;
 use crate::splash::mdm_enrollment;
@@ -281,6 +282,10 @@ impl WindowManager {
                 self.has_pending_raise_op = false;
             }
             WindowManagerEvent::Destroy(_, window) | WindowManagerEvent::Unmanage(window) => {
+                // A destroyed/recycled hwnd must never be served the previous
+                // window's cached exe/class from the metadata cache.
+                WindowsApi::invalidate_window_metadata(window.hwnd);
+
                 if self.focused_workspace()?.contains_window(window.hwnd) {
                     self.focused_workspace_mut()?.remove_window(window.hwnd)?;
 
@@ -678,10 +683,9 @@ impl WindowManager {
                 }
 
                 if matches!(event, WindowManagerEvent::Uncloak(_, _))
-                    && self.uncloack_to_ignore >= 1
+                    && self.consume_expected_uncloak(window.hwnd)
                 {
                     tracing::info!("ignoring uncloak after monocle move by mouse across monitors");
-                    self.uncloack_to_ignore = self.uncloack_to_ignore.saturating_sub(1);
                 } else {
                     let focused_monitor_idx = self.focused_monitor_idx();
                     let focused_workspace_idx =
@@ -946,17 +950,23 @@ impl WindowManager {
                 let pending_move_op = Arc::make_mut(&mut self.pending_move_op);
                 *pending_move_op = None;
 
-                // If the window handles don't match then something went wrong and the pending move
-                // is not related to this current move, if so abort this operation.
-                if let Some((_, _, w_hwnd)) = pending
+                // If the window handles don't match then something went wrong and the pending
+                // move is not related to this current move. The pending op has already
+                // been cleared above; discard the stale origin rather than aborting the
+                // whole event, which would drop this MoveResizeEnd's processing, its
+                // subscriber notification and the known_hwnds refresh.
+                let pending = if let Some((_, _, w_hwnd)) = pending
                     && w_hwnd != window.hwnd
                 {
-                    color_eyre::eyre::bail!(
+                    tracing::debug!(
                         "window handles for move operation don't match: {} != {}",
                         w_hwnd,
                         window.hwnd
                     );
-                }
+                    None
+                } else {
+                    pending
+                };
 
                 let target_monitor_idx = self
                     .monitor_idx_from_current_pos()
@@ -1191,13 +1201,19 @@ impl WindowManager {
         // Update list of known_hwnds and their monitor/workspace index pair
         self.update_known_hwnds();
 
-        notify_subscribers(
-            Notification {
-                event: NotificationEvent::WindowManager(event),
-                state: self.as_ref().into(),
-            },
-            initial_state.has_been_modified(self.as_ref()),
-        )?;
+        // Skip the payload state construction and serialization entirely when
+        // no bar/subscriber is connected; this avoids deep-cloning and JSON
+        // serializing the whole state tree (with live Win32 window probes) on
+        // every single event.
+        if has_subscribers() {
+            notify_subscribers(
+                Notification {
+                    event: NotificationEvent::WindowManager(event),
+                    state: self.as_ref().into(),
+                },
+                initial_state.has_been_modified(self.as_ref()),
+            )?;
+        }
 
         border_manager::send_notification(Some(event.hwnd()));
         transparency_manager::send_notification();

@@ -113,16 +113,18 @@ fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result<()>
             wm.known_hwnds.remove(hwnd);
 
             let window = Window::from(*hwnd);
-            notify_subscribers(
-                crate::Notification {
-                    event: NotificationEvent::WindowManager(WindowManagerEvent::Destroy(
-                        WinEvent::ObjectDestroy,
-                        window,
-                    )),
-                    state: wm.as_ref().into(),
-                },
-                true,
-            )?;
+            if crate::has_subscribers() {
+                notify_subscribers(
+                    crate::Notification {
+                        event: NotificationEvent::WindowManager(WindowManagerEvent::Destroy(
+                            WinEvent::ObjectDestroy,
+                            window,
+                        )),
+                        state: wm.as_ref().into(),
+                    },
+                    true,
+                )?;
+            }
         }
 
         if update_borders {

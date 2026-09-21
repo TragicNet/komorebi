@@ -74,55 +74,155 @@ pub struct State {
 }
 
 impl State {
+    /// Checks whether the window manager state has changed since this snapshot
+    /// was taken, without building a second full `State`.
+    ///
+    /// The comparison mirrors the field list stripped by
+    /// `From<&WindowManager>` exactly, so the result is equivalent to
+    /// `State::from(wm)` being compared field-by-field, but it never allocates
+    /// a clone of the monitor/workspace/container tree per event.
     pub fn has_been_modified(&self, wm: &WindowManager) -> bool {
-        let new = Self::from(wm);
-
-        if self.monitors != new.monitors {
+        if self.monitors_modified(wm) {
             return true;
         }
 
-        if self.is_paused != new.is_paused {
+        if self.is_paused != wm.is_paused {
             return true;
         }
 
-        if self.new_window_behaviour != new.new_window_behaviour {
+        if self.new_window_behaviour != wm.window_management_behaviour.current_behaviour {
             return true;
         }
 
-        if self.float_override != new.float_override {
+        if self.float_override != wm.window_management_behaviour.float_override {
             return true;
         }
 
-        if self.cross_monitor_move_behaviour != new.cross_monitor_move_behaviour {
+        if self.cross_monitor_move_behaviour != wm.cross_monitor_move_behaviour {
             return true;
         }
 
-        if self.monocle_focus_behaviour != new.monocle_focus_behaviour {
+        if self.monocle_focus_behaviour != wm.monocle_focus_behaviour {
             return true;
         }
 
-        if self.unmanaged_window_operation_behaviour != new.unmanaged_window_operation_behaviour {
+        if self.unmanaged_window_operation_behaviour != wm.unmanaged_window_operation_behaviour {
             return true;
         }
 
-        if self.work_area_offset != new.work_area_offset {
+        if self.work_area_offset != wm.work_area_offset {
             return true;
         }
 
-        if self.focus_follows_mouse != new.focus_follows_mouse {
+        if self.focus_follows_mouse != wm.focus_follows_mouse {
             return true;
         }
 
-        if self.mouse_follows_focus != new.mouse_follows_focus {
+        if self.mouse_follows_focus != wm.mouse_follows_focus {
             return true;
         }
 
-        if self.has_pending_raise_op != new.has_pending_raise_op {
+        if self.has_pending_raise_op != wm.has_pending_raise_op {
             return true;
         }
 
         false
     }
+
+    /// Compares the stripped `monitors` snapshot against the live window
+    /// manager monitors, mirroring the strip performed by
+    /// `From<&WindowManager>`.
+    fn monitors_modified(&self, wm: &WindowManager) -> bool {
+        let live_monitors = wm.monitors();
+
+        if self.monitors.focused_idx() != wm.monitors.focused_idx()
+            || self.monitors.elements().len() != live_monitors.len()
+        {
+            return true;
+        }
+
+        for (stripped, live) in self.monitors.elements().iter().zip(live_monitors.iter()) {
+            if stripped.id != live.id
+                || stripped.name != live.name
+                || stripped.device != live.device
+                || stripped.device_id != live.device_id
+                || stripped.serial_number_id != live.serial_number_id
+                || stripped.size != live.size
+                || stripped.work_area_size != live.work_area_size
+                || stripped.work_area_offset != live.work_area_offset
+                || stripped.window_based_work_area_offset != live.window_based_work_area_offset
+                || stripped.window_based_work_area_offset_limit
+                    != live.window_based_work_area_offset_limit
+                || stripped.last_focused_workspace != live.last_focused_workspace
+                || stripped.last_switch_at != live.last_switch_at
+                || stripped.workspace_names != live.workspace_names
+                || stripped.container_padding != live.container_padding
+                || stripped.workspace_padding != live.workspace_padding
+                || stripped.wallpaper != live.wallpaper
+                || stripped.floating_layer_behaviour != live.floating_layer_behaviour
+                || stripped.pinned_floating != live.pinned_floating
+                || stripped.pinned_always_on_top != live.pinned_always_on_top
+            {
+                return true;
+            }
+
+            if workspaces_modified(&stripped.workspaces, &live.workspaces) {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+/// Compares a stripped `Ring<Workspace>` snapshot against a live workspace
+/// ring, mirroring the strip performed by `From<&WindowManager>` on each
+/// workspace.
+fn workspaces_modified(stripped: &Ring<Workspace>, live: &Ring<Workspace>) -> bool {
+    if stripped.focused_idx() != live.focused_idx()
+        || stripped.elements().len() != live.elements().len()
+    {
+        return true;
+    }
+
+    for (s, l) in stripped.elements().iter().zip(live.elements()) {
+        if s.name != l.name
+            || s.containers != l.containers
+            || s.monocle_container != l.monocle_container
+            || s.monocle_container_restore_idx != l.monocle_container_restore_idx
+            || s.maximized_window != l.maximized_window
+            || s.maximized_window_restore_idx != l.maximized_window_restore_idx
+            || s.floating_windows != l.floating_windows
+            || s.layout != l.layout
+            || s.layout_options != l.layout_options
+            || s.layout_rules != l.layout_rules
+            || s.layout_options_rules != l.layout_options_rules
+            || s.layout_defaults_cache != l.layout_defaults_cache
+            || s.work_area_offset_rules != l.work_area_offset_rules
+            || s.layout_flip != l.layout_flip
+            || s.workspace_padding != l.workspace_padding
+            || s.container_padding != l.container_padding
+            || s.latest_layout != l.latest_layout
+            || s.resize_dimensions != l.resize_dimensions
+            || s.tile != l.tile
+            || s.work_area_offset != l.work_area_offset
+            || s.apply_window_based_work_area_offset != l.apply_window_based_work_area_offset
+            || s.window_container_behaviour != l.window_container_behaviour
+            || s.window_container_behaviour_rules != l.window_container_behaviour_rules
+            || s.stack_rules != l.stack_rules
+            || s.float_override != l.float_override
+            || s.layer != l.layer
+            || s.layer_lock != l.layer_lock
+            || s.ignored_windows_above_managed != l.ignored_windows_above_managed
+            || s.floating_layer_behaviour != l.floating_layer_behaviour
+            || s.globals != l.globals
+            || s.wallpaper != l.wallpaper
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 #[allow(clippy::struct_excessive_bools)]

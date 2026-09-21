@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::convert::TryFrom;
 use std::mem::size_of;
 use std::path::Path;
+use std::sync::LazyLock;
 use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
@@ -260,6 +261,26 @@ impl<T> ProcessWindowsCrateResult<T> for WindowsCrateResult<T> {
 }
 
 pub struct WindowsApi;
+
+/// Short-lived cache of per-window process metadata (image path, executable
+/// name and window class), shared by `Window::exe`, `Window::path` and
+/// `Window::class` so rule matching and serialization don't open and close a
+/// process handle (2-3 Win32 calls each) on every event. Entries are
+/// invalidated on window destruction and expire after ~2s, so a recycled hwnd
+/// or a changed window class can never be served stale data indefinitely.
+const WINDOW_METADATA_CACHE_TTL: Duration = Duration::from_secs(2);
+const WINDOW_METADATA_CACHE_CAPACITY: usize = 2048;
+
+#[derive(Clone)]
+struct CachedWindowMetadata {
+    path: String,
+    exe: String,
+    class: String,
+    fetched_at: Instant,
+}
+
+static WINDOW_METADATA_CACHE: LazyLock<Mutex<HashMap<isize, CachedWindowMetadata>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 impl WindowsApi {
     pub fn enum_display_monitors(
@@ -1274,6 +1295,68 @@ impl WindowsApi {
             .next_back()
             .ok_or_eyre("there is no last element")?
             .to_string())
+    }
+
+    /// Resolves the executable name, full image path and window class of the
+    /// process owning `hwnd` (one `OpenProcess`/`CloseHandle` pair) and caches
+    /// the result for `WINDOW_METADATA_CACHE_TTL`. `class` is best-effort so a
+    /// transient class lookup failure never degrades `exe`/`path` results.
+    ///
+    /// Returns `(exe, path, class)`.
+    pub fn window_metadata(hwnd: isize) -> eyre::Result<(String, String, String)> {
+        let now = Instant::now();
+
+        {
+            let cache = WINDOW_METADATA_CACHE.lock();
+            if let Some(meta) = cache.get(&hwnd)
+                && now.duration_since(meta.fetched_at) <= WINDOW_METADATA_CACHE_TTL
+            {
+                return Ok((meta.exe.clone(), meta.path.clone(), meta.class.clone()));
+            }
+        }
+
+        // Compute outside the cache lock so a slow process probe never
+        // contends the shared cache.
+        let (process_id, _) = Self::window_thread_process_id(hwnd);
+        let handle = Self::process_handle(process_id)?;
+        let path = match Self::exe_path(handle) {
+            Ok(path) => path,
+            Err(error) => {
+                let _ = Self::close_process(handle);
+                return Err(error);
+            }
+        };
+        Self::close_process(handle)?;
+
+        let exe = path
+            .split('\\')
+            .next_back()
+            .ok_or_eyre("there is no last element")?
+            .to_string();
+        let class = Self::real_window_class_w(hwnd).unwrap_or_default();
+
+        let mut cache = WINDOW_METADATA_CACHE.lock();
+        if cache.len() >= WINDOW_METADATA_CACHE_CAPACITY {
+            cache
+                .retain(|_, meta| now.duration_since(meta.fetched_at) <= WINDOW_METADATA_CACHE_TTL);
+        }
+        cache.insert(
+            hwnd,
+            CachedWindowMetadata {
+                path: path.clone(),
+                exe: exe.clone(),
+                class: class.clone(),
+                fetched_at: now,
+            },
+        );
+
+        Ok((exe, path, class))
+    }
+
+    /// Drops the cached metadata for `hwnd`, e.g. on `ObjectDestroy`, so a
+    /// recycled hwnd can never be served the previous window's exe/class.
+    pub fn invalidate_window_metadata(hwnd: isize) {
+        WINDOW_METADATA_CACHE.lock().remove(&hwnd);
     }
 
     pub fn real_window_class_w(hwnd: isize) -> eyre::Result<String> {

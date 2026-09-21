@@ -43,11 +43,13 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 pub use core::*;
 pub use komorebi_themes::colour::*;
@@ -66,6 +68,8 @@ use crate::core::config_generation::MatchingRule;
 use crate::core::config_generation::MatchingStrategy;
 use crate::core::config_generation::WorkspaceMatchingRule;
 use color_eyre::eyre;
+use crossbeam_channel::Receiver;
+use crossbeam_channel::Sender;
 use crossbeam_utils::atomic::AtomicCell;
 use os_info::Version;
 use parking_lot::Mutex;
@@ -361,38 +365,123 @@ pub struct Notification {
     pub state: State,
 }
 
-pub fn notify_subscribers(
+/// Returns `true` if at least one subscriber (socket or pipe) is registered.
+pub fn has_subscribers() -> bool {
+    !SUBSCRIPTION_SOCKETS.lock().is_empty() || !SUBSCRIPTION_PIPES.lock().is_empty()
+}
+
+/// Maximum number of notifications buffered for delivery before new ones are
+/// dropped under extreme overload. Bounding the queue (every entry carries a
+/// full `State` payload) keeps memory usage bounded and guarantees a
+/// wedged/slow subscriber can never stall the window manager event loop.
+const NOTIFY_CHANNEL_CAPACITY: usize = 256;
+
+/// Longest time the publisher will wait to write to a single subscriber socket
+/// before treating that subscriber as stale and pruning it.
+const NOTIFY_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A fully-formed notification destined for (at least one) subscriber,
+/// serialized and delivered on a dedicated thread rather than on whichever
+/// thread just mutated the window manager.
+struct NotifyEnvelope {
     notification: Notification,
     state_has_been_modified: bool,
-) -> eyre::Result<()> {
-    let is_override_event = matches!(
-        notification.event,
-        NotificationEvent::Socket(SocketMessage::AddSubscriberSocket(_))
-            | NotificationEvent::Socket(SocketMessage::AddSubscriberSocketWithOptions(_, _))
-            | NotificationEvent::Socket(SocketMessage::Theme(_))
-            | NotificationEvent::Socket(SocketMessage::ReloadStaticConfiguration(_))
-            | NotificationEvent::WindowManager(WindowManagerEvent::TitleUpdate(_, _))
-            | NotificationEvent::WindowManager(WindowManagerEvent::Show(_, _))
-            | NotificationEvent::WindowManager(WindowManagerEvent::Uncloak(_, _))
-    );
+    is_override: bool,
+}
 
-    let notification = &serde_json::to_string(&notification)?;
+struct NotifyPipeline {
+    tx: Sender<NotifyEnvelope>,
+    /// Holds the newest state-change notification still waiting to be
+    /// delivered when the only subscribers opted into `filter_state_changes`.
+    /// Such subscribers ignore the per-event payload and only react to "the
+    /// state changed", so latest-wins collapses a burst of state dumps into a
+    /// single delivery instead of queuing every single one of them.
+    latest_state: Arc<Mutex<Option<NotifyEnvelope>>>,
+}
+
+static NOTIFY_PIPELINE: LazyLock<NotifyPipeline> = LazyLock::new(|| {
+    let (tx, rx) = crossbeam_channel::bounded(NOTIFY_CHANNEL_CAPACITY);
+    let latest_state = Arc::new(Mutex::new(None::<NotifyEnvelope>));
+
+    std::thread::Builder::new()
+        .name("komorebi-notifier".to_string())
+        .spawn({
+            let latest_state = Arc::clone(&latest_state);
+            move || publisher_loop(rx, latest_state)
+        })
+        .expect("failed to spawn the subscriber notification publisher thread");
+
+    NotifyPipeline { tx, latest_state }
+});
+
+/// Consumes notifications off the queue and delivers them to subscribers. All
+/// serialization and socket I/O happens on this thread, so producers (the
+/// window manager event/command threads) never block on a subscriber. When the
+/// queue runs dry it still polls the latest-state cell once in a while so a
+/// coalesced notification is delivered even if no further event follows it.
+fn publisher_loop(rx: Receiver<NotifyEnvelope>, latest_state: Arc<Mutex<Option<NotifyEnvelope>>>) {
+    loop {
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(envelope) => deliver_notification(envelope),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+
+        if let Some(envelope) = latest_state.lock().take() {
+            deliver_notification(envelope);
+        }
+    }
+}
+
+/// Serializes `envelope` and writes it to all subscribing sockets and pipes.
+/// The subscriber lists are only briefly locked to snapshot them; the actual
+/// connect/write I/O happens without holding the subscription locks, so a
+/// wedged subscriber can only stall this thread, never a producer.
+fn deliver_notification(envelope: NotifyEnvelope) {
+    let NotifyEnvelope {
+        notification,
+        state_has_been_modified,
+        is_override,
+    } = envelope;
+
+    let notification = match serde_json::to_string(&notification) {
+        Ok(json) => json,
+        Err(error) => {
+            tracing::error!("could not serialise notification for subscribers: {error}");
+            return;
+        }
+    };
+
+    let sockets = {
+        let sockets = SUBSCRIPTION_SOCKETS.lock();
+        let options = SUBSCRIPTION_SOCKET_OPTIONS.lock();
+        sockets
+            .iter()
+            .map(|(socket, path)| {
+                (
+                    socket.clone(),
+                    path.clone(),
+                    options.get(socket).copied().unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
     let mut stale_sockets = vec![];
-    let mut sockets = SUBSCRIPTION_SOCKETS.lock();
-    let options = SUBSCRIPTION_SOCKET_OPTIONS.lock();
 
-    for (socket, path) in &mut *sockets {
-        let apply_state_filter = (*options)
-            .get(socket)
-            .copied()
-            .unwrap_or_default()
-            .filter_state_changes;
+    for (socket, path, subscribe_options) in &sockets {
+        let apply_state_filter = subscribe_options.filter_state_changes;
 
-        if !apply_state_filter || state_has_been_modified || is_override_event {
+        if !apply_state_filter || state_has_been_modified || is_override {
             match UnixStream::connect(path) {
                 Ok(mut stream) => {
-                    tracing::debug!("pushed notification to subscriber: {socket}");
-                    stream.write_all(notification.as_bytes())?;
+                    let _ = stream.set_write_timeout(Some(NOTIFY_WRITE_TIMEOUT));
+                    if stream.write_all(notification.as_bytes()).is_ok() {
+                        tracing::debug!("pushed notification to subscriber: {socket}");
+                    } else {
+                        tracing::debug!("failed to push notification to subscriber: {socket}");
+                        stale_sockets.push(socket.clone());
+                    }
                 }
                 Err(_) => {
                     stale_sockets.push(socket.clone());
@@ -401,15 +490,18 @@ pub fn notify_subscribers(
         }
     }
 
-    for socket in stale_sockets {
-        tracing::warn!("removing stale subscription: {socket}");
-        sockets.remove(&socket);
-        let socket_path = DATA_DIR.join(socket);
-        if let Err(error) = std::fs::remove_file(&socket_path) {
-            tracing::error!(
-                "could not remove stale subscriber socket file at {}: {error}",
-                socket_path.display()
-            )
+    if !stale_sockets.is_empty() {
+        let mut active = SUBSCRIPTION_SOCKETS.lock();
+        for socket in &stale_sockets {
+            tracing::warn!("removing stale subscription: {socket}");
+            active.remove(socket);
+            let socket_path = DATA_DIR.join(socket);
+            if let Err(error) = std::fs::remove_file(&socket_path) {
+                tracing::error!(
+                    "could not remove stale subscriber socket file at {}: {error}",
+                    socket_path.display()
+                )
+            }
         }
     }
 
@@ -440,6 +532,79 @@ pub fn notify_subscribers(
     for subscriber in stale_pipes {
         tracing::warn!("removing stale subscription: {}", subscriber);
         pipes.remove(&subscriber);
+    }
+}
+
+pub fn notify_subscribers(
+    notification: Notification,
+    state_has_been_modified: bool,
+) -> eyre::Result<()> {
+    let is_override_event = matches!(
+        notification.event,
+        NotificationEvent::Socket(SocketMessage::AddSubscriberSocket(_))
+            | NotificationEvent::Socket(SocketMessage::AddSubscriberSocketWithOptions(_, _))
+            | NotificationEvent::Socket(SocketMessage::Theme(_))
+            | NotificationEvent::Socket(SocketMessage::ReloadStaticConfiguration(_))
+            | NotificationEvent::WindowManager(WindowManagerEvent::TitleUpdate(_, _))
+            | NotificationEvent::WindowManager(WindowManagerEvent::Show(_, _))
+            | NotificationEvent::WindowManager(WindowManagerEvent::Uncloak(_, _))
+    );
+
+    // Fast path: nobody is listening. This also lets the callers skip building
+    // the payload `State` entirely.
+    if SUBSCRIPTION_SOCKETS.lock().is_empty() && SUBSCRIPTION_PIPES.lock().is_empty() {
+        return Ok(());
+    }
+
+    let sockets = SUBSCRIPTION_SOCKETS.lock();
+    let all_filter_state_changes = !sockets.is_empty() && SUBSCRIPTION_PIPES.lock().is_empty() && {
+        let options = SUBSCRIPTION_SOCKET_OPTIONS.lock();
+        sockets.keys().all(|socket| {
+            options
+                .get(socket)
+                .copied()
+                .unwrap_or_default()
+                .filter_state_changes
+        })
+    };
+
+    if !state_has_been_modified && !is_override_event && all_filter_state_changes {
+        // Every subscriber opted into the state-change filter and the state
+        // has not changed; nothing would be delivered, so skip entirely.
+        return Ok(());
+    }
+
+    let pipeline = &*NOTIFY_PIPELINE;
+
+    if is_override_event {
+        // An override is always delivered immediately with a fresh full state,
+        // so any coalesced snapshot still waiting is older and must not be
+        // delivered after it.
+        *pipeline.latest_state.lock() = None;
+    }
+
+    if !is_override_event && state_has_been_modified && all_filter_state_changes {
+        // Coalesce: keep only the newest state dump waiting for the filter,
+        // replacing the previously pending one instead of growing the queue.
+        *pipeline.latest_state.lock() = Some(NotifyEnvelope {
+            notification,
+            state_has_been_modified,
+            is_override: false,
+        });
+        return Ok(());
+    }
+
+    let envelope = NotifyEnvelope {
+        notification,
+        state_has_been_modified,
+        is_override: is_override_event,
+    };
+
+    if let Err(error) = pipeline.tx.try_send(envelope) {
+        // The bounded queue is full and a subscriber is not draining it fast
+        // enough. Drop the notification instead of blocking the event loop;
+        // once the slow/stale subscriber is pruned the queue will drain again.
+        tracing::warn!("notification dropped, subscriber notify queue full: {error}");
     }
 
     Ok(())

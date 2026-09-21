@@ -121,7 +121,11 @@ pub struct WindowManager {
     pub keep_monocle_on_window_close: bool,
     pub pending_move_op: Arc<Option<(usize, usize, isize)>>,
     pub already_moved_window_handles: Arc<Mutex<HashSet<isize>>>,
-    pub uncloack_to_ignore: usize,
+    /// HWNDs whose next `Uncloak` event is expected and must be ignored: the
+    /// windows uncloaked by a monocle restore during a drag-by-mouse workspace
+    /// move. Keyed by `Instant` so stale entries (whose uncloak event never
+    /// arrives) can be pruned instead of swallowing a later legitimate uncloak.
+    pub(crate) uncloacked_windows_to_ignore: HashMap<isize, Instant>,
     /// Maps each known window hwnd to the (monitor, workspace) index pair managing it
     pub known_hwnds: HashMap<isize, (usize, usize)>,
 }
@@ -133,6 +137,29 @@ impl AsRef<Self> for WindowManager {
 }
 
 impl_ring_elements!(WindowManager, Monitor);
+
+impl WindowManager {
+    /// Maximum age after which an expected-uncloak entry is considered stale
+    /// and pruned, so an uncloak event that never arrives for a hwnd cannot
+    /// cause a later legitimate uncloak of the same hwnd to be swallowed.
+    const UNCLOAK_IGNORE_TTL: Duration = Duration::from_secs(5);
+
+    /// Drops expected-uncloak entries that are older than
+    /// `UNCLOAK_IGNORE_TTL`.
+    pub(crate) fn prune_uncloak_ignores(&mut self) {
+        let expiry = Instant::now() - Self::UNCLOAK_IGNORE_TTL;
+        self.uncloacked_windows_to_ignore
+            .retain(|_, uncloaked_at| *uncloaked_at > expiry);
+    }
+
+    /// Returns `true` when the uncloak event for `hwnd` was expected (a window
+    /// restored by a recent monocle move by mouse) and should be ignored.
+    /// Consumes the entry so a single hwnd can only swallow one uncloak.
+    pub(crate) fn consume_expected_uncloak(&mut self, hwnd: isize) -> bool {
+        self.prune_uncloak_ignores();
+        self.uncloacked_windows_to_ignore.remove(&hwnd).is_some()
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct EnforceWorkspaceRuleOp {
@@ -197,7 +224,7 @@ impl WindowManager {
             keep_monocle_on_window_close: true,
             pending_move_op: Arc::new(None),
             already_moved_window_handles: Arc::new(Mutex::new(HashSet::new())),
-            uncloack_to_ignore: 0,
+            uncloacked_windows_to_ignore: HashMap::new(),
             known_hwnds: HashMap::new(),
         })
     }
@@ -1019,10 +1046,14 @@ impl WindowManager {
                     .workspaces_mut()
                     .get_mut(origin_workspace_idx)
                     .ok_or_eyre("there is no workspace for this monitor")?;
-                let mut uncloack_amount = 0;
+                // Record the windows that are about to be uncloaked by the
+                // restore so their (expected) uncloak events can be ignored.
+                let mut uncloacked_windows = Vec::new();
                 for container in origin_workspace.containers_mut() {
+                    if let Some(window) = container.focused_window() {
+                        uncloacked_windows.push(window.hwnd);
+                    }
                     container.restore();
-                    uncloack_amount += 1;
                 }
                 origin_workspace.reintegrate_monocle_container()?;
 
@@ -1040,7 +1071,11 @@ impl WindowManager {
                 // That workspace reconciliation would focus the window on the origin monitor.
                 // So we need to ignore the uncloak events produced by the origin workspace
                 // restore to avoid that issue.
-                self.uncloack_to_ignore = uncloack_amount;
+                self.prune_uncloak_ignores();
+                for hwnd in uncloacked_windows {
+                    self.uncloacked_windows_to_ignore
+                        .insert(hwnd, Instant::now());
+                }
             }
         } else if origin_workspace
             .maximized_window
