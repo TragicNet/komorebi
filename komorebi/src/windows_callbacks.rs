@@ -197,16 +197,22 @@ pub extern "system" fn win_event_hook(
         Some(event) => event,
     };
 
-    // If the queue is saturated (e.g. during a window event storm) do not panic
-    // or block the hook forever: drop the event and let the window manager
-    // rebuild state from source-of-truth Win32 probes on the next delivered
-    // event. WinEvent hooks run on the thread that placed them for out-of-context
-    // hooks and must return promptly.
+    // Under an event storm the bounded queue can saturate. Never drop the
+    // events the window manager cannot recover from Win32 probes (foreground
+    // tracking, geometry/visibility changes): those block the hook until the
+    // window manager drains the queue, preserving losslessness. Only the noisy
+    // positional/title events are dropped, so the buffer clamp alone bounds
+    // memory and the hook always returns promptly in practice. WinEvent hooks
+    // run on the thread that placed them for out-of-context hooks.
     let event_tx = winevent_listener::event_tx();
-    if event_tx
-        .send_timeout(event_type, Duration::from_millis(50))
-        .is_err()
-    {
-        tracing::debug!(event = ?event_type, "dropped winevent under overload");
+    if event_type.drop_allowed() {
+        if event_tx
+            .send_timeout(event_type, Duration::from_millis(50))
+            .is_err()
+        {
+            tracing::debug!(event = ?event_type, "dropped winevent under overload");
+        }
+    } else if event_tx.send(event_type).is_err() {
+        tracing::warn!(event = ?event_type, "failed to enqueue critical winevent");
     }
 }

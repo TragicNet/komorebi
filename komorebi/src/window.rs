@@ -1184,6 +1184,19 @@ impl Window {
         Ok(())
     }
 
+    /// Raise the window immediately below the given target window without
+    /// activating or focusing it (see
+    /// [`WindowsApi::raise_window_below`]), applied synchronously regardless
+    /// of `WINDOW_HANDLING_BEHAVIOUR`. Also raises the border attached to this
+    /// window, if any.
+    pub fn raise_below(self, target_hwnd: isize) -> eyre::Result<()> {
+        WindowsApi::raise_window_below(self.hwnd, target_hwnd)?;
+        if let Some(border_info) = crate::border_manager::window_border(self.hwnd) {
+            WindowsApi::raise_window_below(border_info.border_hwnd, target_hwnd)?;
+        }
+        Ok(())
+    }
+
     /// Place the window into the persistent TopMost band (see
     /// [`WindowsApi::make_topmost_window`]) so it renders above every
     /// normal-band window, without activating or focusing it, applied

@@ -26,6 +26,7 @@ use uds_windows::UnixStream;
 use crate::animation::ANIMATION_ENABLED_GLOBAL;
 use crate::animation::ANIMATION_ENABLED_PER_ANIMATION;
 use crate::animation::AnimationEngine;
+use crate::apply_worker::ApplyWorker;
 use crate::core::Arrangement;
 use crate::core::Axis;
 use crate::core::BorderImplementation;
@@ -3501,6 +3502,12 @@ impl WindowManager {
     #[tracing::instrument(skip(self))]
     pub fn toggle_float(&mut self, force_float: bool) -> eyre::Result<()> {
         let hwnd = WindowsApi::foreground_window()?;
+
+        // The focus calls made while entering the new layer (floating the
+        // window, then concentrating it back when unfloating) fire FocusChange
+        // events that must not immediately flip the layer back.
+        self.suppress_layer_flips();
+
         let workspace = self.focused_workspace_mut()?;
         if workspace.monocle_container.is_some() {
             tracing::warn!("ignoring toggle-float command while workspace has a monocle container");
@@ -3523,12 +3530,31 @@ impl WindowManager {
             self.float_window()?;
         }
 
-        self.update_focused_workspace(is_floating_window, true)
+        self.update_focused_workspace(is_floating_window, true)?;
+
+        // Single terminal focus event for the whole toggle, issued after all
+        // layout work: re-assert the foreground on the window that was just
+        // floated/unfloated as the very last operation. Window::focus() inside
+        // float_window/unfloat_window is a no-op while the window still owns the
+        // foreground (the usual case), so without this final activation the DWM
+        // reparent fallout - and the ~1s-delayed pinned-band raise it can
+        // trigger - would land after the toggle and steal focus onto a pin.
+        WindowsApi::raise_and_focus_window(hwnd)?;
+        if self.mouse_follows_focus {
+            WindowsApi::center_cursor_in_rect(&WindowsApi::window_rect(hwnd)?)?;
+        }
+
+        Ok(())
     }
 
     #[tracing::instrument(skip(self))]
     pub fn toggle_pin_floating_window(&mut self) -> eyre::Result<()> {
         let hwnd = WindowsApi::foreground_window()?;
+
+        // Unpinning re-floats the window on the focused workspace and the
+        // tiled-float path focuses it; the FocusChange fallout must not flip
+        // the layer description.
+        self.suppress_layer_flips();
 
         // Pins live on the monitor; a window may be toggled from any workspace.
         let (is_floating, is_focused_tiled) = {
@@ -3633,6 +3659,18 @@ impl WindowManager {
 
         let workspace = self.focused_workspace_mut()?;
         workspace.new_floating_window()?;
+
+        // Align the ring focus (and the layer's last-focused memory) with the
+        // window that was just floated. new_floating_window only appends to the
+        // floating list, so without this the ring still points at a previously
+        // focused float - or a remembered pin - and the layer-stack enforce
+        // pass would raise the wrong window above the active one.
+        let hwnd = workspace
+            .floating_windows()
+            .back()
+            .ok_or_eyre("there is no floating window")?
+            .hwnd;
+        workspace.focus_floating_window_by_hwnd(hwnd);
 
         let window = workspace
             .floating_windows_mut()
@@ -4713,7 +4751,7 @@ impl WindowManager {
     /// of the z-order. The pinned floating windows of other workspaces on this
     /// monitor drop back below the tiling base together with the overlay.
     pub(crate) fn lower_floating_overlay(&mut self) -> eyre::Result<()> {
-        {
+        let floats = {
             let workspace = self.focused_workspace_mut()?;
 
             let mut window_idx_pairs = workspace
@@ -4728,14 +4766,30 @@ impl WindowManager {
                 rect.right * rect.bottom
             });
 
-            for window in window_idx_pairs {
-                window.lower()?;
-            }
-        }
+            window_idx_pairs
+                .iter()
+                .map(|window| **window)
+                .collect::<Vec<_>>()
+        };
 
-        self.focused_monitor()
+        let (normal_pins, always_on_top_pins) = self
+            .focused_monitor()
             .ok_or_eyre("there is no monitor")?
-            .lower_pinned_windows();
+            .pinned_window_bands();
+
+        // Drop the entire overlay (this workspace's floating windows along with
+        // the normal pinned band) in ONE deferred window-pos pass, ahead of the
+        // layer activation that the toggle enqueues afterwards. Lowering the
+        // overlay window by window lets each synchronous SetWindowPos marshal
+        // to its own window thread, so the overlay visibly staggers down over
+        // multiple frames whenever a window thread is slow (or skips the raise
+        // probe); the single pass reorders the whole overlay to the bottom in
+        // one screen-refreshing cycle so it can never linger for a split
+        // second above the tiling base.
+        let mut batch = floats;
+        batch.extend(normal_pins);
+        ApplyWorker::lower_batch(batch);
+        ApplyWorker::make_topmost(always_on_top_pins);
 
         Ok(())
     }

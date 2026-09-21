@@ -1620,10 +1620,50 @@ impl Workspace {
     }
 
     pub fn new_container_for_floating_window(&mut self) -> eyre::Result<()> {
-        let focused_idx = self.focused_container_idx();
         let window = self
             .remove_focused_floating_window()
             .ok_or_eyre("there is no floating window")?;
+
+        // Return the window to the tiling slot it occupied before it was
+        // floated, so an unfloat round-trip lands back where it came from
+        // instead of inserting at the current focus point.
+        if let Some(state) = self.restoration_indices.remove(&window.hwnd) {
+            if matches!(state.layer, WorkspaceLayer::Floating) {
+                let idx = state.window_idx.min(self.floating_windows().len());
+                self.floating_windows_mut().insert(idx, window);
+                self.focus_floating_window(idx);
+                return Ok(());
+            }
+
+            // Try to find the original container first so the window rejoins a
+            // surviving stack rather than creating a sibling tile.
+            if let Some(container_id) = &state.container_id {
+                for (i, container) in self.containers().iter().enumerate() {
+                    if container.id == *container_id {
+                        self.containers_mut()
+                            .get_mut(i)
+                            .unwrap()
+                            .insert_window_at_idx(state.window_idx, window);
+                        self.focus_container(i);
+                        return Ok(());
+                    }
+                }
+            }
+
+            // The container is gone (e.g. it was removed when it emptied on
+            // float); reclaim the original tiling slot with a fresh container,
+            // capped to the current length to avoid a panic.
+            let mut container = Container::default();
+            if let Some(id) = state.container_id {
+                container.id = id;
+            }
+            container.add_window(window);
+            let target_idx = state.container_idx.min(self.containers().len());
+            self.insert_container_at_idx(target_idx, container);
+            return Ok(());
+        }
+
+        let focused_idx = self.focused_container_idx();
 
         let mut container = Container::default();
         container.add_window(window);
@@ -1899,22 +1939,47 @@ impl Workspace {
         } else {
             let focused_idx = self.focused_container_idx();
 
-            let container = self
+            // Remember where the window was tiled so a later unfloat can drop
+            // it back into the exact container slot instead of appending a
+            // fresh container at the current focus point.
+            let (window_idx, container_id, window) = {
+                let container = self
+                    .focused_container_mut()
+                    .ok_or_eyre("there is no container")?;
+                (
+                    container.focused_window_idx(),
+                    Some(container.id.clone()),
+                    container
+                        .remove_focused_window()
+                        .ok_or_eyre("there is no window")?,
+                )
+            };
+
+            self.restoration_indices.insert(
+                window.hwnd,
+                WindowRestorationState {
+                    container_id,
+                    container_idx: focused_idx,
+                    window_idx,
+                    layer: WorkspaceLayer::Tiling,
+                },
+            );
+
+            if self
                 .focused_container_mut()
-                .ok_or_eyre("there is no container")?;
-
-            let window = container
-                .remove_focused_window()
-                .ok_or_eyre("there is no window")?;
-
-            if container.windows().is_empty() {
+                .ok_or_eyre("there is no container")?
+                .windows()
+                .is_empty()
+            {
                 self.remove_container_by_idx(focused_idx);
 
                 if focused_idx == self.containers().len() {
                     self.focus_container(focused_idx.saturating_sub(1));
                 }
             } else {
-                container.load_focused_window();
+                self.focused_container_mut()
+                    .ok_or_eyre("there is no container")?
+                    .load_focused_window();
             }
 
             window

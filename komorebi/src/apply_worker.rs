@@ -29,11 +29,26 @@ pub enum ApplyOp {
     /// Lower each window to the bottom of the Z order (synchronous
     /// `HWND_BOTTOM`).
     Lower(Vec<Window>),
+    /// Lower every window to the bottom of the Z order in ONE deferred
+    /// window-pos pass (`BeginDeferWindowPos`/`DeferWindowPos`/
+    /// `EndDeferWindowPos`), so the whole batch drops behind the tiling base in
+    /// a single screen-refreshing cycle instead of window by window.
+    LowerBatch(Vec<Window>),
     /// Demote each window out of the TopMost band (synchronous `HWND_NOTOPMOST`).
     ClearTopmost(Vec<Window>),
     /// Place each window into the persistent TopMost band (synchronous
     /// `HWND_TOPMOST`), so it renders above every normal-band window.
     MakeTopmost(Vec<Window>),
+    /// Raise a window immediately below another window in the Z order
+    /// (synchronous relative insert), so it can never end up above the target
+    /// even if the target holds the foreground.
+    RaiseBelow { window: Window, target: Window },
+    /// Bring each window to the foreground (activate it) as the physically
+    /// final operation of a pass, after every earlier z-order op has been
+    /// applied. Enqueueing the activation on this FIFO guarantees the
+    /// foreground change can never race an in-flight raise/lower and get
+    /// bounced by a later SetWindowPos.
+    RaiseAndFocus(Vec<Window>),
 }
 
 pub struct ApplyWorker;
@@ -91,6 +106,15 @@ impl ApplyWorker {
                     }
                 }
             }
+            ApplyOp::LowerBatch(windows) => {
+                let hwnds = windows.iter().map(|window| window.hwnd).collect::<Vec<_>>();
+                if let Err(error) = crate::windows_api::WindowsApi::lower_windows_sync(&hwnds) {
+                    tracing::warn!(
+                        windows = windows.len(),
+                        "could not lower windows in a single pass: {error}"
+                    );
+                }
+            }
             ApplyOp::ClearTopmost(windows) => {
                 for window in windows {
                     if let Err(error) = crate::windows_api::WindowsApi::clear_topmost_window(
@@ -105,13 +129,38 @@ impl ApplyWorker {
             }
             ApplyOp::MakeTopmost(windows) => {
                 for window in windows {
-                    if let Err(error) = crate::windows_api::WindowsApi::make_topmost_window(
-                        window.hwnd,
-                    ) {
+                    if let Err(error) =
+                        crate::windows_api::WindowsApi::make_topmost_window(window.hwnd)
+                    {
                         tracing::warn!(
                             hwnd = window.hwnd,
                             "could not make window topmost: {error}"
                         );
+                    }
+                }
+            }
+            ApplyOp::RaiseBelow { window, target } => {
+                if let Err(error) =
+                    crate::windows_api::WindowsApi::raise_window_below(window.hwnd, target.hwnd)
+                {
+                    tracing::warn!(
+                        hwnd = window.hwnd,
+                        target = target.hwnd,
+                        "could not raise window below target: {error}"
+                    );
+                }
+            }
+            ApplyOp::RaiseAndFocus(windows) => {
+                for window in windows {
+                    match crate::windows_api::WindowsApi::raise_and_focus_window(window.hwnd) {
+                        Ok(()) => tracing::info!(
+                            hwnd = window.hwnd,
+                            "raised and focused window as final pass operation"
+                        ),
+                        Err(error) => tracing::warn!(
+                            hwnd = window.hwnd,
+                            "could not raise and focus window: {error}"
+                        ),
                     }
                 }
             }
@@ -131,6 +180,23 @@ impl ApplyWorker {
         }
     }
 
+    /// Raise a window immediately below the given target window so the target
+    /// stays on top of it no matter which window currently holds the
+    /// foreground.
+    pub fn raise_below(window: Window, target: Window) {
+        Self::enqueue(ApplyOp::RaiseBelow { window, target });
+    }
+
+    /// Bring the given window to the foreground as the final operation of the
+    /// current pass, after all previously enqueued z-order work has been
+    /// applied. This is the only deterministic way to reset the foreground
+    /// once a batch of raises/lowers has been in flight: a synchronous
+    /// activation issued from the caller races those async operations and
+    /// Windows can hand the foreground to a window whose raise landed last.
+    pub fn raise_and_focus_hwnd(hwnd: isize) {
+        Self::enqueue(ApplyOp::RaiseAndFocus(vec![Window::from(hwnd)]));
+    }
+
     /// Raise the given windows to the top of the normal band, in order.
     pub fn raise(windows: Vec<Window>) {
         if !windows.is_empty() {
@@ -142,6 +208,15 @@ impl ApplyWorker {
     pub fn lower(windows: Vec<Window>) {
         if !windows.is_empty() {
             Self::enqueue(ApplyOp::Lower(windows));
+        }
+    }
+
+    /// Lower the given windows in a single atomic deferred window-pos pass so
+    /// the whole overlay drops behind the tiling base together, without the
+    /// window-by-window stagger of [`Self::lower`].
+    pub fn lower_batch(windows: Vec<Window>) {
+        if !windows.is_empty() {
+            Self::enqueue(ApplyOp::LowerBatch(windows));
         }
     }
 

@@ -530,7 +530,7 @@ impl WindowManager {
 
                                 match focus_behaviour {
                                     WorkspaceLayerFocusBehaviour::RespectLock => {
-                                        if !workspace.layer_lock {
+                                        if !workspace.layer_lock && !flip_suppressed {
                                             workspace.layer = WorkspaceLayer::Tiling;
                                         }
                                     }
@@ -599,6 +599,13 @@ impl WindowManager {
                 // the overlay's z-order does not degrade on a no-op focus event
                 // in between, so skipping the redundant re-tap is safe.
                 let overlay_maintenance_suppressed = self.is_overlay_maintenance_suppressed();
+                // While a komorebi-initiated operation (layer toggle, float
+                // toggle, pin toggle, workspace/monitor switch) is in its
+                // suppression window, the command itself already asserted the
+                // final focus and z-order. The maintenance is skipped in that
+                // window so the DWM fallout events it generates (tiled-window
+                // reparent echoes) cannot re-raise the pinned band ~1s later
+                // and reactivate a pin over the just-focused window.
 
                 // Skip the re-assert when the focused window is itself part of the
                 // Floating overlay (an own floating window or a pinned window):
@@ -616,6 +623,7 @@ impl WindowManager {
                         .collect::<Vec<_>>();
 
                     if !overlay_maintenance_suppressed
+                        && !flip_suppressed
                         && layer == WorkspaceLayer::Floating
                         && !focused_own_float
                         && !is_pinned
@@ -642,6 +650,7 @@ impl WindowManager {
                     // flip, or the forward toggle), so the last-focused window is never
                     // covered by pins.
                     if !overlay_maintenance_suppressed
+                        && !flip_suppressed
                         && layer == WorkspaceLayer::Floating
                         && focused_own_float
                     {

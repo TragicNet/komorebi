@@ -459,8 +459,12 @@ impl Monitor {
     /// of the pinned band.
     fn reposition_pinned_windows(&self, layer: WorkspaceLayer) -> eyre::Result<()> {
         match layer {
-            WorkspaceLayer::Floating => self.raise_pinned_windows(),
-            WorkspaceLayer::Tiling => self.lower_pinned_windows(),
+            WorkspaceLayer::Floating => {
+                self.raise_pinned_windows();
+            }
+            WorkspaceLayer::Tiling => {
+                self.lower_pinned_windows();
+            }
         };
 
         Ok(())
@@ -592,21 +596,33 @@ impl Monitor {
     /// back to Tiling. Posted to the apply worker so they can never block the
     /// window-manager thread on a Not Responding window and never end up above
     /// the tiled windows regardless of the apply ordering.
-    pub fn lower_pinned_windows(&self) -> Vec<Window> {
-        let windows = self
-            .pinned_windows()
-            .into_iter()
-            .filter(|window| window.is_window() && window.is_shown())
-            .collect::<Vec<_>>();
-        let (always_on_top, normal) = windows
-            .iter()
-            .partition(|window| self.is_pinned_always_on_top(window.hwnd));
+    pub fn lower_pinned_windows(&self) {
+        let (normal, always_on_top) = self.pinned_window_bands();
         // Always-on-top pins are never lowered below the tiling base: they stay
         // in the persistent TopMost band, so the lower pass simply re-asserts
         // them there and lowers only the normal pinned band.
         ApplyWorker::lower(normal);
         ApplyWorker::make_topmost(always_on_top);
-        windows
+    }
+
+    /// The rendered (shown) pinned floating windows of all workspaces on this
+    /// monitor, split into the normal pinned band and the always-on-top band.
+    /// No apply-worker operations are issued; the caller decides how to place
+    /// the bands (e.g. folding both into a single deferred lower).
+    pub fn pinned_window_bands(&self) -> (Vec<Window>, Vec<Window>) {
+        // Pins that are not rendered (hidden by the visibility pass for an
+        // empty workspace) are never lowered: the lower primitives use a
+        // show-window SetWindowPos and the focused window/band ordering would
+        // be an unintended resurrection of the hidden pin.
+        let windows = self
+            .pinned_windows()
+            .into_iter()
+            .filter(|window| window.is_window() && window.is_shown())
+            .collect::<Vec<_>>();
+        let (always_on_top, normal): (Vec<Window>, Vec<Window>) = windows
+            .iter()
+            .partition(|window| self.is_pinned_always_on_top(window.hwnd));
+        (normal, always_on_top)
     }
 
     fn raise_managed_window(&self, window: &Window) {

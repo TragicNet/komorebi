@@ -86,10 +86,13 @@ use windows::Win32::UI::Shell::DWPOS_FILL;
 use windows::Win32::UI::Shell::DesktopWallpaper;
 use windows::Win32::UI::Shell::IDesktopWallpaper;
 use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+use windows::Win32::UI::WindowsAndMessaging::BeginDeferWindowPos;
 use windows::Win32::UI::WindowsAndMessaging::BringWindowToTop;
 use windows::Win32::UI::WindowsAndMessaging::CW_USEDEFAULT;
 use windows::Win32::UI::WindowsAndMessaging::CreateWindowExW;
 use windows::Win32::UI::WindowsAndMessaging::DEV_BROADCAST_DEVICEINTERFACE_W;
+use windows::Win32::UI::WindowsAndMessaging::DeferWindowPos;
+use windows::Win32::UI::WindowsAndMessaging::EndDeferWindowPos;
 use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
 use windows::Win32::UI::WindowsAndMessaging::GW_HWNDNEXT;
 use windows::Win32::UI::WindowsAndMessaging::GWL_EXSTYLE;
@@ -670,6 +673,33 @@ impl WindowsApi {
         )
     }
 
+    /// Raise the window immediately below the given target window in the Z
+    /// order, without activating or focusing it, applied synchronously
+    /// regardless of `WINDOW_HANDLING_BEHAVIOUR`.
+    ///
+    /// Unlike a top-of-band raise, inserting relative to an existing window
+    /// guarantees the raised window can never end up above the target even if
+    /// the target currently holds the foreground. Used by the layer toggle to
+    /// reveal the floating overlay with the remembered focus strictly on top
+    /// while the rest of the overlay stacks beneath it.
+    pub fn raise_window_below(hwnd: isize, target_hwnd: isize) -> eyre::Result<()> {
+        if Self::skip_unresponsive_window(hwnd, "raise below") {
+            return Ok(());
+        }
+
+        let flags = SetWindowPosition::NO_MOVE
+            | SetWindowPosition::NO_SIZE
+            | SetWindowPosition::NO_ACTIVATE
+            | SetWindowPosition::SHOW_WINDOW;
+
+        Self::set_window_pos(
+            HWND(as_ptr!(hwnd)),
+            &Rect::default(),
+            HWND(as_ptr!(target_hwnd)),
+            flags.bits(),
+        )
+    }
+
     /// Raise the window above the currently active (foreground) window without
     /// activating or focusing it, applied synchronously regardless of
     /// `WINDOW_HANDLING_BEHAVIOUR`.
@@ -826,6 +856,65 @@ impl WindowsApi {
             position,
             flags.bits(),
         )
+    }
+
+    /// Lower several windows to the bottom of the Z order in a single atomic
+    /// pass using deferred window positioning (`BeginDeferWindowPos` +
+    /// `DeferWindowPos` + `EndDeferWindowPos`).
+    ///
+    /// `EndDeferWindowPos` applies every change in one screen-refreshing cycle,
+    /// so a whole overlay (floating windows and normal pins) drops behind the
+    /// tiling base together instead of one window at a time. Lowering windows
+    /// individually with [`lower_window_sync`] reads as a visible stagger when
+    /// window threads are slow to process the marshaled `SetWindowPos`; the
+    /// single pass collapses the whole drop into one frame.
+    ///
+    /// Unresponsive windows are probed and dropped from the batch, matching
+    /// [`lower_window_sync`]. If every window is skipped, no deferred pass is
+    /// started.
+    pub fn lower_windows_sync(hwnds: &[isize]) -> eyre::Result<()> {
+        // Probe every window up front and defer only the responsive ones,
+        // matching the per-window skip behaviour of `lower_window_sync`. If
+        // nothing is responsive, no deferred pass is started at all.
+        let responsive = hwnds
+            .iter()
+            .copied()
+            .filter(|hwnd| !Self::skip_unresponsive_window(*hwnd, "lower sync"))
+            .collect::<Vec<_>>();
+        if responsive.is_empty() {
+            return Ok(());
+        }
+
+        let flags = SetWindowPosition::NO_MOVE
+            | SetWindowPosition::NO_SIZE
+            | SetWindowPosition::NO_ACTIVATE
+            | SetWindowPosition::SHOW_WINDOW;
+
+        let mut hdwp =
+            unsafe { BeginDeferWindowPos(i32::try_from(responsive.len()).unwrap_or(i32::MAX)) }
+                .process()?;
+
+        for hwnd in responsive {
+            hdwp = unsafe {
+                DeferWindowPos(
+                    hdwp,
+                    HWND(as_ptr!(hwnd)),
+                    Some(HWND_BOTTOM),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SET_WINDOW_POS_FLAGS(flags.bits()),
+                )
+            }
+            .process()?;
+        }
+
+        // Applies every deferred change in a single screen-refreshing cycle and
+        // frees the HDWP block, even when the application itself fails.
+        unsafe { EndDeferWindowPos(hdwp) }.process()?;
+
+        Ok(())
     }
 
     pub fn set_border_pos(hwnd: isize, layout: &Rect, position: isize) -> eyre::Result<()> {

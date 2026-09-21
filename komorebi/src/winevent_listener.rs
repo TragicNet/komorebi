@@ -18,10 +18,12 @@ use crate::windows_callbacks;
 
 /// Maximum number of window events buffered before the emitting thread (the
 /// WinEvent hook) applies backpressure. Bounding the queue guarantees a window
-/// event storm can never grow memory unboundedly; under sustained overload the
-/// hook drops events instead, which is safe because the window manager rebuilds
-/// its view of the world from source-of-truth Win32 probes on the next event.
-const WINEVENT_CHANNEL_CAPACITY: usize = 1024;
+/// event storm can never grow memory unboundedly. Under sustained overload the
+/// hook drops only the noisy positional/title events (see
+/// `WindowManagerEvent::drop_allowed`); events the window manager cannot
+/// recover from Win32 probes - foreground tracking and window-set changes -
+/// block the hook instead so they are never lost.
+const WINEVENT_CHANNEL_CAPACITY: usize = 4096;
 
 static CHANNEL: OnceLock<(Sender<WindowManagerEvent>, Receiver<WindowManagerEvent>)> =
     OnceLock::new();

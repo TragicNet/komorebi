@@ -6,7 +6,6 @@ use miow::pipe::connect;
 use net2::TcpStreamExt;
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::BufRead;
@@ -1506,32 +1505,37 @@ impl WindowManager {
                             last_focused_floating_hwnd,
                         );
 
-                        let mut floats_to_raise = Vec::with_capacity(window_idx_pairs.len());
+                        // Snapshot the workspace's own floats (the whole floating
+                        // list, focus included) before the mutable borrow ends; the
+                        // reveal below stacks every non-focused overlay window
+                        // beneath the remembered focus.
+                        let floats = window_idx_pairs
+                            .iter()
+                            .map(|(_, window)| **window)
+                            .collect::<Vec<_>>();
+
+                        // Show the workspace's floating windows, the focused window
+                        // last so it tops the layer. The z-order itself is set by the
+                        // reveal below: the remembered focus is raised on top FIRST,
+                        // then every other overlay window is inserted directly below
+                        // it, so no other float or pin can flash above the focused
+                        // window while the overlay is being revealed.
                         for (_, window) in window_idx_pairs.iter() {
                             let window = **window;
                             if to_focus.is_some_and(|w| w.hwnd == window.hwnd) {
                                 continue;
                             }
                             window.restore();
-                            floats_to_raise.push(window);
                         }
 
-                        if let Some(focused_window) = &to_focus {
-                            // The focused window should be the last one raised to make sure it is
-                            // on top
+                        if let Some(focused_window) = to_focus {
                             focused_window.restore();
-                            ApplyWorker::raise_above_active(vec![*focused_window]);
                         }
 
-                        // Raise the rest of the workspace's floating windows on the apply
-                        // worker so a Not Responding window can never block the
-                        // window-manager thread while toggling the layer.
-                        ApplyWorker::raise_above_active(floats_to_raise);
-
-                        // Show the monitor's pinned windows from other workspaces alongside
-                        // this workspace's own floating windows. Their deterministic z-order
-                        // is fixed by the layer re-stack (`enforce_layer_stack`) at the end
-                        // of this arm.
+                        // Show the monitor's pinned windows from other workspaces
+                        // alongside this workspace's own floating windows. They join
+                        // the overlay's band below the floats: the reveal inserts them
+                        // beneath the working floats, underneath the remembered focus.
                         let own_hwnds = workspace
                             .floating_windows()
                             .iter()
@@ -1543,8 +1547,8 @@ impl WindowManager {
                         }
 
                         // Hoist the monocle window so the workspace borrow ends here,
-                        // before the monitor borrows taken by the focus step and the
-                        // final layer re-stack (`enforce_layer_stack`).
+                        // before the monitor borrows taken by the reveal and the
+                        // terminal activation.
                         let monocle_window = workspace
                             .monocle_container
                             .as_ref()
@@ -1553,10 +1557,10 @@ impl WindowManager {
 
                         // If there are no floating windows to restore, focus the desktop
                         // instead so that lowering the monocle window does not trigger an
-                        // auto-focus.
-                        if let Some(window) = to_focus {
-                            window.focus(mouse_follows_focus)?;
-                        } else {
+                        // auto-focus. When the layer remembers a float to restore, leave the
+                        // foreground untouched here: the single terminal activation happens
+                        // once the whole layer stack has settled at the end of this arm.
+                        if to_focus.is_none() {
                             WindowsApi::raise_and_focus_window(WindowsApi::desktop_window()?)?;
                         }
 
@@ -1565,133 +1569,121 @@ impl WindowManager {
                         // position. Posted to the apply worker ahead of the layer re-stack
                         // below so the FIFO order lowers it before the overlay raises.
                         if let Some(window) = monocle_window {
-                            tracing::info!(
-                                hwnd = window.hwnd,
-                                "Tiling->Floating: lowering monocle window",
-                            );
                             ApplyWorker::lower(vec![window]);
                         }
 
-                        // Deterministically re-assert the whole layer stack using the
-                        // same synchronous re-stacker that workspace/monitor switches
-                        // rely on: base (tiled) windows are raised, then the floating
-                        // windows above them, then the focused top-layer window on top
-                        // of the pinned band, with ignored windows demoted last. This
-                        // is independent of the transient TopMost-band raise used for
-                        // the instantaneous effect above, so the overlay is guaranteed
-                        // to sit above the tiling base as long as this call succeeds.
-                        self.focused_monitor()
-                            .ok_or_eyre("there is no monitor")?
-                            .enforce_layer_stack()?;
+                        // Deterministically reveal the floating overlay with the remembered focus
+                        // strictly on top. Every overlay raise goes through the apply
+                        // worker FIFO and never activates a window, so the only
+                        // foreground change of the whole toggle is the single
+                        // activation enqueued below after this reveal.
+                        if let Some(focused_window) = to_focus {
+                            let monitor =
+                                self.focused_monitor().ok_or_eyre("there is no monitor")?;
+                            monitor.apply_pin_visibility()?;
 
-                        // Deterministically re-assert foreground on the remembered
-                        // float AFTER the whole layer stack has settled. Windows can
-                        // otherwise leave the foreground on a pinned band window that
-                        // ended up at the top of the managed stack (e.g. because the
-                        // application re-asserts its own TopMost state), which both
-                        // steals the keyboard focus from the last-used float AND
-                        // records the pin as the last-used float for the next toggle.
-                        if let Ok(foreground) = WindowsApi::foreground_window() {
-                            tracing::info!(
-                                foreground,
-                                "Tiling->Floating: foreground before last-used-float re-assert"
-                            );
+                            // Separate the always-on-top pins (kept in the persistent
+                            // TopMost band above the whole overlay) from the normal
+                            // pinned band that joins the floats below the focus.
+                            let pins = monitor
+                                .pinned_windows()
+                                .into_iter()
+                                .filter(|window| window.is_window())
+                                .collect::<Vec<_>>();
+                            let (always_on_top_pins, normal_pins): (Vec<Window>, Vec<Window>) =
+                                pins.iter().partition(|window| {
+                                    monitor.is_pinned_always_on_top(window.hwnd)
+                                });
+
+                            // Demote app-reasserted TopMost state out of the band ahead
+                            // of the raises so a sticky TopMost float or pin cannot sit
+                            // above the focused window once the reveal lands.
+                            let topmost_batch = normal_pins
+                                .iter()
+                                .chain(floats.iter())
+                                .copied()
+                                .collect::<Vec<_>>();
+                            ApplyWorker::clear_topmost(topmost_batch);
+
+                            // The remembered focus is raised above the base FIRST, so
+                            // it is the first overlay window on screen and can never be
+                            // outrun by the reveal.
+                            ApplyWorker::raise_above_active(vec![focused_window]);
+
+                            // Every other overlay window is then inserted directly
+                            // BELOW the focused window: normal pins first, then the
+                            // working floats, so the band reads focused -> floats ->
+                            // pins and no window is ever raised above the remembered
+                            // focus mid-reveal.
+                            for window in normal_pins
+                                .iter()
+                                .filter(|window| window.hwnd != focused_window.hwnd)
+                            {
+                                ApplyWorker::raise_below(*window, focused_window);
+                            }
+                            for window in floats
+                                .iter()
+                                .filter(|window| window.hwnd != focused_window.hwnd)
+                            {
+                                ApplyWorker::raise_below(*window, focused_window);
+                            }
+
+                            // Always-on-top pins re-asserted last so they top the
+                            // whole overlay, mirroring the layer re-stack.
+                            ApplyWorker::make_topmost(always_on_top_pins);
+                        } else {
+                            // No overlay to reveal (no remembered or ring focus, i.e.
+                            // no floating windows on the layer): keep the deterministic
+                            // layer re-stack which also applies the pin visibility pass.
+                            self.focused_monitor()
+                                .ok_or_eyre("there is no monitor")?
+                                .enforce_layer_stack()?;
                         }
+
+                        // Deterministically re-assert foreground on the remembered float as the
+                        // FINAL operation of this toggle, enqueued on the apply worker
+                        // after the overlay reveal it posted above. Running the
+                        // activation on the worker FIFO means it happens once every
+                        // raise/lower/demote of the toggle has physically settled, so
+                        // Windows can never bounce the foreground onto a window whose
+                        // raise landed last. A synchronous activation issued here would
+                        // race those in-flight SetWindowPos operations and flash the
+                        // foreground across the floating windows before the layer
+                        // settles.
                         if let Some(window) = to_focus {
-                            match WindowsApi::raise_and_focus_window(window.hwnd) {
-                                Ok(()) => tracing::info!(
-                                    hwnd = window.hwnd,
-                                    "Tiling->Floating: re-asserted foreground on last used float"
-                                ),
-                                Err(error) => tracing::warn!(
-                                    hwnd = window.hwnd,
-                                    "could not re-assert foreground on last used float: {error}"
-                                ),
-                            }
-                            if let Ok(foreground) = WindowsApi::foreground_window() {
-                                tracing::info!(
-                                    foreground,
-                                    "Tiling->Floating: foreground after re-assert"
-                                );
-                            }
-                        }
-
-                        // DIAGNOSTIC: dump the top-to-bottom top-level z-order (own
-                        // floating, tiling base, pinned, and anything else that ended
-                        // up in the way) so the layer result is observable in the
-                        // RUST_LOG output. Remove once the toggle reliably raises
-                        // every floating window.
-                        {
-                            let workspace = self.focused_workspace()?;
-                            let float_hwnds = workspace
-                                .floating_windows()
-                                .iter()
-                                .map(|window| window.hwnd)
-                                .collect::<HashSet<_>>();
-                            let base_hwnds = workspace
-                                .containers()
-                                .iter()
-                                .filter_map(|container| container.focused_window())
-                                .map(|window| window.hwnd)
-                                .collect::<HashSet<_>>();
-                            let pinned_hwnds = self
-                                .focused_monitor()
-                                .map(|monitor| monitor.pinned_windows())
-                                .unwrap_or_default()
-                                .iter()
-                                .map(|window| window.hwnd)
-                                .collect::<HashSet<_>>();
-                            let mut zorder_hwnds = Vec::new();
-                            WindowsApi::enum_windows(
-                                Some(crate::windows_callbacks::enum_all_visible_window),
-                                &mut zorder_hwnds as *mut Vec<isize> as isize,
-                            )?;
-                            for hwnd in zorder_hwnds {
-                                let role = if float_hwnds.contains(&hwnd) {
-                                    "float"
-                                } else if base_hwnds.contains(&hwnd) {
-                                    "base"
-                                } else if pinned_hwnds.contains(&hwnd) {
-                                    "pin"
-                                } else {
-                                    "other"
-                                };
-                                let is_topmost =
-                                    WindowsApi::is_topmost_window(hwnd).unwrap_or(false);
-                                tracing::info!(
-                                    hwnd,
-                                    role,
-                                    is_topmost,
-                                    title = Window::from(hwnd).title().unwrap_or_default(),
-                                    exe = Window::from(hwnd).exe().unwrap_or_default(),
-                                    "Tiling->Floating: z-order (top to bottom)",
-                                );
+                            ApplyWorker::raise_and_focus_hwnd(window.hwnd);
+                            if mouse_follows_focus {
+                                WindowsApi::center_cursor_in_rect(&WindowsApi::window_rect(
+                                    window.hwnd,
+                                )?)?;
                             }
                         }
                     }
                     WorkspaceLayer::Floating => {
-                        {
+                        // The base layer was never moved during the toggle, so it needs
+                        // no restoration. Decide which tiling window will take the
+                        // foreground, but do not activate it yet: the activation is
+                        // deferred to the end of the arm as the final apply-worker
+                        // operation, so the foreground changes only once the floating
+                        // overlay has actually been lowered and the single activation
+                        // cannot be bounced by an in-flight SetWindowPos.
+                        let focus_target = {
                             let workspace = self.focused_workspace_mut()?;
                             workspace.layer = WorkspaceLayer::Tiling;
                             workspace.layer_lock = false;
 
-                            // The base layer was never moved during the toggle, so it needs no
-                            // restoration. Focus the tiling window before lowering the floating
-                            // overlay so that managed windows no longer have keyboard focus while
-                            // the lowers are performed. This prevents Windows from auto-focusing
-                            // and reverting the layer.
-                            if let Some(monocle) = &workspace.monocle_container {
-                                if let Some(window) = monocle.focused_window() {
-                                    window.raise()?;
-                                    window.focus(mouse_follows_focus)?;
-                                }
-                            } else if let Some(window) = workspace
-                                .focused_container()
-                                .and_then(|container| container.focused_window())
+                            if let Some(monocle) = &workspace.monocle_container
+                                && let Some(window) = monocle.focused_window()
                             {
-                                window.focus(mouse_follows_focus)?;
+                                window.raise()?;
+                                Some(window.hwnd)
+                            } else {
+                                workspace
+                                    .focused_container()
+                                    .and_then(|container| container.focused_window())
+                                    .map(|window| window.hwnd)
                             }
-                        }
+                        };
 
                         // Fully switch back to the base layer: lower the entire floating
                         // overlay (this workspace's floating windows along with the pinned
@@ -1699,16 +1691,15 @@ impl WindowManager {
                         // intact tiling base without raising any tiled window.
                         self.lower_floating_overlay()?;
 
-                        let workspace = self.focused_workspace()?;
-                        tracing::info!(
-                            container_windows = workspace
-                                .containers()
-                                .iter()
-                                .flat_map(|c| c.windows())
-                                .count(),
-                            floating_count = workspace.floating_windows().len(),
-                            "Floating->Tiling: post-toggle workspace state",
-                        );
+                        // Restore the foreground on the tiling target as the physically
+                        // final operation of the toggle, after the overlay lowers above
+                        // have been applied by the worker FIFO.
+                        if let Some(hwnd) = focus_target {
+                            if mouse_follows_focus {
+                                WindowsApi::center_cursor_in_rect(&WindowsApi::window_rect(hwnd)?)?;
+                            }
+                            ApplyWorker::raise_and_focus_hwnd(hwnd);
+                        }
                     }
                 };
 

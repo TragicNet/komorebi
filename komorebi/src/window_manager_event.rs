@@ -32,6 +32,26 @@ pub enum WindowManagerEvent {
     TitleUpdate(WinEvent, Window),
 }
 
+impl WindowManagerEvent {
+    /// Whether this event may be dropped when the winevent channel is
+    /// saturated. Events that drive incremental state the window manager
+    /// cannot reconstruct from Win32 probes - foreground tracking, the managed
+    /// window set and visibility - must never be dropped: losing a
+    /// FocusChange leaves the WM with a stale view of the foreground (focus
+    /// seemingly never lands on the raised window). Only the noisy
+    /// positional/title events are safe to drop under an event storm.
+    pub const fn drop_allowed(self) -> bool {
+        matches!(
+            self,
+            WindowManagerEvent::LocationChange(..)
+                | WindowManagerEvent::MoveResizeStart(..)
+                | WindowManagerEvent::MoveResizeEnd(..)
+                | WindowManagerEvent::MouseCapture(..)
+                | WindowManagerEvent::TitleUpdate(..)
+        )
+    }
+}
+
 impl Display for WindowManagerEvent {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
