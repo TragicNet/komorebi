@@ -2728,8 +2728,14 @@ if (!(Get-Process komorebi-bar -ErrorAction SilentlyContinue))
             | SocketMessage::IdentifyBorderOverflowApplication(_, _) => {}
         };
 
-        // Update list of known_hwnds and their monitor/workspace index pair
-        self.update_known_hwnds();
+        // Update the list of known_hwnds and their monitor/workspace index pair.
+        // This rebuilds the entire hwnd map, so only do it when the command
+        // actually changed the state; every topology-touching command (managing,
+        // unmanaging, moving or closing a window) also flips the compared state
+        // via window membership in workspaces.
+        if initial_state.has_been_modified(self.as_ref()) {
+            self.update_known_hwnds();
+        }
 
         notify_subscribers(
             Notification {

@@ -1208,8 +1208,24 @@ impl WindowManager {
             window.center(&self.focused_monitor_work_area()?, true)?;
         }
 
-        // Update list of known_hwnds and their monitor/workspace index pair
-        self.update_known_hwnds();
+        // Update list of known_hwnds and their monitor/workspace index pair. This
+        // rebuilds the entire hwnd map and can write it out to disk, so only do it
+        // when the event can change how windows map onto monitors and workspaces;
+        // events such as focus changes, title updates, cloaks or mouse captures
+        // never alter the mapping.
+        if matches!(
+            event,
+            WindowManagerEvent::Destroy(..)
+                | WindowManagerEvent::Unmanage(_)
+                | WindowManagerEvent::Hide(..)
+                | WindowManagerEvent::Minimize(..)
+                | WindowManagerEvent::Show(..)
+                | WindowManagerEvent::Manage(_)
+                | WindowManagerEvent::Uncloak(..)
+                | WindowManagerEvent::MoveResizeEnd(..)
+        ) {
+            self.update_known_hwnds();
+        }
 
         // Skip the payload state construction and serialization entirely when
         // no bar/subscriber is connected; this avoids deep-cloning and JSON
