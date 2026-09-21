@@ -394,8 +394,9 @@ struct NotifyPipeline {
     /// Holds the newest state-change notification still waiting to be
     /// delivered when the only subscribers opted into `filter_state_changes`.
     /// Such subscribers ignore the per-event payload and only react to "the
-    /// state changed", so latest-wins collapses a burst of state dumps into a
-    /// single delivery instead of queuing every single one of them.
+    /// state changed", so first-wins collapses a burst of state dumps into a
+    /// single delivery (and a single `State` build) instead of queuing every
+    /// single one of them.
     latest_state: Arc<Mutex<Option<NotifyEnvelope>>>,
 }
 
@@ -427,7 +428,12 @@ fn publisher_loop(rx: Receiver<NotifyEnvelope>, latest_state: Arc<Mutex<Option<N
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         }
 
-        if let Some(envelope) = latest_state.lock().take() {
+        // Take the coalesced notification before delivering so the cell is not
+        // held while doing I/O; the latest-state and subscription locks are
+        // never held at the same time anywhere, keeping the lock ordering
+        // simple and deadlock-free.
+        let envelope = latest_state.lock().take();
+        if let Some(envelope) = envelope {
             deliver_notification(envelope);
         }
     }
@@ -536,11 +542,12 @@ fn deliver_notification(envelope: NotifyEnvelope) {
 }
 
 pub fn notify_subscribers(
-    notification: Notification,
+    event: NotificationEvent,
     state_has_been_modified: bool,
+    build_state: impl FnOnce() -> State,
 ) -> eyre::Result<()> {
     let is_override_event = matches!(
-        notification.event,
+        event,
         NotificationEvent::Socket(SocketMessage::AddSubscriberSocket(_))
             | NotificationEvent::Socket(SocketMessage::AddSubscriberSocketWithOptions(_, _))
             | NotificationEvent::Socket(SocketMessage::Theme(_))
@@ -550,12 +557,16 @@ pub fn notify_subscribers(
             | NotificationEvent::WindowManager(WindowManagerEvent::Uncloak(_, _))
     );
 
-    // Fast path: nobody is listening. This also lets the callers skip building
-    // the payload `State` entirely.
+    // Fast path: nobody is listening. The payload `State` is only ever built
+    // from `build_state` once it is certain it will actually be sent, avoiding
+    // a deep clone (with live Win32 window probes) on every event.
     if SUBSCRIPTION_SOCKETS.lock().is_empty() && SUBSCRIPTION_PIPES.lock().is_empty() {
         return Ok(());
     }
 
+    // Note: both subscription locks are only held briefly here, and never
+    // together with the latest-state lock, to keep the lock ordering with the
+    // publisher thread deadlock-free.
     let sockets = SUBSCRIPTION_SOCKETS.lock();
     let all_filter_state_changes = !sockets.is_empty() && SUBSCRIPTION_PIPES.lock().is_empty() && {
         let options = SUBSCRIPTION_SOCKET_OPTIONS.lock();
@@ -567,14 +578,15 @@ pub fn notify_subscribers(
                 .filter_state_changes
         })
     };
+    drop(sockets);
+
+    let pipeline = &*NOTIFY_PIPELINE;
 
     if !state_has_been_modified && !is_override_event && all_filter_state_changes {
         // Every subscriber opted into the state-change filter and the state
         // has not changed; nothing would be delivered, so skip entirely.
         return Ok(());
     }
-
-    let pipeline = &*NOTIFY_PIPELINE;
 
     if is_override_event {
         // An override is always delivered immediately with a fresh full state,
@@ -584,10 +596,19 @@ pub fn notify_subscribers(
     }
 
     if !is_override_event && state_has_been_modified && all_filter_state_changes {
-        // Coalesce: keep only the newest state dump waiting for the filter,
-        // replacing the previously pending one instead of growing the queue.
-        *pipeline.latest_state.lock() = Some(NotifyEnvelope {
-            notification,
+        // Coalesce, first-wins: build the payload only when no state dump is
+        // already pending for the filter, and keep that older one instead of
+        // replacing it. A burst of state changes therefore collapses to a
+        // single build and delivery rather than one full state clone per event.
+        let mut latest_state = pipeline.latest_state.lock();
+        if latest_state.is_some() {
+            return Ok(());
+        }
+        *latest_state = Some(NotifyEnvelope {
+            notification: Notification {
+                event,
+                state: build_state(),
+            },
             state_has_been_modified,
             is_override: false,
         });
@@ -595,7 +616,10 @@ pub fn notify_subscribers(
     }
 
     let envelope = NotifyEnvelope {
-        notification,
+        notification: Notification {
+            event,
+            state: build_state(),
+        },
         state_has_been_modified,
         is_override: is_override_event,
     };

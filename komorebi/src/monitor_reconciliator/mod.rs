@@ -2,7 +2,6 @@
 
 use crate::DISPLAY_INDEX_PREFERENCES;
 use crate::DUPLICATE_MONITOR_SERIAL_IDS;
-use crate::Notification;
 use crate::NotificationEvent;
 use crate::WORKSPACE_MATCHING_RULES;
 use crate::WindowManager;
@@ -989,11 +988,9 @@ where
         }
 
         notify_subscribers(
-            Notification {
-                event: NotificationEvent::Monitor(notification),
-                state: wm.as_ref().into(),
-            },
+            NotificationEvent::Monitor(notification),
             initial_state.has_been_modified(&wm),
+            || wm.as_ref().into(),
         )?;
     }
 

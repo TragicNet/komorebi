@@ -120,14 +120,12 @@ fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result<()>
             let window = Window::from(*hwnd);
             if crate::has_subscribers() {
                 notify_subscribers(
-                    crate::Notification {
-                        event: NotificationEvent::WindowManager(WindowManagerEvent::Destroy(
-                            WinEvent::ObjectDestroy,
-                            window,
-                        )),
-                        state: wm.as_ref().into(),
-                    },
+                    NotificationEvent::WindowManager(WindowManagerEvent::Destroy(
+                        WinEvent::ObjectDestroy,
+                        window,
+                    )),
                     true,
+                    || wm.as_ref().into(),
                 )?;
             }
         }

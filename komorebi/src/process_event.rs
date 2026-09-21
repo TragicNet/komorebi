@@ -17,7 +17,6 @@ use crate::DefaultLayout;
 use crate::FLOATING_APPLICATIONS;
 use crate::HIDDEN_HWNDS;
 use crate::Layout;
-use crate::Notification;
 use crate::NotificationEvent;
 use crate::PINNED_FLOATING_APPLICATIONS;
 use crate::REGEX_IDENTIFIERS;
@@ -198,13 +197,11 @@ impl WindowManager {
                         "notifying subscribers that we have left komorebi's associated virtual desktop"
                     );
                     notify_subscribers(
-                        Notification {
-                            event: NotificationEvent::VirtualDesktop(
-                                VirtualDesktopNotification::LeftAssociatedVirtualDesktop,
-                            ),
-                            state: self.as_ref().into(),
-                        },
+                        NotificationEvent::VirtualDesktop(
+                            VirtualDesktopNotification::LeftAssociatedVirtualDesktop,
+                        ),
                         true,
+                        || self.as_ref().into(),
                     )?;
 
                     return Ok(());
@@ -220,13 +217,11 @@ impl WindowManager {
                         "notifying subscribers that we are back on komorebi's associated virtual desktop"
                     );
                     notify_subscribers(
-                        Notification {
-                            event: NotificationEvent::VirtualDesktop(
-                                VirtualDesktopNotification::EnteredAssociatedVirtualDesktop,
-                            ),
-                            state: self.as_ref().into(),
-                        },
+                        NotificationEvent::VirtualDesktop(
+                            VirtualDesktopNotification::EnteredAssociatedVirtualDesktop,
+                        ),
                         true,
+                        || self.as_ref().into(),
                     )?;
                 }
             }
@@ -1233,11 +1228,9 @@ impl WindowManager {
         // every single event.
         if has_subscribers() {
             notify_subscribers(
-                Notification {
-                    event: NotificationEvent::WindowManager(event),
-                    state: self.as_ref().into(),
-                },
+                NotificationEvent::WindowManager(event),
                 initial_state.has_been_modified(self.as_ref()),
+                || self.as_ref().into(),
             )?;
         }
 

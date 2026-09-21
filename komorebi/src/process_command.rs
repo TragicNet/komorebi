@@ -33,7 +33,6 @@ use crate::LAYERED_WHITELIST;
 use crate::MANAGE_IDENTIFIERS;
 use crate::MONITOR_INDEX_PREFERENCES;
 use crate::NO_TITLEBAR;
-use crate::Notification;
 use crate::NotificationEvent;
 use crate::OBJECT_NAME_CHANGE_ON_LAUNCH;
 use crate::REMOVE_TITLEBARS;
@@ -2655,7 +2654,7 @@ if (!(Get-Process komorebi-bar -ErrorAction SilentlyContinue))
             SocketMessage::NotificationSchema => {
                 #[cfg(feature = "schemars")]
                 {
-                    let notification = schemars::schema_for!(Notification);
+                    let notification = schemars::schema_for!(crate::Notification);
                     let schema = serde_json::to_string_pretty(&notification)?;
 
                     reply.write_all(schema.as_bytes())?;
@@ -2732,17 +2731,17 @@ if (!(Get-Process komorebi-bar -ErrorAction SilentlyContinue))
         // This rebuilds the entire hwnd map, so only do it when the command
         // actually changed the state; every topology-touching command (managing,
         // unmanaging, moving or closing a window) also flips the compared state
-        // via window membership in workspaces.
-        if initial_state.has_been_modified(self.as_ref()) {
+        // via window membership in workspaces. `state_has_been_modified` is
+        // computed once and reused below to skip notifying subscribers.
+        let state_has_been_modified = initial_state.has_been_modified(self.as_ref());
+        if state_has_been_modified {
             self.update_known_hwnds();
         }
 
         notify_subscribers(
-            Notification {
-                event: NotificationEvent::Socket(message.clone()),
-                state: self.as_ref().into(),
-            },
-            initial_state.has_been_modified(self.as_ref()),
+            NotificationEvent::Socket(message.clone()),
+            state_has_been_modified,
+            || self.as_ref().into(),
         )?;
 
         if force_update_borders {
