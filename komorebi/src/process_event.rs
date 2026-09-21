@@ -851,6 +851,16 @@ impl WindowManager {
                                     if let Some(monitor) = self.focused_monitor_mut() {
                                         monitor.pin_floating_window(hwnd);
                                     }
+
+                                    // Re-homing the new float into the pin set can
+                                    // empty the workspace again (an auto-pinned window
+                                    // never joins the workspace's own windows), so
+                                    // re-evaluate the hide-on-empty visibility to
+                                    // re-hide pins that the workspace update above
+                                    // restored for the now-emptied workspace.
+                                    if let Some(monitor) = self.focused_monitor() {
+                                        monitor.apply_pin_visibility()?;
+                                    }
                                 }
                             } else if let Some(monocle) = &mut workspace.monocle_container {
                                 monocle.add_window(window);

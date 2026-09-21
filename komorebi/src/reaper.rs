@@ -99,6 +99,11 @@ fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result<()>
                         // workspace or the borders. That will already be done when the user
                         // changes to this workspace.
                         workspace.update()?;
+
+                        // Reaping the last window of the focused workspace can make it
+                        // empty, so re-evaluate the pinned hide-on-empty visibility:
+                        // this path bypasses WindowManager::update_focused_workspace.
+                        monitor.apply_pin_visibility()?;
                         update_borders = true;
                     }
                     tracing::info!(

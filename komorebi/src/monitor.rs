@@ -1235,6 +1235,14 @@ impl Monitor {
             .ok_or_eyre("there is no workspace")?
             .update()?;
 
+        // Every update of the focused workspace can change whether it is empty
+        // (a window added, moved away or destroyed), so re-evaluate whether the
+        // monitor's pinned windows should be hidden: pins hide once the focused
+        // workspace loses its last window and are restored once a new window
+        // appears there. Idempotent and a no-op unless the `pinning` config
+        // key's `hide_on_empty_workspaces` option is enabled.
+        self.apply_pin_visibility()?;
+
         Ok(())
     }
 }
@@ -1718,6 +1726,41 @@ mod tests {
             .unwrap()
             .add_container_to_back(Container::default());
         m.apply_pin_visibility().unwrap();
+        assert_eq!(m.pinned_floating, vec![10]);
+
+        HIDE_PINNED_ON_EMPTY_WORKSPACES.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn test_update_focused_workspace_rechecks_pin_visibility() {
+        let mut m = Monitor::new(
+            0,
+            Rect::default(),
+            Rect::default(),
+            "TestMonitor".to_string(),
+            "TestDevice".to_string(),
+            "TestDeviceID".to_string(),
+            Some("TestMonitorID".to_string()),
+        );
+        m.pin_floating_window(10);
+
+        // update_focused_workspace re-evaluates hide-on-empty visibility on
+        // every focused-workspace update (a window added, moved away or
+        // destroyed), so the pin set must survive the pass whether the focused
+        // workspace is empty or populated.
+        HIDE_PINNED_ON_EMPTY_WORKSPACES.store(true, Ordering::SeqCst);
+
+        // Empty focused workspace: the empty-workspace hide pass must not
+        // mutate the pin set.
+        m.update_focused_workspace(None).unwrap();
+        assert_eq!(m.pinned_floating, vec![10]);
+
+        // Populated focused workspace: the restore pass is a no-op for
+        // non-window pin HWNDs and must not mutate the pin set either.
+        m.focused_workspace_mut()
+            .unwrap()
+            .add_container_to_back(Container::default());
+        m.update_focused_workspace(None).unwrap();
         assert_eq!(m.pinned_floating, vec![10]);
 
         HIDE_PINNED_ON_EMPTY_WORKSPACES.store(false, Ordering::SeqCst);
