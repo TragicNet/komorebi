@@ -72,6 +72,7 @@ use windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2;
 use windows::Win32::UI::HiDpi::GetDpiForMonitor;
 use windows::Win32::UI::HiDpi::MDT_EFFECTIVE_DPI;
 use windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext;
+use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
 use windows::Win32::UI::Input::KeyboardAndMouse::INPUT;
 use windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0;
@@ -80,6 +81,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTDOWN;
 use windows::Win32::UI::Input::KeyboardAndMouse::MOUSEEVENTF_LEFTUP;
 use windows::Win32::UI::Input::KeyboardAndMouse::MOUSEINPUT;
 use windows::Win32::UI::Input::KeyboardAndMouse::SendInput;
+use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_LBUTTON;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_MENU;
 use windows::Win32::UI::Shell::DWPOS_FILL;
@@ -94,9 +96,11 @@ use windows::Win32::UI::WindowsAndMessaging::DEV_BROADCAST_DEVICEINTERFACE_W;
 use windows::Win32::UI::WindowsAndMessaging::DeferWindowPos;
 use windows::Win32::UI::WindowsAndMessaging::EndDeferWindowPos;
 use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
+use windows::Win32::UI::WindowsAndMessaging::GA_ROOT;
 use windows::Win32::UI::WindowsAndMessaging::GW_HWNDNEXT;
 use windows::Win32::UI::WindowsAndMessaging::GWL_EXSTYLE;
 use windows::Win32::UI::WindowsAndMessaging::GWL_STYLE;
+use windows::Win32::UI::WindowsAndMessaging::GetAncestor;
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
@@ -1270,6 +1274,13 @@ impl WindowsApi {
         Self::window_from_point(Self::cursor_pos()?)
     }
 
+    /// Top-level window containing `hwnd`: `WindowFromPoint` and similar probes
+    /// return the deepest child under a point, while managed window handles are
+    /// top-level, so probes must be normalized before comparing them.
+    pub fn root_window(hwnd: isize) -> eyre::Result<isize> {
+        unsafe { GetAncestor(HWND(as_ptr!(hwnd)), GA_ROOT) }.process()
+    }
+
     pub fn center_cursor_in_rect(rect: &Rect) -> eyre::Result<()> {
         // A zero-sized or negative rect is a window that has not been
         // positioned yet (or no longer exists); centering the cursor on it
@@ -2029,6 +2040,15 @@ impl WindowsApi {
 
     pub fn lbutton_is_pressed() -> bool {
         let state = unsafe { GetKeyState(i32::from(VK_LBUTTON.0)) };
+        #[allow(clippy::cast_sign_loss)]
+        let actual = (state as u16) & 0x8000;
+        actual != 0
+    }
+
+    /// Whether the Escape key is currently down; used to tell a cancelled
+    /// drag-and-drop from a completed drop when only the completion event fires.
+    pub fn escape_is_pressed() -> bool {
+        let state = unsafe { GetAsyncKeyState(i32::from(VK_ESCAPE.0)) };
         #[allow(clippy::cast_sign_loss)]
         let actual = (state as u16) & 0x8000;
         actual != 0

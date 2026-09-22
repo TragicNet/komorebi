@@ -182,6 +182,27 @@ pub extern "system" fn win_event_hook(
         border_manager::send_notification(Some(hwnd.0 as isize));
     }
 
+    // OLE drag-and-drop: on completion, the drop target is the top-level window
+    // under the cursor (the DRAGDROPEND event carries the *source* hwnd, not the
+    // target). The WM treats the drop as a complete focus transfer to that target
+    // - it is the window the user just interacted with - so focus-driven behaviour
+    // (unfocused-window transparency, workspace layer handling) applies to it. A
+    // drag cancelled with Escape must not steal focus.
+    if matches!(winevent, WinEvent::SystemDragDropEnd) {
+        if !WindowsApi::escape_is_pressed()
+            && let Ok(hwnd) = WindowsApi::window_at_cursor_pos()
+            && let Ok(hwnd) = WindowsApi::root_window(hwnd)
+        {
+            let event = WindowManagerEvent::DragDrop(winevent, Window::from(hwnd));
+
+            if winevent_listener::event_tx().send(event).is_err() {
+                tracing::warn!(event = ?event, "failed to enqueue critical winevent");
+            }
+        }
+
+        return;
+    }
+
     let event_type = match WindowManagerEvent::from_win_event(winevent, window) {
         None => {
             tracing::trace!(

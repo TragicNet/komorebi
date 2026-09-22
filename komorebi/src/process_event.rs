@@ -276,6 +276,23 @@ impl WindowManager {
                 window.focus(false)?;
                 self.has_pending_raise_op = false;
             }
+            WindowManagerEvent::DragDrop(_, window) => {
+                // A completed drop is treated as a full focus transfer to the target window: it
+                // was the surface the user just interacted with. Activating it makes the OS fire
+                // a foreground WinEvent, which the normal FocusChange reconciliation then processes
+                // (focusing the container/float and honouring workspace_layer_focus_behaviour), and
+                // the transparency pass at the end of this event restores its opacity through the
+                // ordinary focused-window rule. Only act on managed windows on the focused
+                // workspace: dropping onto the desktop, taskbar or an unmanaged surface must not
+                // steal focus.
+                if let Ok(should_manage) =
+                    window.should_manage(None, &mut RuleDebug::default())
+                    && should_manage
+                    && self.focused_workspace()?.contains_window(window.hwnd)
+                {
+                    window.focus(false)?;
+                }
+            }
             WindowManagerEvent::Destroy(_, window) | WindowManagerEvent::Unmanage(window) => {
                 // A destroyed/recycled hwnd must never be served the previous
                 // window's cached exe/class from the metadata cache.

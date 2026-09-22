@@ -26,6 +26,7 @@ pub enum WindowManagerEvent {
     MoveResizeStart(WinEvent, Window),
     MoveResizeEnd(WinEvent, Window),
     MouseCapture(WinEvent, Window),
+    DragDrop(WinEvent, Window),
     Manage(Window),
     Unmanage(Window),
     Raise(Window),
@@ -97,6 +98,9 @@ impl Display for WindowManagerEvent {
             Self::MouseCapture(winevent, window) => {
                 write!(f, "MouseCapture (WinEvent: {winevent}, Window: {window})",)
             }
+            Self::DragDrop(winevent, window) => {
+                write!(f, "DragDrop (WinEvent: {winevent}, Window: {window})",)
+            }
             Self::Raise(window) => {
                 write!(f, "Raise (Window: {window})")
             }
@@ -121,6 +125,7 @@ impl WindowManagerEvent {
             | Self::MoveResizeStart(_, window)
             | Self::MoveResizeEnd(_, window)
             | Self::MouseCapture(_, window)
+            | Self::DragDrop(_, window)
             | Self::Raise(window)
             | Self::Manage(window)
             | Self::Unmanage(window)
@@ -145,6 +150,7 @@ impl WindowManagerEvent {
             WindowManagerEvent::MoveResizeStart(_, _) => "MoveResizeStart",
             WindowManagerEvent::MoveResizeEnd(_, _) => "MoveResizeEnd",
             WindowManagerEvent::MouseCapture(_, _) => "MouseCapture",
+            WindowManagerEvent::DragDrop(_, _) => "DragDrop",
             WindowManagerEvent::Manage(_) => "Manage",
             WindowManagerEvent::Unmanage(_) => "Unmanage",
             WindowManagerEvent::Raise(_) => "Raise",
@@ -165,6 +171,7 @@ impl WindowManagerEvent {
             | WindowManagerEvent::MoveResizeStart(event, _)
             | WindowManagerEvent::MoveResizeEnd(event, _)
             | WindowManagerEvent::MouseCapture(event, _)
+            | WindowManagerEvent::DragDrop(event, _)
             | WindowManagerEvent::TitleUpdate(event, _) => Some(event.to_string()),
             WindowManagerEvent::Manage(_)
             | WindowManagerEvent::Unmanage(_)
