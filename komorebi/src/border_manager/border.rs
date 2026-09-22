@@ -267,7 +267,8 @@ fn floating_debug_margin_sizes(tracking_hwnd: isize, rect: Rect) -> Option<(f32,
 
     let hmonitor = WindowsApi::monitor_from_window(tracking_hwnd);
     let monitor = WindowsApi::monitor(hmonitor).ok()?;
-    let safe_area = Window::floating_resize_safe_area(&monitor.work_area_size, rect.right, rect.bottom);
+    let safe_area =
+        Window::floating_resize_safe_area(&monitor.work_area_size, rect.right, rect.bottom);
     let horizontal_margin = (safe_area.left - monitor.work_area_size.left).max(0) as f32;
     let vertical_margin = (safe_area.top - monitor.work_area_size.top).max(0) as f32;
 
@@ -293,7 +294,9 @@ unsafe fn render_floating_debug_margin(
         return;
     };
 
-    let Some((horizontal_margin, vertical_margin)) = floating_debug_margin_sizes(border.tracking_hwnd, rect) else {
+    let Some((horizontal_margin, vertical_margin)) =
+        floating_debug_margin_sizes(border.tracking_hwnd, rect)
+    else {
         return;
     };
 

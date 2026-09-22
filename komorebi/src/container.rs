@@ -185,7 +185,10 @@ impl Container {
         let hidden_hwnds = crate::HIDDEN_HWNDS.lock();
         let all_minimized = self.windows().iter().all(|w| {
             if hidden_hwnds.contains(&w.hwnd) {
-                tracing::debug!(hwnd = w.hwnd, "window is already hidden by komorebi, ignoring");
+                tracing::debug!(
+                    hwnd = w.hwnd,
+                    "window is already hidden by komorebi, ignoring"
+                );
                 return true;
             }
 

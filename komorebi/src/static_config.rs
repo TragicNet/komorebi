@@ -11,11 +11,10 @@ use crate::DEFAULT_RESIZE_DELTA;
 use crate::DEFAULT_WORKSPACE_PADDING;
 use crate::DISPLAY_INDEX_PREFERENCES;
 use crate::FLOATING_APPLICATIONS;
-use crate::PINNED_FLOATING_APPLICATIONS;
 use crate::FLOATING_WINDOW_TOGGLE_ASPECT_RATIO;
 use crate::FloatingLayerBehaviour;
-use crate::HIDING_BEHAVIOUR;
 use crate::HIDE_PINNED_ON_EMPTY_WORKSPACES;
+use crate::HIDING_BEHAVIOUR;
 use crate::IGNORE_IDENTIFIERS;
 use crate::LAYERED_WHITELIST;
 use crate::LAYOUT_DEFAULTS;
@@ -25,6 +24,7 @@ use crate::MONITOR_INDEX_PREFERENCES;
 use crate::NO_TITLEBAR;
 use crate::OBJECT_NAME_CHANGE_ON_LAUNCH;
 use crate::OBJECT_NAME_CHANGE_TITLE_IGNORE_LIST;
+use crate::PINNED_FLOATING_APPLICATIONS;
 use crate::Placement;
 use crate::PredefinedAspectRatio;
 use crate::REGEX_IDENTIFIERS;
@@ -1096,15 +1096,9 @@ impl StaticConfig {
                 .unwrap_or(HidingBehaviour::Cloak);
         }
 
-        window::MINIMUM_HEIGHT.store(
-            self.minimum_window_height.unwrap_or(0),
-            Ordering::SeqCst,
-        );
+        window::MINIMUM_HEIGHT.store(self.minimum_window_height.unwrap_or(0), Ordering::SeqCst);
 
-        window::MINIMUM_WIDTH.store(
-            self.minimum_window_width.unwrap_or(0),
-            Ordering::SeqCst,
-        );
+        window::MINIMUM_WIDTH.store(self.minimum_window_width.unwrap_or(0), Ordering::SeqCst);
 
         if let Some(animations) = &self.animation {
             match &animations.enabled {
@@ -1182,20 +1176,11 @@ impl StaticConfig {
             LAYOUT_DEFAULTS.lock().clear();
         }
 
-        border_manager::BORDER_WIDTH.store(
-            self.border_width.unwrap_or(8),
-            Ordering::SeqCst,
-        );
+        border_manager::BORDER_WIDTH.store(self.border_width.unwrap_or(8), Ordering::SeqCst);
 
-        border_manager::BORDER_OFFSET.store(
-            self.border_offset.unwrap_or(-1),
-            Ordering::SeqCst,
-        );
+        border_manager::BORDER_OFFSET.store(self.border_offset.unwrap_or(-1), Ordering::SeqCst);
 
-        border_manager::BORDER_ENABLED.store(
-            self.border.unwrap_or(true),
-            Ordering::SeqCst,
-        );
+        border_manager::BORDER_ENABLED.store(self.border.unwrap_or(true), Ordering::SeqCst);
 
         if let Some(colours) = &self.border_colours {
             if let Some(single) = colours.single {
@@ -1227,20 +1212,34 @@ impl StaticConfig {
                 border_manager::PINNED.store(u32::from(pinned), Ordering::SeqCst);
             }
         } else {
-            border_manager::FOCUSED
-                .store(u32::from(Colour::Rgb(Rgb::new(66, 165, 245))), Ordering::SeqCst);
-            border_manager::STACK
-                .store(u32::from(Colour::Rgb(Rgb::new(0, 165, 66))), Ordering::SeqCst);
-            border_manager::MONOCLE
-                .store(u32::from(Colour::Rgb(Rgb::new(255, 51, 153))), Ordering::SeqCst);
-            border_manager::FLOATING
-                .store(u32::from(Colour::Rgb(Rgb::new(245, 245, 165))), Ordering::SeqCst);
-            border_manager::UNFOCUSED
-                .store(u32::from(Colour::Rgb(Rgb::new(128, 128, 128))), Ordering::SeqCst);
-            border_manager::UNFOCUSED_LOCKED
-                .store(u32::from(Colour::Rgb(Rgb::new(158, 8, 8))), Ordering::SeqCst);
-            border_manager::PINNED
-                .store(u32::from(Colour::Rgb(Rgb::new(179, 138, 249))), Ordering::SeqCst);
+            border_manager::FOCUSED.store(
+                u32::from(Colour::Rgb(Rgb::new(66, 165, 245))),
+                Ordering::SeqCst,
+            );
+            border_manager::STACK.store(
+                u32::from(Colour::Rgb(Rgb::new(0, 165, 66))),
+                Ordering::SeqCst,
+            );
+            border_manager::MONOCLE.store(
+                u32::from(Colour::Rgb(Rgb::new(255, 51, 153))),
+                Ordering::SeqCst,
+            );
+            border_manager::FLOATING.store(
+                u32::from(Colour::Rgb(Rgb::new(245, 245, 165))),
+                Ordering::SeqCst,
+            );
+            border_manager::UNFOCUSED.store(
+                u32::from(Colour::Rgb(Rgb::new(128, 128, 128))),
+                Ordering::SeqCst,
+            );
+            border_manager::UNFOCUSED_LOCKED.store(
+                u32::from(Colour::Rgb(Rgb::new(158, 8, 8))),
+                Ordering::SeqCst,
+            );
+            border_manager::PINNED.store(
+                u32::from(Colour::Rgb(Rgb::new(179, 138, 249))),
+                Ordering::SeqCst,
+            );
         }
 
         STYLE.store(self.border_style.unwrap_or_default());
@@ -1268,25 +1267,19 @@ impl StaticConfig {
             border_manager::send_notification(None);
         }
 
-        transparency_manager::TRANSPARENCY_ENABLED.store(
-            self.transparency.unwrap_or(false),
-            Ordering::SeqCst,
-        );
+        transparency_manager::TRANSPARENCY_ENABLED
+            .store(self.transparency.unwrap_or(false), Ordering::SeqCst);
 
         transparency_manager::TRANSPARENCY_FLOATING.store(
             self.transparency_floating.unwrap_or(false),
             Ordering::SeqCst,
         );
 
-        transparency_manager::TRANSPARENCY_MONOCLE.store(
-            self.transparency_monocle.unwrap_or(false),
-            Ordering::SeqCst,
-        );
+        transparency_manager::TRANSPARENCY_MONOCLE
+            .store(self.transparency_monocle.unwrap_or(false), Ordering::SeqCst);
 
-        transparency_manager::TRANSPARENCY_ALPHA.store(
-            self.transparency_alpha.unwrap_or(200),
-            Ordering::SeqCst,
-        );
+        transparency_manager::TRANSPARENCY_ALPHA
+            .store(self.transparency_alpha.unwrap_or(200), Ordering::SeqCst);
 
         let mut ignore_identifiers = IGNORE_IDENTIFIERS.lock();
         let mut regex_identifiers = REGEX_IDENTIFIERS.lock();
@@ -1321,7 +1314,11 @@ impl StaticConfig {
                 }
                 all_rules.push(rule.matching_rule());
             }
-            populate_rules(&mut all_rules, &mut floating_applications, &mut regex_identifiers)?;
+            populate_rules(
+                &mut all_rules,
+                &mut floating_applications,
+                &mut regex_identifiers,
+            )?;
         }
 
         manage_identifiers.clear();
@@ -2001,10 +1998,7 @@ impl StaticConfig {
         wm.enforce_workspace_rules()?;
         wm.enforce_stack_rules()?;
 
-        border_manager::BORDER_ENABLED.store(
-            value.border.unwrap_or(true),
-            Ordering::SeqCst,
-        );
+        border_manager::BORDER_ENABLED.store(value.border.unwrap_or(true), Ordering::SeqCst);
 
         wm.window_management_behaviour.current_behaviour =
             value.window_container_behaviour.unwrap_or_default();
@@ -2037,9 +2031,8 @@ impl StaticConfig {
         wm.keep_monocle_on_window_close = value
             .keep_monocle_on_window_close
             .unwrap_or(DEFAULT_KEEP_MONOCLE_ON_WINDOW_CLOSE);
-        wm.workspace_layer_focus_behaviour = value
-            .workspace_layer_focus_behaviour
-            .unwrap_or_default();
+        wm.workspace_layer_focus_behaviour =
+            value.workspace_layer_focus_behaviour.unwrap_or_default();
         wm.work_area_offset = value.global_work_area_offset;
         let prev_focus_follows_mouse = wm.focus_follows_mouse;
         #[allow(deprecated)]
@@ -2307,12 +2300,12 @@ fn handle_asc_file(
 mod tests {
     use std::path::PathBuf;
 
+    use crate::HIDE_PINNED_ON_EMPTY_WORKSPACES;
     use crate::StaticConfig;
     use crate::WorkspaceConfig;
-use crate::core::config_generation::FloatingApplicationRule;
+    use crate::core::config_generation::FloatingApplicationRule;
     use crate::core::config_generation::FloatingApplicationRuleSimple;
     use crate::core::config_generation::MatchingRule;
-    use crate::HIDE_PINNED_ON_EMPTY_WORKSPACES;
     use std::sync::atomic::Ordering;
 
     #[test]
@@ -2420,7 +2413,8 @@ use crate::core::config_generation::FloatingApplicationRule;
 
     #[test]
     fn deserialize_floating_application_rules_as_composite() {
-        let config = serde_json::from_str::<StaticConfig>(r#"
+        let config = serde_json::from_str::<StaticConfig>(
+            r#"
         {
             "floating_applications": [
                 [
@@ -2429,7 +2423,8 @@ use crate::core::config_generation::FloatingApplicationRule;
                 ]
             ]
         }
-        "#)
+        "#,
+        )
         .unwrap();
 
         let rules = config.floating_applications.unwrap();
@@ -2470,7 +2465,8 @@ use crate::core::config_generation::FloatingApplicationRule;
         }
         "#;
         let config =
-            serde_json::from_str::<crate::core::asc::ApplicationSpecificConfiguration>(asc).unwrap();
+            serde_json::from_str::<crate::core::asc::ApplicationSpecificConfiguration>(asc)
+                .unwrap();
 
         use crate::core::asc::AscApplicationRulesOrSchema;
 
@@ -2478,7 +2474,10 @@ use crate::core::config_generation::FloatingApplicationRule;
             AscApplicationRulesOrSchema::AscApplicationRules(rules) => {
                 let floating = rules.floating.as_ref().unwrap();
                 assert_eq!(floating.len(), 1);
-                assert!(matches!(floating[0], FloatingApplicationRule::Composite(..)));
+                assert!(matches!(
+                    floating[0],
+                    FloatingApplicationRule::Composite(..)
+                ));
             }
             AscApplicationRulesOrSchema::Schema(_) => panic!("expected rules"),
         }
@@ -2506,10 +2505,7 @@ use crate::core::config_generation::FloatingApplicationRule;
 
         // Optional nested option may be omitted
         let config = serde_json::from_str::<StaticConfig>(r#"{ "pinning": {} }"#).unwrap();
-        assert_eq!(
-            config.pinning.unwrap().hide_on_empty_workspaces,
-            None
-        );
+        assert_eq!(config.pinning.unwrap().hide_on_empty_workspaces, None);
 
         // Enabling the option stores it into the global the monitors read
         let mut config = serde_json::from_str::<StaticConfig>(

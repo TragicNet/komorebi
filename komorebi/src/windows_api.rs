@@ -127,10 +127,9 @@ use windows::Win32::UI::WindowsAndMessaging::REGISTER_NOTIFICATION_FLAGS;
 use windows::Win32::UI::WindowsAndMessaging::RealGetWindowClassW;
 use windows::Win32::UI::WindowsAndMessaging::RegisterClassW;
 use windows::Win32::UI::WindowsAndMessaging::RegisterDeviceNotificationW;
-use windows::Win32::UI::WindowsAndMessaging::SMTO_ABORTIFHUNG;
 use windows::Win32::UI::WindowsAndMessaging::SET_WINDOW_POS_FLAGS;
-use windows::Win32::UI::WindowsAndMessaging::SendMessageTimeoutW;
 use windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD;
+use windows::Win32::UI::WindowsAndMessaging::SMTO_ABORTIFHUNG;
 use windows::Win32::UI::WindowsAndMessaging::SPI_GETACTIVEWINDOWTRACKING;
 use windows::Win32::UI::WindowsAndMessaging::SPI_GETFOREGROUNDLOCKTIMEOUT;
 use windows::Win32::UI::WindowsAndMessaging::SPI_SETACTIVEWINDOWTRACKING;
@@ -147,6 +146,7 @@ use windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE;
 use windows::Win32::UI::WindowsAndMessaging::SWP_SHOWWINDOW;
 use windows::Win32::UI::WindowsAndMessaging::SYSTEM_PARAMETERS_INFO_ACTION;
 use windows::Win32::UI::WindowsAndMessaging::SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS;
+use windows::Win32::UI::WindowsAndMessaging::SendMessageTimeoutW;
 use windows::Win32::UI::WindowsAndMessaging::SetCursorPos;
 use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 use windows::Win32::UI::WindowsAndMessaging::SetLayeredWindowAttributes;
@@ -566,15 +566,12 @@ impl WindowsApi {
     ) -> eyre::Result<()> {
         let hwnd = HWND(as_ptr!(hwnd));
 
-        let mut flags = SetWindowPosition::NO_ACTIVATE
-            | SetWindowPosition::NO_SEND_CHANGING;
+        let mut flags = SetWindowPosition::NO_ACTIVATE | SetWindowPosition::NO_SEND_CHANGING;
 
         if silent {
-            flags |= SetWindowPosition::NO_REDRAW
-                | SetWindowPosition::DEFER_ERASE;
+            flags |= SetWindowPosition::NO_REDRAW | SetWindowPosition::DEFER_ERASE;
         } else {
-            flags |= SetWindowPosition::NO_COPY_BITS
-                | SetWindowPosition::FRAME_CHANGED;
+            flags |= SetWindowPosition::NO_COPY_BITS | SetWindowPosition::FRAME_CHANGED;
         }
 
         // If the request is to place the window on top, then HWND_TOP will take
@@ -1640,7 +1637,9 @@ impl WindowsApi {
         const LOG_COOLDOWN: Duration = Duration::from_secs(10);
 
         let now = Instant::now();
-        let mut last_skip_log = LAST_SKIP_LOG.get_or_init(|| Mutex::new(HashMap::new())).lock();
+        let mut last_skip_log = LAST_SKIP_LOG
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock();
         if let Some(&last) = last_skip_log.get(&hwnd)
             && now.duration_since(last) < LOG_COOLDOWN
         {

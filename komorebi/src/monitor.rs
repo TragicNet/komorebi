@@ -1472,24 +1472,14 @@ mod tests {
         // Source workspace keeps the remaining stack [1] and the single container [2]
         assert_eq!(m.focused_workspace_idx(), 0);
         assert_eq!(m.focused_workspace().unwrap().containers().len(), 2);
-        let source_stack = m
-            .focused_workspace()
-            .unwrap()
-            .containers()
-            .front()
-            .unwrap();
+        let source_stack = m.focused_workspace().unwrap().containers().front().unwrap();
         assert_eq!(source_stack.windows().len(), 1);
         assert!(source_stack.contains_window(1));
 
         // Target workspace has only the focused window [0]
         m.focus_workspace(1).unwrap();
         assert_eq!(m.focused_workspace().unwrap().containers().len(), 1);
-        let moved = m
-            .focused_workspace()
-            .unwrap()
-            .containers()
-            .front()
-            .unwrap();
+        let moved = m.focused_workspace().unwrap().containers().front().unwrap();
         assert_eq!(moved.windows().len(), 1);
         assert!(moved.contains_window(0));
     }
@@ -1586,17 +1576,29 @@ mod tests {
     #[test]
     fn test_ignored_window_candidate_excludes_managed_windows() {
         // Unmanaged normal / fullscreen / widget windows are candidates.
-        assert!(Monitor::is_ignored_window_candidate(false, true, false, false));
-        assert!(Monitor::is_ignored_window_candidate(false, false, true, false));
-        assert!(Monitor::is_ignored_window_candidate(false, false, false, true));
+        assert!(Monitor::is_ignored_window_candidate(
+            false, true, false, false
+        ));
+        assert!(Monitor::is_ignored_window_candidate(
+            false, false, true, false
+        ));
+        assert!(Monitor::is_ignored_window_candidate(
+            false, false, false, true
+        ));
 
         // A managed window (e.g. a browser that dropped its caption during
         // HTML5 fullscreen) must never enter the ignored window layer.
-        assert!(!Monitor::is_ignored_window_candidate(true, false, true, false));
-        assert!(!Monitor::is_ignored_window_candidate(true, true, false, false));
+        assert!(!Monitor::is_ignored_window_candidate(
+            true, false, true, false
+        ));
+        assert!(!Monitor::is_ignored_window_candidate(
+            true, true, false, false
+        ));
 
         // System shell surfaces stay excluded.
-        assert!(!Monitor::is_ignored_window_candidate(false, false, false, false));
+        assert!(!Monitor::is_ignored_window_candidate(
+            false, false, false, false
+        ));
     }
 
     #[test]
@@ -1604,10 +1606,7 @@ mod tests {
         // Games / unmanaged application windows can always be moved by the
         // manual `toggle-ignored-window-layer` command.
         let is_widget = false;
-        assert!(Monitor::should_auto_demote_predicate(
-            is_widget,
-            false
-        ));
+        assert!(Monitor::should_auto_demote_predicate(is_widget, false));
         assert!(Monitor::should_auto_demote_predicate(is_widget, true));
 
         // Non-topmost widgets (e.g. Rainmeter meters) can still be toggled above
@@ -1630,7 +1629,9 @@ mod tests {
 
         // Outside the stabilization window the game keeps its foreground:
         // stealing it there makes the game randomly lose focus during gameplay.
-        assert!(!Monitor::should_steal_ignored_window_foreground(false, false));
+        assert!(!Monitor::should_steal_ignored_window_foreground(
+            false, false
+        ));
     }
 
     #[test]

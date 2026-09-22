@@ -1957,7 +1957,12 @@ mod tests {
     use super::*;
 
     fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
-        Rect { left, top, right, bottom }
+        Rect {
+            left,
+            top,
+            right,
+            bottom,
+        }
     }
 
     #[test]
@@ -1965,19 +1970,39 @@ mod tests {
         let monitor = rect(0, 0, 1920, 1080);
 
         assert!(rect_covers_monitor_rect(&monitor, &monitor, 0));
-        assert!(rect_covers_monitor_rect(&rect(0, 0, 1920, 1080), &monitor, FULLSCREEN_EDGE_TOLERANCE));
+        assert!(rect_covers_monitor_rect(
+            &rect(0, 0, 1920, 1080),
+            &monitor,
+            FULLSCREEN_EDGE_TOLERANCE
+        ));
 
         // Edge coordinate slightly inside the monitor still counts as coverage.
-        assert!(rect_covers_monitor_rect(&rect(0, 0, 1916, 1080), &monitor, 8));
+        assert!(rect_covers_monitor_rect(
+            &rect(0, 0, 1916, 1080),
+            &monitor,
+            8
+        ));
     }
 
     #[test]
     fn test_rect_covers_monitor_rect_when_window_does_not_match() {
         let monitor = rect(0, 0, 1920, 1080);
 
-        assert!(!rect_covers_monitor_rect(&rect(10, 10, 1910, 1070), &monitor, 8));
-        assert!(!rect_covers_monitor_rect(&rect(0, 0, 1920, 500), &monitor, 8));
-        assert!(!rect_covers_monitor_rect(&rect(0, 0, 1920, 1050), &monitor, 8));
+        assert!(!rect_covers_monitor_rect(
+            &rect(10, 10, 1910, 1070),
+            &monitor,
+            8
+        ));
+        assert!(!rect_covers_monitor_rect(
+            &rect(0, 0, 1920, 500),
+            &monitor,
+            8
+        ));
+        assert!(!rect_covers_monitor_rect(
+            &rect(0, 0, 1920, 1050),
+            &monitor,
+            8
+        ));
     }
 
     #[test]
@@ -1986,9 +2011,21 @@ mod tests {
         // absolute screen coordinates.
         let monitor = rect(1280, 0, 3840, 1440);
 
-        assert!(rect_covers_monitor_rect(&rect(1280, 0, 3840, 1440), &monitor, 8));
-        assert!(rect_covers_monitor_rect(&rect(1280, 0, 3832, 1440), &monitor, 8));
-        assert!(!rect_covers_monitor_rect(&rect(1280, 0, 3830, 1440), &monitor, 8));
+        assert!(rect_covers_monitor_rect(
+            &rect(1280, 0, 3840, 1440),
+            &monitor,
+            8
+        ));
+        assert!(rect_covers_monitor_rect(
+            &rect(1280, 0, 3832, 1440),
+            &monitor,
+            8
+        ));
+        assert!(!rect_covers_monitor_rect(
+            &rect(1280, 0, 3830, 1440),
+            &monitor,
+            8
+        ));
     }
 
     #[test]

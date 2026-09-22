@@ -81,12 +81,9 @@ fn is_transparency_blacklisted(
         return false;
     }
 
-    if let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) = (
-        window.title(),
-        window.exe(),
-        window.class(),
-        window.path(),
-    ) {
+    if let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) =
+        (window.title(), window.exe(), window.class(), window.path())
+    {
         should_act(
             &title,
             &exe_name,
@@ -462,7 +459,9 @@ mod tests {
             let workspace = m.workspaces_mut().back_mut().unwrap();
 
             for hwnd in *workspace_floats {
-                workspace.floating_windows_mut().push_back(Window::from(*hwnd));
+                workspace
+                    .floating_windows_mut()
+                    .push_back(Window::from(*hwnd));
             }
 
             m.workspaces_mut().push_back(Workspace::default());

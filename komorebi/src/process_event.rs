@@ -23,6 +23,7 @@ use crate::REGEX_IDENTIFIERS;
 use crate::TRAY_AND_MULTI_WINDOW_IDENTIFIERS;
 use crate::VirtualDesktopNotification;
 use crate::Window;
+use crate::WorkspaceLayerFocusBehaviour;
 use crate::apply_worker::ApplyWorker;
 use crate::border_manager;
 use crate::border_manager::BORDER_OFFSET;
@@ -42,7 +43,6 @@ use crate::window_manager_event::WindowManagerEvent;
 use crate::windows_api::WindowsApi;
 use crate::winevent::WinEvent;
 use crate::workspace::WorkspaceLayer;
-use crate::WorkspaceLayerFocusBehaviour;
 
 #[tracing::instrument]
 pub fn listen_for_events(wm: Arc<Mutex<WindowManager>>) {
@@ -285,8 +285,7 @@ impl WindowManager {
                 // ordinary focused-window rule. Only act on managed windows on the focused
                 // workspace: dropping onto the desktop, taskbar or an unmanaged surface must not
                 // steal focus.
-                if let Ok(should_manage) =
-                    window.should_manage(None, &mut RuleDebug::default())
+                if let Ok(should_manage) = window.should_manage(None, &mut RuleDebug::default())
                     && should_manage
                     && self.focused_workspace()?.contains_window(window.hwnd)
                 {
@@ -571,10 +570,7 @@ impl WindowManager {
                                     Layout::Default(DefaultLayout::Scrolling)
                                 ) && !self.focused_workspace()?.containers().is_empty()
                                 {
-                                    self.update_focused_workspace(
-                                        self.mouse_follows_focus,
-                                        false,
-                                    )?;
+                                    self.update_focused_workspace(self.mouse_follows_focus, false)?;
                                 }
                             }
                         }
@@ -798,7 +794,8 @@ impl WindowManager {
                             // previous one whose HWND died.
                             let (should_float, should_pin) = {
                                 let floating_applications = FLOATING_APPLICATIONS.lock();
-                                let pinned_floating_applications = PINNED_FLOATING_APPLICATIONS.lock();
+                                let pinned_floating_applications =
+                                    PINNED_FLOATING_APPLICATIONS.lock();
                                 let regex_identifiers = REGEX_IDENTIFIERS.lock();
                                 let mut should_float = false;
                                 let mut should_pin = false;
@@ -860,8 +857,10 @@ impl WindowManager {
                                 workspace.layer = WorkspaceLayer::Floating;
                                 if center_spawned_floats {
                                     let mut floating_window = window;
-                                    floating_window
-                                        .center(&workspace.globals.work_area, placement.should_resize())?;
+                                    floating_window.center(
+                                        &workspace.globals.work_area,
+                                        placement.should_resize(),
+                                    )?;
                                 }
                                 self.update_focused_workspace(false, false)?;
 

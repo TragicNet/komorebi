@@ -514,9 +514,7 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
                                                 .floating_windows()
                                                 .iter()
                                                 .any(|w| w.hwnd == b.tracking_hwnd)
-                                            && !pins
-                                                .iter()
-                                                .any(|w| w.hwnd == b.tracking_hwnd)
+                                            && !pins.iter().any(|w| w.hwnd == b.tracking_hwnd)
                                     },
                                 )?;
                             } else {

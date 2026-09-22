@@ -673,10 +673,7 @@ impl Workspace {
         }
 
         if let Some(hwnd) = self.last_focused_floating_hwnd {
-            tracing::debug!(
-                hwnd,
-                "restore: using last_focused_floating_hwnd"
-            );
+            tracing::debug!(hwnd, "restore: using last_focused_floating_hwnd");
             self.focus_floating_window_by_hwnd(hwnd);
         }
 
@@ -952,8 +949,7 @@ impl Workspace {
                                     )
                                     .is_some();
 
-                                    if should_remove_titlebars
-                                        && should_remove_titlebar_for_window
+                                    if should_remove_titlebars && should_remove_titlebar_for_window
                                     {
                                         window.remove_title_bar()?;
                                     } else if should_remove_titlebar_for_window {
@@ -963,7 +959,10 @@ impl Workspace {
                                     // If a window has been unmaximized via toggle-maximize, this block
                                     // will make sure that it is unmaximized via restore_window
                                     if window.is_maximized() && !managed_maximized_window {
-                                        tracing::debug!(hwnd = window.hwnd, "update: restoring maximized window before tiling");
+                                        tracing::debug!(
+                                            hwnd = window.hwnd,
+                                            "update: restoring maximized window before tiling"
+                                        );
                                         WindowsApi::restore_window(window.hwnd);
                                     }
                                 }
@@ -1108,10 +1107,7 @@ impl Workspace {
         }
 
         self.focus_container(container_idx);
-        tracing::debug!(
-            hwnd,
-            "focus_container_by_window: setting last_focused_hwnd"
-        );
+        tracing::debug!(hwnd, "focus_container_by_window: setting last_focused_hwnd");
         self.last_focused_hwnd = Some(hwnd);
 
         Ok(())
@@ -1777,12 +1773,9 @@ impl Workspace {
                 .windows()
                 .iter()
                 .filter(|w| {
-                    let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) = (
-                        w.title(),
-                        w.exe(),
-                        w.class(),
-                        w.path(),
-                    ) else {
+                    let (Ok(title), Ok(exe_name), Ok(class), Ok(path)) =
+                        (w.title(), w.exe(), w.class(), w.path())
+                    else {
                         return false;
                     };
 
@@ -1903,7 +1896,10 @@ impl Workspace {
             }
 
             let Some(target_idx) = self.container_idx_by_id(&target_id) else {
-                tracing::warn!(hwnd, "target container for restack not found; creating a new container");
+                tracing::warn!(
+                    hwnd,
+                    "target container for restack not found; creating a new container"
+                );
                 let mut container = Container::default();
                 container.add_window(window);
                 self.insert_container_at_idx(origin_idx.min(self.containers().len()), container);
@@ -2517,10 +2513,7 @@ impl Workspace {
             .and_then(|c| c.focused_window())
             .map(|w| w.hwnd)
         {
-            tracing::debug!(
-                hwnd,
-                "focus_container: eagerly syncing last_focused_hwnd"
-            );
+            tracing::debug!(hwnd, "focus_container: eagerly syncing last_focused_hwnd");
             self.last_focused_hwnd = Some(hwnd);
         }
     }
