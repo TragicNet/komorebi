@@ -1,4 +1,6 @@
 use std::sync::OnceLock;
+use std::time::Duration;
+use std::time::Instant;
 
 use crossbeam_channel::Sender;
 use crossbeam_channel::unbounded;
@@ -107,16 +109,36 @@ pub enum ApplyOp {
     /// focused. `center_cursor` moves the cursor to the activated window's
     /// rect, on the worker, so the cursor only follows once the activation
     /// actually lands instead of teleporting ahead of the deferred activation.
+    ///
+    /// Command-initiated activations (layer toggles) pass `authoritative`,
+    /// which suppresses the overtaken check while the op is younger than
+    /// [`ACTIVATION_SETTLE_BUDGET`]: the toggle deterministically lands focus
+    /// and the cursor on its intended window even when an external
+    /// focus-follows-mouse daemon (masir, etc.) grabbed the foreground from a
+    /// mid-drain cursor move. Once the budget lapses the strict guard applies
+    /// again, so a stale activation can never steal focus from a genuine
+    /// interaction that happened after the transition settled.
     RaiseAndFocus {
         windows: Vec<CapturedWindow>,
         center_cursor: bool,
         enqueue_foreground: Option<isize>,
+        authoritative: bool,
+        enqueued_at: Instant,
     },
 }
 
 pub struct ApplyWorker;
 
 impl ApplyWorker {
+    /// How long a command-initiated activation (a layer toggle) stays
+    /// authoritative before the strict overtaken check applies again. Longer
+    /// than the typical drain of a toggle's re-stack (raises and the final
+    /// activation land within a few frames) but short enough that a genuinely
+    /// delayed activation can never steal focus from an interaction that
+    /// happened noticeably after the toggle. Mirrors the `suppress_layer_flips`
+    /// settle window used for komorebi-caused focus changes.
+    const ACTIVATION_SETTLE_BUDGET: Duration = Duration::from_millis(300);
+
     fn sender() -> Sender<ApplyOp> {
         static SENDER: OnceLock<Sender<ApplyOp>> = OnceLock::new();
         SENDER
@@ -278,8 +300,19 @@ impl ApplyWorker {
                 windows,
                 center_cursor,
                 enqueue_foreground,
+                authoritative,
+                enqueued_at,
             } => {
                 let mut kept_any = false;
+                // An authoritative activation is honest for the settle budget:
+                // the toggle it belongs to is still transitioning, so a third
+                // window grabbing the foreground during the drain (an external
+                // focus-follows-mouse move) must not silence the toggle's
+                // intended focus and cursor transfer. Past the budget the
+                // strict overtaken check applies so a delayed activation can
+                // never steal focus from a genuine later interaction.
+                let authoritative =
+                    authoritative && enqueued_at.elapsed() < Self::ACTIVATION_SETTLE_BUDGET;
                 for captured in &windows {
                     if !captured.is_still_owned() {
                         tracing::debug!(
@@ -299,7 +332,8 @@ impl ApplyWorker {
                     // releasing it first would steal focus back from a window
                     // the user just chose, so the stale activation is skipped.
                     let current_foreground = WindowsApi::foreground_window().unwrap_or_default();
-                    let overtaken = current_foreground != hwnd
+                    let overtaken = !authoritative
+                        && current_foreground != hwnd
                         && enqueue_foreground
                             .is_some_and(|foreground| current_foreground != foreground);
                     if overtaken {
@@ -377,12 +411,20 @@ impl ApplyWorker {
     /// activation. The activation is skipped entirely if the foreground moved
     /// to a third window while the pass drained, so a stale activation can
     /// never yank focus away from a window the user focused in the meantime.
-    pub fn raise_and_focus_hwnd(hwnd: isize, center_cursor: bool) {
+    ///
+    /// `authoritative` marks command-initiated activations (layer toggles): for
+    /// [`ACTIVATION_SETTLE_BUDGET`] the overtaken check is suppressed so the
+    /// toggle's intended focus and cursor transfer land deterministically even
+    /// when an external focus-follows-mouse daemon grabbed the foreground from
+    /// a mid-drain cursor move. After the budget the strict guard applies again.
+    pub fn raise_and_focus_hwnd(hwnd: isize, center_cursor: bool, authoritative: bool) {
         let enqueue_foreground = WindowsApi::foreground_window().ok();
         Self::enqueue(ApplyOp::RaiseAndFocus {
             windows: Self::capture(vec![Window::from(hwnd)]),
             center_cursor,
             enqueue_foreground,
+            authoritative,
+            enqueued_at: Instant::now(),
         });
     }
 

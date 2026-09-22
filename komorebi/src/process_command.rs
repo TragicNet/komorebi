@@ -25,6 +25,7 @@ use crate::CUSTOM_FFM;
 use crate::DATA_DIR;
 use crate::DISPLAY_INDEX_PREFERENCES;
 use crate::FLOATING_APPLICATIONS;
+use crate::HIDE_PINNED_ON_EMPTY_WORKSPACES;
 use crate::HIDING_BEHAVIOUR;
 use crate::IGNORE_IDENTIFIERS;
 use crate::INITIAL_CONFIGURATION_LOADED;
@@ -59,6 +60,7 @@ use crate::config_generation::WorkspaceMatchingRule;
 use crate::core::ApplicationIdentifier;
 use crate::core::Axis;
 use crate::core::BorderImplementation;
+use crate::core::CycleFocusWindowContent;
 use crate::core::FocusFollowsMouseImplementation;
 use crate::core::Layout;
 use crate::core::LayoutOptions;
@@ -68,7 +70,6 @@ use crate::core::OperationDirection;
 use crate::core::Rect;
 use crate::core::ScrollingLayoutOptions;
 use crate::core::Sizing;
-use crate::core::CycleFocusWindowContent;
 use crate::core::SocketMessage;
 use crate::core::StateQuery;
 use crate::core::WindowContainerBehaviour;
@@ -78,7 +79,6 @@ use crate::core::config_generation::MatchingRule;
 use crate::core::config_generation::MatchingStrategy;
 use crate::current_virtual_desktop;
 use crate::monitor::MonitorInformation;
-use crate::HIDE_PINNED_ON_EMPTY_WORKSPACES;
 use crate::notify_subscribers;
 use crate::stackbar_manager;
 use crate::stackbar_manager::STACKBAR_FONT_FAMILY;
@@ -281,7 +281,8 @@ impl WindowManager {
                         WorkspaceWindowLocation::Floating(window_idx) => {
                             let workspace = self.focused_workspace_mut()?;
                             if workspace.focus_floating_window(window_idx)
-                                && let Some(window) = workspace.floating_windows_mut().get_mut(window_idx)
+                                && let Some(window) =
+                                    workspace.floating_windows_mut().get_mut(window_idx)
                             {
                                 window.focus(self.mouse_follows_focus)?;
                             }
@@ -1474,9 +1475,8 @@ impl WindowManager {
                         }
                         if to_focus.is_none()
                             && let Some(hwnd) = last_focused_floating_hwnd
-                            && let Some(window) = pinned_overlay
-                                .iter()
-                                .find(|window| window.hwnd == hwnd)
+                            && let Some(window) =
+                                pinned_overlay.iter().find(|window| window.hwnd == hwnd)
                         {
                             to_focus = Some(*window);
                             focus_source = "pinned-memory";
@@ -1644,7 +1644,11 @@ impl WindowManager {
                         // foreground across the floating windows before the layer
                         // settles.
                         if let Some(window) = to_focus {
-                            ApplyWorker::raise_and_focus_hwnd(window.hwnd, mouse_follows_focus);
+                            ApplyWorker::raise_and_focus_hwnd(
+                                window.hwnd,
+                                mouse_follows_focus,
+                                true,
+                            );
                         }
                     }
                     WorkspaceLayer::Floating => {
@@ -1690,7 +1694,7 @@ impl WindowManager {
                         // overlay band raises above have been applied by the
                         // worker FIFO.
                         if let Some(hwnd) = focus_target {
-                            ApplyWorker::raise_and_focus_hwnd(hwnd, mouse_follows_focus);
+                            ApplyWorker::raise_and_focus_hwnd(hwnd, mouse_follows_focus, true);
                         }
                     }
                 };
@@ -2580,8 +2584,7 @@ if (!(Get-Process komorebi-bar -ErrorAction SilentlyContinue))
                 transparency_manager::TRANSPARENCY_ALPHA.store(alpha, Ordering::SeqCst);
             }
             SocketMessage::ToggleTransparencyFloating => {
-                let current =
-                    transparency_manager::TRANSPARENCY_FLOATING.load(Ordering::SeqCst);
+                let current = transparency_manager::TRANSPARENCY_FLOATING.load(Ordering::SeqCst);
                 transparency_manager::TRANSPARENCY_FLOATING.store(!current, Ordering::SeqCst);
             }
             SocketMessage::TransparencyFloating(enable) => {
