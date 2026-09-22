@@ -1271,6 +1271,13 @@ impl WindowsApi {
     }
 
     pub fn center_cursor_in_rect(rect: &Rect) -> eyre::Result<()> {
+        // A zero-sized or negative rect is a window that has not been
+        // positioned yet (or no longer exists); centering the cursor on it
+        // would teleport it to the top-left corner of the work area.
+        if rect.right <= 0 || rect.bottom <= 0 {
+            return Ok(());
+        }
+
         Self::set_cursor_pos(rect.left + (rect.right / 2), rect.top + (rect.bottom / 2))
     }
 

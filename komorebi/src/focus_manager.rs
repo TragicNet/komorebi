@@ -3,23 +3,14 @@
 use crossbeam_channel::Receiver;
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
-use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use crate::Window;
 use crate::WindowManager;
+use crate::core::Rect;
 use crate::windows_api::WindowsApi;
 
-pub struct Notification(isize);
-
-impl Deref for Notification {
-    type Target = isize;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
+pub struct Notification(pub isize, pub Option<Rect>);
 
 static CHANNEL: OnceLock<(Sender<Notification>, Receiver<Notification>)> = OnceLock::new();
 
@@ -37,9 +28,14 @@ fn event_rx() -> Receiver<Notification> {
 
 // Currently this should only be used for async focus updates, such as
 // when an animation finishes and we need to focus to set the cursor
-// position if the user has mouse follows focus enabled
-pub fn send_notification(hwnd: isize) {
-    if event_tx().try_send(Notification(hwnd)).is_err() {
+// position if the user has mouse follows focus enabled. The rect is the
+// final position the animated window was commanded to (not a live
+// GetWindowRect read): the animation's last position op is posted
+// asynchronously, so by the time this thread acts the window may not have
+// physically arrived yet, and centering the cursor on a live read would
+// land it at the stale start position (typically the top-left spawn spot).
+pub fn send_notification(hwnd: isize, rect: Option<Rect>) {
+    if event_tx().try_send(Notification(hwnd, rect)).is_err() {
         tracing::warn!("channel is full; dropping notification")
     }
 }
@@ -66,7 +62,7 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
 
     for notification in receiver {
         let mouse_follows_focus = wm.lock().mouse_follows_focus;
-        let hwnd = *notification;
+        let (hwnd, rect) = (notification.0, notification.1);
 
         // The notification was sent for a hwnd that was the foreground at the
         // time; by the time this thread acts on it the window may have been
@@ -81,7 +77,25 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
             continue;
         }
 
-        let _ = Window::from(hwnd).focus(mouse_follows_focus);
+        // Only sync the cursor when the animated window is still the OS
+        // foreground. The animation it tracked finished under it; if the
+        // foreground has since moved to another window (a real user or app
+        // focus change), re-raising and re-focusing would steal focus back
+        // from the window that was just chosen.
+        if !WindowsApi::foreground_window()
+            .map(|foreground| foreground == hwnd)
+            .unwrap_or(false)
+        {
+            tracing::debug!(
+                hwnd,
+                "focus manager skipping notification: animated window is no longer the foreground"
+            );
+            continue;
+        }
+
+        if mouse_follows_focus && let Some(rect) = rect {
+            let _ = WindowsApi::center_cursor_in_rect(&rect);
+        }
     }
 
     Ok(())

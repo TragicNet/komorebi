@@ -249,14 +249,14 @@ impl MovementRenderDispatcher {
             .unwrap_or(false)
     }
 
-    fn finalise_managers(&self) {
+    fn finalise_managers(&self, final_rect: Rect) {
         if ANIMATION_MANAGER
             .lock()
             .count_in_progress(MovementRenderDispatcher::PREFIX)
             == 0
         {
             if WindowsApi::foreground_window().unwrap_or_default() == self.hwnd {
-                focus_manager::send_notification(self.hwnd)
+                focus_manager::send_notification(self.hwnd, Some(final_rect))
             }
 
             stackbar_manager::STACKBAR_TEMPORARILY_DISABLED.store(false, Ordering::SeqCst);
@@ -458,7 +458,7 @@ impl RenderDispatcher for MovementRenderDispatcher {
             let _ = ghost.dispose();
         }
 
-        self.finalise_managers();
+        self.finalise_managers(self.target_rect);
 
         Ok(())
     }
@@ -484,7 +484,7 @@ impl RenderDispatcher for MovementRenderDispatcher {
             let _ = ghost.dispose();
         }
 
-        self.finalise_managers();
+        self.finalise_managers(target);
     }
 
     /// The render slot was taken away (force-release) and a newer animation
