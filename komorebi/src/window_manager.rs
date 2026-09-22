@@ -1542,38 +1542,63 @@ impl WindowManager {
             "received stop command, restoring all hidden windows and terminating process"
         );
 
-        let state = &State::from(&*self);
-        std::fs::write(
-            temp_dir().join("komorebi.state.json"),
-            serde_json::to_string_pretty(&state)?,
-        )?;
+        self.shutdown(ignore_restore);
+
+        std::process::exit(0)
+    }
+
+    /// Best-effort tear-down shared by every shutdown path (the `stop` socket
+    /// command and the Ctrl-C handler). Each step is logged and allowed to fail
+    /// independently so that a failure - e.g. a full disk preventing the state
+    /// dump - can never prevent the hidden windows from being restored.
+    #[tracing::instrument(skip(self))]
+    pub fn shutdown(&mut self, ignore_restore: bool) {
+        let dumped_state = temp_dir().join("komorebi.state.json");
+        let state = State::from(&*self);
+        match serde_json::to_string_pretty(&state) {
+            Ok(json) => {
+                if let Err(error) = std::fs::write(&dumped_state, json) {
+                    tracing::error!(
+                        "failed to write state to {}: {error}",
+                        dumped_state.to_string_lossy()
+                    );
+                }
+            }
+            Err(error) => tracing::error!("failed to serialize state on shutdown: {error}"),
+        }
 
         ANIMATION_ENABLED_PER_ANIMATION.lock().clear();
         ANIMATION_ENABLED_GLOBAL.store(false, Ordering::SeqCst);
-        self.restore_all_windows(ignore_restore)?;
+
+        if let Err(error) = self.restore_all_windows(ignore_restore) {
+            tracing::error!("failed to restore all windows on shutdown: {error}");
+        }
+
         AnimationEngine::wait_for_all_animations();
 
         // Only disable Windows' native active window tracking if komorebi's own
         // (deprecated) focus follows mouse implementation is active; if an
         // external integration such as masir is managing this system-wide
         // setting, leave it untouched.
-        if self.focus_follows_mouse
-            == Some(FocusFollowsMouseImplementation::Windows)
+        if self.focus_follows_mouse == Some(FocusFollowsMouseImplementation::Windows)
+            && let Err(error) = WindowsApi::disable_focus_follows_mouse()
         {
-            WindowsApi::disable_focus_follows_mouse()?;
+            tracing::error!("failed to disable focus follows mouse on shutdown: {error}");
         }
 
         let sockets = SUBSCRIPTION_SOCKETS.lock();
         for path in (*sockets).values() {
-            if let Ok(stream) = UnixStream::connect(path) {
-                stream.shutdown(Shutdown::Both)?;
+            if let Ok(stream) = UnixStream::connect(path)
+                && let Err(error) = stream.shutdown(Shutdown::Both)
+            {
+                tracing::error!("failed to shut down subscription socket: {error}");
             }
         }
 
         let socket = DATA_DIR.join("komorebi.sock");
-        let _ = std::fs::remove_file(socket);
-
-        std::process::exit(0)
+        if let Err(error) = std::fs::remove_file(socket) {
+            tracing::error!("failed to remove komorebi.sock on shutdown: {error}");
+        }
     }
 
     #[tracing::instrument(skip(self))]
@@ -1589,8 +1614,10 @@ impl WindowManager {
             for workspace in monitor.workspaces_mut() {
                 if let Some(monocle) = &workspace.monocle_container {
                     for window in monocle.windows() {
-                        if matches!(border_implementation, BorderImplementation::Windows) {
-                            window.remove_accent()?;
+                        if matches!(border_implementation, BorderImplementation::Windows)
+                            && let Err(error) = window.remove_accent()
+                        {
+                            tracing::warn!("failed to remove accent on restore: {error}");
                         }
                     }
                 }
@@ -1607,16 +1634,22 @@ impl WindowManager {
                         )
                         .is_some();
 
-                        if should_remove_titlebar_for_window {
-                            window.add_title_bar()?;
+                        if should_remove_titlebar_for_window
+                            && let Err(error) = window.add_title_bar()
+                        {
+                            tracing::warn!("failed to add title bar on restore: {error}");
                         }
 
-                        if known_transparent_hwnds.contains(&window.hwnd) {
-                            window.opaque()?;
+                        if known_transparent_hwnds.contains(&window.hwnd)
+                            && let Err(error) = window.opaque()
+                        {
+                            tracing::warn!("failed to make window opaque on restore: {error}");
                         }
 
-                        if matches!(border_implementation, BorderImplementation::Windows) {
-                            window.remove_accent()?;
+                        if matches!(border_implementation, BorderImplementation::Windows)
+                            && let Err(error) = window.remove_accent()
+                        {
+                            tracing::warn!("failed to remove accent on restore: {error}");
                         }
 
                         if !ignore_restore {

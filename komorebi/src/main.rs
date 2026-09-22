@@ -9,7 +9,6 @@
 
 use std::env::temp_dir;
 use std::fmt;
-use std::net::Shutdown;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -19,11 +18,7 @@ use std::time::Duration;
 use clap::Parser;
 use clap::ValueEnum;
 use color_eyre::eyre;
-use color_eyre::eyre::bail;
 use crossbeam_utils::Backoff;
-use komorebi::animation::ANIMATION_ENABLED_GLOBAL;
-use komorebi::animation::ANIMATION_ENABLED_PER_ANIMATION;
-use komorebi::animation::AnimationEngine;
 use komorebi::replace_env_in_path;
 use parking_lot::Mutex;
 #[cfg(feature = "deadlock_detection")]
@@ -36,7 +31,6 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::layer::SubscriberExt;
-use uds_windows::UnixStream;
 
 use komorebi::CUSTOM_FFM;
 use komorebi::DATA_DIR;
@@ -53,7 +47,6 @@ use komorebi::process_event::listen_for_events;
 use komorebi::process_movement::listen_for_movements;
 use komorebi::reaper;
 use komorebi::stackbar_manager;
-use komorebi::state::State;
 use komorebi::static_config::StaticConfig;
 use komorebi::theme_manager;
 use komorebi::transparency_manager;
@@ -214,24 +207,30 @@ fn main() -> eyre::Result<()> {
     let opts: Opts = Opts::parse();
     CUSTOM_FFM.store(opts.focus_follows_mouse, Ordering::SeqCst);
 
-    let mut set_foreground_window_retries = 5;
     let mut set_foreground_window_succeeded = false;
 
+    // File logging worker guard has to have an assignment in the main fn to work
+    let (_guard, _color_guard) = setup(opts.log_level)?;
+
     let process_id = WindowsApi::current_process_id();
-    while set_foreground_window_retries > 0 && !set_foreground_window_succeeded {
+    let backoff = Backoff::new();
+    for _ in 0..5 {
         match WindowsApi::allow_set_foreground_window(process_id) {
             Ok(_) => {
                 set_foreground_window_succeeded = true;
+                break;
             }
             Err(error) => {
                 tracing::error!("{error}");
-                set_foreground_window_retries -= 1;
+                backoff.snooze();
             }
         }
+    }
 
-        if set_foreground_window_retries == 0 {
-            bail!("failed call to AllowSetForegroundWindow after 5 retries");
-        }
+    if !set_foreground_window_succeeded {
+        tracing::warn!(
+            "failed call to AllowSetForegroundWindow after 5 retries; proceeding without the foreground-grant permission"
+        );
     }
 
     WindowsApi::set_process_dpi_awareness_context()?;
@@ -240,7 +239,13 @@ fn main() -> eyre::Result<()> {
     SESSION_ID.store(session_id, Ordering::SeqCst);
 
     let mut system = sysinfo::System::new();
-    system.refresh_processes(ProcessesToUpdate::All, true);
+    // The single-instance check only needs the executable path of every
+    // komorebi.exe; skipping CPU sampling keeps this startup scan cheap.
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::everything().without_cpu(),
+    );
 
     let matched_procs: Vec<&Process> = system.processes_by_name("komorebi.exe".as_ref()).collect();
 
@@ -261,9 +266,6 @@ fn main() -> eyre::Result<()> {
             std::process::exit(1);
         }
     }
-
-    // File logging worker guard has to have an assignment in the main fn to work
-    let (_guard, _color_guard) = setup(opts.log_level)?;
 
     WindowsApi::foreground_lock_timeout()?;
 
@@ -362,9 +364,7 @@ fn main() -> eyre::Result<()> {
 
     let (ctrlc_sender, ctrlc_receiver) = crossbeam_channel::bounded(1);
     ctrlc::set_handler(move || {
-        ctrlc_sender
-            .send(())
-            .expect("could not send signal on ctrl-c channel");
+        let _ = ctrlc_sender.try_send(());
     })?;
 
     ctrlc_receiver
@@ -373,32 +373,12 @@ fn main() -> eyre::Result<()> {
 
     tracing::error!("received ctrl-c, restoring all hidden windows and terminating process");
 
-    let state = State::from(&*wm.lock());
-    std::fs::write(dumped_state, serde_json::to_string_pretty(&state)?)?;
+    wm.lock().shutdown(false);
 
-    ANIMATION_ENABLED_PER_ANIMATION.lock().clear();
-    ANIMATION_ENABLED_GLOBAL.store(false, Ordering::SeqCst);
-    wm.lock().restore_all_windows(false)?;
-    AnimationEngine::wait_for_all_animations();
-
-    // Only disable Windows' native active window tracking if komorebi's own
-    // (deprecated) focus follows mouse implementation is active; if an
-    // external integration such as masir is managing this system-wide
-    // setting, leave it untouched.
-    if wm.lock().focus_follows_mouse == Some(komorebi::FocusFollowsMouseImplementation::Windows)
-    {
-        WindowsApi::disable_focus_follows_mouse()?;
-    }
-
-    let sockets = komorebi::SUBSCRIPTION_SOCKETS.lock();
-    for path in (*sockets).values() {
-        if let Ok(stream) = UnixStream::connect(path) {
-            stream.shutdown(Shutdown::Both)?;
-        }
-    }
-
-    let socket = DATA_DIR.join("komorebi.sock");
-    let _ = std::fs::remove_file(socket);
+    // Drop the non-blocking logging worker guards so their buffers flush
+    // before the forced exit.
+    drop(_guard);
+    drop(_color_guard);
 
     std::process::exit(130);
 }
