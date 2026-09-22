@@ -16,16 +16,24 @@ container; windows stack/cycle in a container slot in a ring. Windows live on la
 
 ## DEVELOPMENT
 - Toolchain: stable Rust (`rust-toolchain.toml`); formatting via `cargo +nightly fmt`.
-- `just` (`justfile`) is the command entry point: `just fmt`, `just build`, `just run <target>`, `just dev`.
+- `just` (`justfile`) is the command entry point: `just fmt`, `just build`, `just run <target>`, `just dev`
+  (`just run`/`just dev`/`just debug|info|trace` launch the app — user-run only, never execute).
 - Build: `cargo +stable build --package komorebi --locked --release --no-default-features`.
   Dev builds drop the `schemars` default feature for speed.
-- Run locally: `just dev` stops any running komorebi, builds `release-fast`, launches.
-  `just debug|info|trace <target>` sets `RUST_LOG`. Only one `komorebi.exe` may run.
+- Formatting scope — ONLY files you modified: `cargo +nightly fmt -- <file.rs>` (args after `--` are
+  forwarded to rustfmt; run it from the touched file's crate dir, e.g. `komorebi/`, so cargo resolves the
+  right package; it picks up `rustfmt.toml`). Enumerate dirty files with `git status --short -- '*.rs'`.
+  Never run repo-wide `cargo +nightly fmt` / `just fmt`: a newer nightly can reformat pristine code
+  outside your change.
+- Run: NEVER launch the WM/target or touch a running instance — no `just dev`, `just run`,
+  `just debug|info|trace`, `komorebic stop`, or launching `komorebi.exe` (only one `komorebi.exe` may
+  run). Build your change, then the user runs it manually.
 - For debugging or verification workflows, load the relevant skill: `win32-debug` (debugging,
   live inspection, crash recovery) or `repo-verify` (verification, frozen surfaces, commits).
 
 ## VERIFICATION
-- Format: `cargo +nightly fmt` (`just fmt` also runs clippy + prettier on CI YAML).
+- Format: dirty-file rustfmt only (see DEVELOPMENT); don't run `cargo +nightly fmt` / `just fmt` on the
+  whole tree (`just fmt` also runs clippy + prettier on CI YAML).
 - Lint: `cargo +stable clippy` must be clean (CI builds with `-Dwarnings`). Auto-fix: `just fix`.
 - Tests: `cargo test`. Unit tests live in in-crate `#[cfg(test)]` modules (window_manager.rs,
   process_event.rs, monitor.rs, ...). Only meaningful on Windows. Never claim tests pass
@@ -79,4 +87,7 @@ container; windows stack/cycle in a container slot in a ring. Windows live on la
 - Load the relevant skill before deep work: `win32-debug` before debugging komorebi behavior,
   `repo-verify` before verification or frozen-surface changes.
 - Keep changes minimal and scoped; no drive-by refactors.
+- Format only the files you modified (`cargo +nightly fmt -- <file>`), never the whole tree.
+- Never run or restart the app/daemon (`just dev`, `just run`, `just debug|info|trace`, `komorebic stop`)
+  — the user launches it manually.
 - Be careful with git: no commit/push/force-push unless explicitly asked.
