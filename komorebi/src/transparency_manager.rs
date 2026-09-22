@@ -28,6 +28,9 @@ pub static TRANSPARENCY_ALPHA: AtomicU8 = AtomicU8::new(200);
 pub static TRANSPARENCY_MONOCLE: AtomicBool = AtomicBool::new(false);
 pub static TRANSPARENCY_FLOATING: AtomicBool = AtomicBool::new(false);
 
+// KNOWN_HWNDS is a persistent set of the hwnds komorebi currently keeps transparent, so that
+// every window it dimmed - including windows on non-focused (hidden) workspaces - can be
+// restored to opaque when transparency is toggled off or the WM exits.
 static KNOWN_HWNDS: OnceLock<Mutex<Vec<isize>>> = OnceLock::new();
 
 pub struct Notification;
@@ -37,6 +40,18 @@ static CHANNEL: OnceLock<(Sender<Notification>, Receiver<Notification>)> = OnceL
 pub fn known_hwnds() -> Vec<isize> {
     let known = KNOWN_HWNDS.get_or_init(|| Mutex::new(Vec::new())).lock();
     known.iter().copied().collect()
+}
+
+/// Record that `hwnd` is transparent so it can be restored on disable; idempotent.
+fn track_transparent_hwnd(known: &mut Vec<isize>, hwnd: isize) {
+    if !known.contains(&hwnd) {
+        known.push(hwnd);
+    }
+}
+
+/// Drop `hwnd` from the restore set once it has been made opaque.
+fn untrack_opaque_hwnd(known: &mut Vec<isize>, hwnd: isize) {
+    known.retain(|&h| h != hwnd);
 }
 
 pub fn channel() -> &'static (Sender<Notification>, Receiver<Notification>) {
@@ -128,16 +143,24 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
 
         let known_hwnds = KNOWN_HWNDS.get_or_init(|| Mutex::new(Vec::new()));
         if !TRANSPARENCY_ENABLED.load_consume() {
-            for hwnd in known_hwnds.lock().iter() {
-                if let Err(error) = Window::from(*hwnd).opaque() {
+            // Restore every window komorebi made transparent, including windows on non-focused
+            // workspaces that were dimmed while their workspace was focused: KNOWN_HWNDS persists
+            // across passes, so this is the full set rather than last pass's focused-workspace set.
+            let hwnds = known_hwnds.lock().clone();
+            for hwnd in hwnds {
+                if !WindowsApi::is_window(hwnd) {
+                    continue;
+                }
+
+                if let Err(error) = Window::from(hwnd).opaque() {
                     tracing::error!("failed to make window {hwnd} opaque: {error}")
                 }
             }
 
+            known_hwnds.lock().clear();
+
             continue 'receiver;
         }
-
-        known_hwnds.lock().clear();
 
         // Decide phase: compute which windows need their transparency state changed. The
         // WindowManager lock is held only while reading state; the OS foreground window and
@@ -170,6 +193,8 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
 
             if let Err(error) = Window::from(hwnd).opaque() {
                 tracing::error!("failed to make window {hwnd} opaque: {error}")
+            } else {
+                untrack_opaque_hwnd(&mut known_hwnds.lock(), hwnd);
             }
         }
 
@@ -192,7 +217,7 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
                     tracing::error!("failed to make unfocused window {hwnd} transparent: {error}")
                 }
                 Ok(..) => {
-                    known_hwnds.lock().push(hwnd);
+                    track_transparent_hwnd(&mut known_hwnds.lock(), hwnd);
                 }
             }
         }
@@ -307,7 +332,7 @@ fn decide_targets(
                         } else {
                             // just in case, this is useful when people are clicking around
                             // on unfocused stackbar tabs
-                            known_hwnds.lock().push(window.hwnd);
+                            track_transparent_hwnd(&mut known_hwnds.lock(), window.hwnd);
                         }
                     }
                 // Otherwise, make it opaque
@@ -315,7 +340,7 @@ fn decide_targets(
                     let focused_window_idx = c.focused_window_idx();
                     for (window_idx, window) in c.windows().iter().enumerate() {
                         if window_idx != focused_window_idx {
-                            known_hwnds.lock().push(window.hwnd);
+                            track_transparent_hwnd(&mut known_hwnds.lock(), window.hwnd);
                         } else {
                             opaque_targets.push(window.hwnd);
                         }
@@ -537,5 +562,49 @@ mod tests {
 
         assert!(transparent.is_empty());
         assert_eq!(opaque, vec![999]);
+    }
+
+    #[test]
+    fn test_track_transparent_hwnd_is_idempotent() {
+        let mut known = Vec::new();
+
+        track_transparent_hwnd(&mut known, 10);
+        track_transparent_hwnd(&mut known, 10);
+        track_transparent_hwnd(&mut known, 20);
+
+        assert_eq!(known, vec![10, 20]);
+    }
+
+    #[test]
+    fn test_untrack_opaque_hwnd_removes_only_target() {
+        let mut known = vec![10, 20, 30];
+
+        untrack_opaque_hwnd(&mut known, 20);
+
+        assert_eq!(known, vec![10, 30]);
+    }
+
+    #[test]
+    fn test_hidden_workspace_window_remains_restorable() {
+        let _guard = StateGuard::enable();
+        // ws0 is focused and holds float 10; ws1 is hidden and holds float 20, which was dimmed
+        // while ws1 was focused earlier and so is already in the restore set.
+        let wm = window_manager_with_floats(&[&[10], &[20]]);
+        let known_hwnds = Mutex::new(vec![20]);
+
+        let (transparent, opaque) = decide_targets(&wm, &known_hwnds, 999, false);
+
+        // Reconcile the restore set with the pass's decisions, as the apply phase does.
+        let mut known = known_hwnds.into_inner();
+        for hwnd in opaque {
+            untrack_opaque_hwnd(&mut known, hwnd);
+        }
+        for hwnd in transparent {
+            track_transparent_hwnd(&mut known, hwnd);
+        }
+
+        // The hidden workspace's dimmed window must still be tracked so that toggling
+        // transparency off restores it to opaque; previously the per-pass clear dropped it.
+        assert!(known.contains(&20));
     }
 }
