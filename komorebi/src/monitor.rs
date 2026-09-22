@@ -309,7 +309,10 @@ impl Monitor {
         }
 
         if workspace.is_empty() {
-            self.reposition_pinned_windows(workspace.layer)?;
+            // Pins are the persistent overlay visible across workspaces, so an
+            // empty workspace keeps them rendered in the overlay band instead
+            // of sinking them to the very bottom of the Z order.
+            self.raise_pinned_windows();
             self.apply_pin_visibility()?;
             return Ok(());
         }
@@ -350,8 +353,33 @@ impl Monitor {
 
         match workspace.layer {
             WorkspaceLayer::Tiling => {
-                // Floating windows form the base, tiled windows the top layer.
-                for window in workspace.floating_windows() {
+                // Pinned windows join the floating base of the managed band:
+                // they are raised first (base of the band) so the working
+                // floats and the tiled layer stack above them, instead of being
+                // sunk to the very bottom of the Z order. The transparent
+                // TopMost-band raise cannot climb a window stuck in the
+                // persistent TopMost band, so the normal pins and the working
+                // floats are demoted out of it before the band raises,
+                // preserving the deterministic ordering.
+                let pins = self
+                    .pinned_windows()
+                    .into_iter()
+                    .filter(|window| window.is_window())
+                    .collect::<Vec<_>>();
+                let (always_on_top_pins, normal_pins): (Vec<Window>, Vec<Window>) = pins
+                    .iter()
+                    .partition(|window| self.is_pinned_always_on_top(window.hwnd));
+                let floats = workspace.floating_windows();
+                let topmost_batch = normal_pins
+                    .iter()
+                    .chain(floats.iter())
+                    .copied()
+                    .collect::<Vec<_>>();
+                ApplyWorker::clear_topmost(topmost_batch);
+                for window in &normal_pins {
+                    raise(window);
+                }
+                for window in floats.iter() {
                     raise(window);
                 }
                 for window in workspace.containers().iter().rev() {
@@ -359,7 +387,9 @@ impl Monitor {
                         raise(window);
                     }
                 }
-                self.reposition_pinned_windows(WorkspaceLayer::Tiling)?;
+                // Raised last so the always-on-top pins top the whole Tiling
+                // layer, exactly like the Floating overlay.
+                ApplyWorker::make_topmost(always_on_top_pins);
             }
             WorkspaceLayer::Floating => {
                 // Tiled windows form the base, then the pinned band, then the
