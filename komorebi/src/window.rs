@@ -986,6 +986,19 @@ impl Window {
         if transparent_enabled.is_some_and(|enabled| *enabled)
             || ANIMATION_ENABLED_GLOBAL.load(Ordering::SeqCst)
         {
+            // Skip redundant animations when the window is already layered at the target alpha.
+            // Every transparency pass re-issues this call for every dimmed window, and a fresh
+            // animation would otherwise spawn a render thread and marshal a SetWindowLongPtrW in
+            // pre_render each time; coalescing to the steady state avoids that churn entirely.
+            let ex_style = self.ex_style()?;
+            if ex_style.contains(ExtendedWindowStyle::LAYERED)
+                && WindowsApi::get_transparent(self.hwnd)
+                    .map(|alpha| alpha == transparency_manager::TRANSPARENCY_ALPHA.load_consume())
+                    .unwrap_or(false)
+            {
+                return Ok(());
+            }
+
             let duration = Duration::from_millis(
                 *ANIMATION_DURATION_PER_ANIMATION
                     .lock()
@@ -1034,6 +1047,14 @@ impl Window {
         if transparent_enabled.is_some_and(|enabled| *enabled)
             || ANIMATION_ENABLED_GLOBAL.load(Ordering::SeqCst)
         {
+            // Skip redundant animations when the window is already opaque (not layered). Every
+            // transparency pass re-issues this call for every focused/pinned window, and the
+            // animated end state only re-removes WS_EX_LAYERED, which a non-layered window
+            // already lacks; short-circuiting avoids spawning a render thread per pass.
+            if !self.ex_style()?.contains(ExtendedWindowStyle::LAYERED) {
+                return Ok(());
+            }
+
             let duration = Duration::from_millis(
                 *ANIMATION_DURATION_PER_ANIMATION
                     .lock()

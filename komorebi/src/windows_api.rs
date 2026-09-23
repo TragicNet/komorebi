@@ -1619,7 +1619,7 @@ impl WindowsApi {
     /// operation. When the window is responding the probe returns almost
     /// instantly; when it is not, we skip the operation entirely rather than
     /// block the caller on a Not Responding window.
-    const WINDOW_THREAD_RESPONSE_TIMEOUT_MS: u32 = 100;
+    pub const WINDOW_THREAD_RESPONSE_TIMEOUT_MS: u32 = 100;
 
     /// Whether a synchronous window operation against `hwnd` should be skipped
     /// because the window's thread is not responding.

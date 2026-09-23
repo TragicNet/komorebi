@@ -129,16 +129,12 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
         // follow-up pass immediately after is enough to pick up any state change.
         while receiver.try_recv().is_ok() {}
 
-        // Settle: if a pass just ran, wait out the remainder of the settle window so a rapid focus
-        // chase (clicking/alt-tabbing across containers) paints the final state instead of flipping
-        // windows transparent/opaque on every intermediate focus event.
-        let elapsed = last_pass.elapsed();
-        if elapsed < SETTLE_DURATION {
-            std::thread::sleep(SETTLE_DURATION - elapsed);
-        }
-        last_pass = Instant::now();
-
         let known_hwnds = KNOWN_HWNDS.get_or_init(|| Mutex::new(Vec::new()));
+
+        // Handle the disabled state before the settle sleep: when transparency is off there is
+        // nothing to coalesce, so restoring any leftover dimmed windows and returning straight
+        // away avoids waking up and sleeping on every event. A restore is also not the kind of
+        // visual flip-flopping the settle window exists to coalesce.
         if !TRANSPARENCY_ENABLED.load_consume() {
             // Restore every window komorebi made transparent, including windows on non-focused
             // workspaces that were dimmed while their workspace was focused: KNOWN_HWNDS persists
@@ -158,6 +154,15 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
 
             continue 'receiver;
         }
+
+        // Settle: if a pass just ran, wait out the remainder of the settle window so a rapid focus
+        // chase (clicking/alt-tabbing across containers) paints the final state instead of flipping
+        // windows transparent/opaque on every intermediate focus event.
+        let elapsed = last_pass.elapsed();
+        if elapsed < SETTLE_DURATION {
+            std::thread::sleep(SETTLE_DURATION - elapsed);
+        }
+        last_pass = Instant::now();
 
         // Decide phase: compute which windows need their transparency state changed. The
         // WindowManager lock is held only while reading state; the OS foreground window and
@@ -188,6 +193,17 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
                 continue;
             }
 
+            // Probe the window's thread before the marshalled SetWindowLongPtrW so one Not
+            // Responding renderer can't stall the rest of the pass; a hung window simply keeps
+            // its current opacity and will be retried on a later pass.
+            if !WindowsApi::is_window_thread_responding(
+                hwnd,
+                WindowsApi::WINDOW_THREAD_RESPONSE_TIMEOUT_MS,
+            ) {
+                tracing::debug!(hwnd, "skipping opacity update for unresponsive window");
+                continue;
+            }
+
             if let Err(error) = Window::from(hwnd).opaque() {
                 tracing::error!("failed to make window {hwnd} opaque: {error}")
             } else {
@@ -209,6 +225,16 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
                 continue;
             }
 
+            // Same responsiveness probe as the opaque loop: a hung thread would otherwise block
+            // the marshalled SetWindowLongPtrW / SetLayeredWindowAttributes calls.
+            if !WindowsApi::is_window_thread_responding(
+                hwnd,
+                WindowsApi::WINDOW_THREAD_RESPONSE_TIMEOUT_MS,
+            ) {
+                tracing::debug!(hwnd, "skipping transparency update for unresponsive window");
+                continue;
+            }
+
             match window.transparent() {
                 Err(error) => {
                     tracing::error!("failed to make unfocused window {hwnd} transparent: {error}")
@@ -218,6 +244,12 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
                 }
             }
         }
+
+        // Prune windows destroyed since they were dimmed: decide_targets never re-emits destroyed
+        // windows as targets, so without this the restore set would grow for the session lifetime.
+        known_hwnds
+            .lock()
+            .retain(|&hwnd| WindowsApi::is_window(hwnd));
     }
 
     Ok(())
@@ -234,6 +266,13 @@ fn decide_targets(
 ) -> (Vec<isize>, Vec<isize>) {
     let mut transparent_targets = Vec::new();
     let mut opaque_targets = Vec::new();
+
+    // Hold the rule-list and restore-set locks once for the whole decision instead of re-locking
+    // per workspace / per window; nothing here re-enters `should_manage()` or re-locks these, so a
+    // single scoped hold is safe under the WM lock.
+    let transparency_blacklist = TRANSPARENCY_BLACKLIST.lock();
+    let regex_identifiers = REGEX_IDENTIFIERS.lock();
+    let mut known = known_hwnds.lock();
 
     // A workspace/monitor switch has just happened on one or more monitors. During the
     // switch's event storm the OS foreground is transient: komorebi activates the new
@@ -274,9 +313,6 @@ fn decide_targets(
                 continue 'workspaces;
             }
 
-            let transparency_blacklist = TRANSPARENCY_BLACKLIST.lock();
-            let regex_identifiers = REGEX_IDENTIFIERS.lock();
-
             // The monocle container is never transparent unless the toggle is enabled and its
             // monitor isn't focused: a monocle workspace is a fullscreen view of a single window,
             // so it is only dimmed when the user is looking at another monitor.
@@ -300,7 +336,10 @@ fn decide_targets(
                 continue 'monitors;
             }
 
-            if is_maximized && !switch_settling {
+            // A maximized foreground window covers its whole monitor, so skip the container pass
+            // for THAT monitor only; other monitors are still visible and their windows must keep
+            // being dimmed/restored. The maximized window itself is forced opaque.
+            if is_maximized && !switch_settling && monitor_idx == focused_monitor_idx {
                 opaque_targets.push(foreground_hwnd);
 
                 continue 'monitors;
@@ -339,7 +378,7 @@ fn decide_targets(
                         } else {
                             // just in case, this is useful when people are clicking around
                             // on unfocused stackbar tabs
-                            track_transparent_hwnd(&mut known_hwnds.lock(), window.hwnd);
+                            track_transparent_hwnd(&mut known, window.hwnd);
                         }
                     }
                 // Otherwise, make it opaque
@@ -347,7 +386,7 @@ fn decide_targets(
                     let focused_window_idx = c.focused_window_idx();
                     for (window_idx, window) in c.windows().iter().enumerate() {
                         if window_idx != focused_window_idx {
-                            track_transparent_hwnd(&mut known_hwnds.lock(), window.hwnd);
+                            track_transparent_hwnd(&mut known, window.hwnd);
                         } else {
                             opaque_targets.push(window.hwnd);
                         }
@@ -610,6 +649,36 @@ mod tests {
 
         assert!(transparent.is_empty());
         assert_eq!(opaque, vec![999]);
+    }
+
+    #[test]
+    fn test_maximized_foreground_skips_only_its_own_monitor() {
+        let _guard = StateGuard::enable();
+        // Monitor 0 is focused and its float 10 is maximized as the foreground; monitor 1 is
+        // still visible and its float 20 must keep being dimmed rather than frozen by the
+        // maximized short-circuit, which historically skipped every monitor.
+        let wm = window_manager_with_two_monitors(&[&[10], &[20]]);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 10, true);
+
+        assert_eq!(transparent, vec![20]);
+        assert!(opaque.contains(&10));
+    }
+
+    #[test]
+    fn test_maximized_foreground_on_unfocused_monitor_dimmed() {
+        let _guard = StateGuard::enable();
+        let mut wm = window_manager_with_two_monitors(&[&[10], &[20]]);
+        wm.focus_monitor(1).unwrap();
+
+        // The foreground (20) is maximized on the focused monitor; monitor 0's float 10 is on
+        // an unfocused monitor and must be dimmed even while the maximized short-circuit holds
+        // for monitor 1.
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 20, true);
+
+        assert!(transparent.contains(&10));
+        assert!(!transparent.contains(&20));
+        assert!(opaque.contains(&20));
     }
 
     #[test]
