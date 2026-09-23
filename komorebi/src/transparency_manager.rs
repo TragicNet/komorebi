@@ -324,6 +324,7 @@ fn decide_targets(
     let focused_monitor_idx = state.focused_monitor_idx();
 
     let global_enabled = TRANSPARENCY_ENABLED.load_consume();
+    let floating_transparency = TRANSPARENCY_FLOATING.load_consume();
 
     'monitors: for (monitor_idx, m) in state.monitors.elements().iter().enumerate() {
         let focused_workspace_idx = m.focused_workspace_idx();
@@ -332,10 +333,24 @@ fn decide_targets(
         // global toggle, and an override on the workspace wins over both.
         let monitor_transparency = m.transparency.unwrap_or(global_enabled);
 
-        // Pinned floating windows stay visible across all workspaces on the
-        // monitor, so they are always kept opaque.
+        // Pinned floating windows stay visible across all workspaces on the monitor, so they
+        // follow the floating transparency toggle like any other floating window: dimmed when
+        // the toggle is enabled, restored opaque otherwise.
         for window in m.pinned_windows() {
-            opaque_targets.push(window.hwnd);
+            let opaque = !monitor_transparency
+                || !floating_transparency
+                || (!switch_settling && window.hwnd == foreground_hwnd)
+                || is_transparency_blacklisted(
+                    &window,
+                    &transparency_blacklist,
+                    &regex_identifiers,
+                );
+
+            if opaque {
+                opaque_targets.push(window.hwnd);
+            } else {
+                transparent_targets.push(window.hwnd);
+            }
         }
 
         'workspaces: for (workspace_idx, ws) in m.workspaces().iter().enumerate() {
@@ -458,8 +473,6 @@ fn decide_targets(
             // Floats are always emitted as a target: when the toggle is off they must be actively
             // restored to opaque, otherwise a float dimmed by a previous pass would stay dimmed
             // (the `visible_windows()` opaque path only runs for non-focused workspaces).
-            let floating_transparency = TRANSPARENCY_FLOATING.load_consume();
-
             for window in ws.floating_windows() {
                 let opaque = !floating_transparency
                     || (!switch_settling && window.hwnd == foreground_hwnd)
@@ -682,11 +695,29 @@ mod tests {
     }
 
     #[test]
-    fn test_pinned_floating_window_stays_opaque() {
+    fn test_pinned_floating_window_dimmed_when_floating_transparency_enabled() {
         let _guard = StateGuard::enable();
         let mut wm = window_manager_with_floats(&[&[10], &[]]);
 
         // Pin float 10 on the monitor, then move focus to ws1 so ws0 is hidden but 10 stays visible.
+        wm.monitors_mut()[0].pin_floating_window(10);
+
+        wm.focused_monitor_mut()
+            .unwrap()
+            .focus_workspace(1)
+            .unwrap();
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert_eq!(transparent, vec![10]);
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_pinned_floating_window_opaque_when_floating_transparency_disabled() {
+        let _guard = StateGuard::enable().disable_floating();
+        let mut wm = window_manager_with_floats(&[&[10], &[]]);
+
         wm.monitors_mut()[0].pin_floating_window(10);
 
         wm.focused_monitor_mut()
