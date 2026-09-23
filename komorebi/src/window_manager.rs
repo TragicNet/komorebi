@@ -239,7 +239,7 @@ impl WindowManager {
 
     #[tracing::instrument(skip(self, state))]
     pub fn apply_state(&mut self, state: State) {
-        let mut can_apply = true;
+        let mut state = state;
 
         let state_monitors_len = state.monitors.elements().len();
         let current_monitors_len = self.monitors.elements().len();
@@ -252,153 +252,190 @@ impl WindowManager {
             return;
         }
 
-        for monitor in state.monitors.elements() {
-            for workspace in monitor.workspaces() {
-                for container in workspace.containers() {
-                    for window in container.windows() {
-                        if window.exe().is_err() {
-                            can_apply = false;
-                            break;
-                        }
-                    }
-                }
-
-                if let Some(window) = workspace.maximized_window
-                    && window.exe().is_err()
-                {
-                    can_apply = false;
-                    break;
-                }
-
-                if let Some(container) = &workspace.monocle_container {
-                    for window in container.windows() {
-                        if window.exe().is_err() {
-                            can_apply = false;
-                            break;
-                        }
-                    }
-                }
-
-                for window in workspace.floating_windows() {
-                    if window.exe().is_err() {
-                        can_apply = false;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if can_apply {
-            tracing::info!(
-                "applying state from {}",
-                temp_dir().join("komorebi.state.json").to_string_lossy()
-            );
-
-            let offset = self.work_area_offset;
-            let mouse_follows_focus = self.mouse_follows_focus;
-            for (monitor_idx, monitor) in self.monitors_mut().iter_mut().enumerate() {
-                let mut focused_workspace = 0;
-                if let Some(state_monitor) = state.monitors.elements().get(monitor_idx) {
-                    monitor
-                        .workspaces_mut()
-                        .resize(state_monitor.workspaces().len(), Workspace::default());
-
-                    for (workspace_idx, workspace) in
-                        monitor.workspaces_mut().iter_mut().enumerate()
-                    {
-                        if let Some(state_workspace) = state_monitor.workspaces().get(workspace_idx)
-                        {
-                            // to make sure padding and layout_options changes get applied for users after a quick restart
-                            let container_padding = workspace.container_padding;
-                            let workspace_padding = workspace.workspace_padding;
-                            let layout_options = workspace.layout_options;
-
-                            *workspace = state_workspace.clone();
-
-                            workspace.container_padding = container_padding;
-                            workspace.workspace_padding = workspace_padding;
-                            workspace.layout_options = layout_options;
-
-                            if state_monitor.focused_workspace_idx() == workspace_idx {
-                                focused_workspace = workspace_idx;
-                            }
-                        }
-                    }
-
-                    // Restore this monitor's pinned floating windows and prune
-                    // any stale pinned HWNDs whose windows no longer exist.
-                    // Validity is checked against the window, not the process:
-                    // `exe()` resolves the process executable, which survives the
-                    // window being destroyed, so a dead window handled by a still
-                    // running process would otherwise be resurrected as a pin.
-                    monitor.pinned_floating = state_monitor.pinned_floating.clone();
-                    monitor
-                        .pinned_floating
-                        .retain(|hwnd| WindowsApi::is_window(*hwnd));
-                }
-
-                if let Err(error) = monitor.focus_workspace(focused_workspace) {
-                    tracing::warn!(
-                        "cannot focus workspace '{focused_workspace}' on monitor '{monitor_idx}' from {}: {}",
-                        temp_dir().join("komorebi.state.json").to_string_lossy(),
-                        error,
-                    );
-                }
-
-                if let Err(error) = monitor.load_focused_workspace(mouse_follows_focus, true) {
-                    tracing::warn!(
-                        "cannot load focused workspace '{focused_workspace}' on monitor '{monitor_idx}' from {}: {}",
-                        temp_dir().join("komorebi.state.json").to_string_lossy(),
-                        error,
-                    );
-                }
-
-                if let Err(error) = monitor.update_focused_workspace(offset) {
-                    tracing::warn!(
-                        "cannot update workspace '{focused_workspace}' on monitor '{monitor_idx}' from {}: {}",
-                        temp_dir().join("komorebi.state.json").to_string_lossy(),
-                        error,
-                    );
-                }
-            }
-
-            let focused_monitor_idx = state.monitors.focused_idx();
-            let focused_workspace_idx = state
-                .monitors
-                .elements()
-                .get(focused_monitor_idx)
-                .map(|m| m.focused_workspace_idx())
-                .unwrap_or_default();
-
-            if let Err(error) = self.focus_monitor(focused_monitor_idx) {
-                tracing::warn!(
-                    "cannot focus monitor '{focused_monitor_idx}' from {}: {}",
-                    temp_dir().join("komorebi.state.json").to_string_lossy(),
-                    error,
-                );
-            }
-
-            if let Err(error) = self.focus_workspace(focused_workspace_idx) {
-                tracing::warn!(
-                    "cannot focus workspace '{focused_workspace_idx}' on monitor '{focused_monitor_idx}' from {}: {}",
-                    temp_dir().join("komorebi.state.json").to_string_lossy(),
-                    error,
-                );
-            }
-
-            if let Err(error) = self.update_focused_workspace(true, true) {
-                tracing::warn!(
-                    "cannot update focused workspace '{focused_workspace_idx}' on monitor '{focused_monitor_idx}' from {}: {}",
-                    temp_dir().join("komorebi.state.json").to_string_lossy(),
-                    error,
-                );
-            }
-        } else {
+        let removed = Self::sanitize_state(&mut state);
+        if removed > 0 {
             tracing::warn!(
-                "cannot apply state from {}; some windows referenced in the state file no longer exist",
+                "skipping {removed} stale window(s) from {}; restoring the remaining layout",
                 temp_dir().join("komorebi.state.json").to_string_lossy()
             );
         }
+
+        tracing::info!(
+            "applying state from {}",
+            temp_dir().join("komorebi.state.json").to_string_lossy()
+        );
+
+        let offset = self.work_area_offset;
+        let mouse_follows_focus = self.mouse_follows_focus;
+        for (monitor_idx, monitor) in self.monitors_mut().iter_mut().enumerate() {
+            let mut focused_workspace = 0;
+            if let Some(state_monitor) = state.monitors.elements().get(monitor_idx) {
+                monitor
+                    .workspaces_mut()
+                    .resize(state_monitor.workspaces().len(), Workspace::default());
+
+                for (workspace_idx, workspace) in monitor.workspaces_mut().iter_mut().enumerate() {
+                    if let Some(state_workspace) = state_monitor.workspaces().get(workspace_idx) {
+                        // to make sure padding and layout_options changes get applied for users after a quick restart
+                        let container_padding = workspace.container_padding;
+                        let workspace_padding = workspace.workspace_padding;
+                        let layout_options = workspace.layout_options;
+
+                        *workspace = state_workspace.clone();
+
+                        workspace.container_padding = container_padding;
+                        workspace.workspace_padding = workspace_padding;
+                        workspace.layout_options = layout_options;
+
+                        if state_monitor.focused_workspace_idx() == workspace_idx {
+                            focused_workspace = workspace_idx;
+                        }
+                    }
+                }
+
+                // Restore this monitor's pinned floating windows and prune
+                // any stale pinned HWNDs whose windows no longer exist.
+                // Validity is checked against the window, not the process:
+                // `is_window` alone can report true for a handle recycled by a
+                // different window, so this remains a best-effort restore.
+                monitor.pinned_floating = state_monitor.pinned_floating.clone();
+                monitor
+                    .pinned_floating
+                    .retain(|hwnd| WindowsApi::is_window(*hwnd));
+            }
+
+            if let Err(error) = monitor.focus_workspace(focused_workspace) {
+                tracing::warn!(
+                    "cannot focus workspace '{focused_workspace}' on monitor '{monitor_idx}' from {}: {}",
+                    temp_dir().join("komorebi.state.json").to_string_lossy(),
+                    error,
+                );
+            }
+
+            if let Err(error) = monitor.load_focused_workspace(mouse_follows_focus, true) {
+                tracing::warn!(
+                    "cannot load focused workspace '{focused_workspace}' on monitor '{monitor_idx}' from {}: {}",
+                    temp_dir().join("komorebi.state.json").to_string_lossy(),
+                    error,
+                );
+            }
+
+            if let Err(error) = monitor.update_focused_workspace(offset) {
+                tracing::warn!(
+                    "cannot update workspace '{focused_workspace}' on monitor '{monitor_idx}' from {}: {}",
+                    temp_dir().join("komorebi.state.json").to_string_lossy(),
+                    error,
+                );
+            }
+        }
+
+        let focused_monitor_idx = state.monitors.focused_idx();
+        let focused_workspace_idx = state
+            .monitors
+            .elements()
+            .get(focused_monitor_idx)
+            .map(|m| m.focused_workspace_idx())
+            .unwrap_or_default();
+
+        if let Err(error) = self.focus_monitor(focused_monitor_idx) {
+            tracing::warn!(
+                "cannot focus monitor '{focused_monitor_idx}' from {}: {}",
+                temp_dir().join("komorebi.state.json").to_string_lossy(),
+                error,
+            );
+        }
+
+        if let Err(error) = self.focus_workspace(focused_workspace_idx) {
+            tracing::warn!(
+                "cannot focus workspace '{focused_workspace_idx}' on monitor '{focused_monitor_idx}' from {}: {}",
+                temp_dir().join("komorebi.state.json").to_string_lossy(),
+                error,
+            );
+        }
+
+        if let Err(error) = self.update_focused_workspace(true, true) {
+            tracing::warn!(
+                "cannot update focused workspace '{focused_workspace_idx}' on monitor '{focused_monitor_idx}' from {}: {}",
+                temp_dir().join("komorebi.state.json").to_string_lossy(),
+                error,
+            );
+        }
+    }
+
+    /// Prune windows referenced by a persisted state that no longer exist, so
+    /// the state can be applied partially: a single dead window must not
+    /// discard the rest of the layout. The focused ring index is clamped after
+    /// pruning so later callers never read an out-of-range index.
+    ///
+    /// Validity requires both a live window (`is_window`) and a resolvable
+    /// owning process (`exe`). A raw window handle can be recycled by the OS for
+    /// a different window after a crash, so this is best effort, not identity.
+    fn sanitize_state(state: &mut State) -> usize {
+        let mut removed = 0;
+
+        for monitor in state.monitors.elements_mut() {
+            for workspace in monitor.workspaces_mut() {
+                for container in workspace.containers_mut() {
+                    let len_before = container.windows().len();
+                    container.windows_mut().retain(Self::window_is_alive);
+                    removed += len_before - container.windows().len();
+
+                    container.focus_window(
+                        container
+                            .focused_window_idx()
+                            .min(container.windows().len().saturating_sub(1)),
+                    );
+                }
+
+                if let Some(container) = &mut workspace.monocle_container {
+                    let len_before = container.windows().len();
+                    container.windows_mut().retain(Self::window_is_alive);
+                    removed += len_before - container.windows().len();
+
+                    if container.windows().is_empty() {
+                        workspace.monocle_container = None;
+                        workspace.monocle_container_restore_idx = None;
+                    } else {
+                        container.focus_window(
+                            container
+                                .focused_window_idx()
+                                .min(container.windows().len() - 1),
+                        );
+                    }
+                }
+
+                if let Some(window) = workspace.maximized_window.take() {
+                    if Self::window_is_alive(&window) {
+                        workspace.maximized_window = Some(window);
+                    } else {
+                        workspace.maximized_window_restore_idx = None;
+                        removed += 1;
+                    }
+                }
+
+                let float_len_before = workspace.floating_windows().len();
+                workspace
+                    .floating_windows_mut()
+                    .retain(Self::window_is_alive);
+                removed += float_len_before - workspace.floating_windows().len();
+
+                workspace.floating_windows.focus(
+                    workspace.floating_windows.focused_idx().min(
+                        workspace
+                            .floating_windows
+                            .elements()
+                            .len()
+                            .saturating_sub(1),
+                    ),
+                );
+            }
+        }
+
+        removed
+    }
+
+    fn window_is_alive(window: &Window) -> bool {
+        window.is_window() && window.exe().is_ok()
     }
 
     #[tracing::instrument]
@@ -5156,6 +5193,151 @@ mod tests {
         let state = State::from(&wm);
         assert_eq!(state.monitors.elements()[0].pinned_floating, vec![10]);
         assert_eq!(state.monitors.elements()[0].pinned_always_on_top, vec![10]);
+    }
+
+    #[test]
+    fn test_apply_state_prunes_dead_windows_and_restores_layout() {
+        use crate::state::State;
+
+        let (mut wm, _context) = setup_window_manager();
+
+        let m = monitor::new(
+            0,
+            Rect::default(),
+            Rect::default(),
+            "TestMonitor".to_string(),
+            "TestDevice".to_string(),
+            "TestDeviceID".to_string(),
+            Some("TestMonitorID".to_string()),
+        );
+        wm.monitors_mut().push_back(m);
+
+        // A state file referencing a window that no longer exists must not
+        // discard the whole restore: the dead window is pruned and the rest of
+        // the layout is still applied.
+        let mut container = Container::default();
+        container.windows_mut().push_back(Window::from(0x1000));
+        container.focus_window(0);
+
+        let mut state = State::from(&wm);
+        state
+            .monitors
+            .elements_mut()
+            .get_mut(0)
+            .unwrap()
+            .workspaces_mut()
+            .resize(3, Workspace::default());
+        state
+            .monitors
+            .elements_mut()
+            .get_mut(0)
+            .unwrap()
+            .workspaces_mut()[0]
+            .add_container_to_back(container);
+
+        wm.apply_state(state);
+
+        assert_eq!(wm.monitors()[0].workspaces().len(), 3);
+        assert_eq!(wm.focused_workspace_idx().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_sanitize_state_prunes_dead_windows_everywhere() {
+        use crate::state::State;
+
+        let (mut wm, _context) = setup_window_manager();
+
+        let m = monitor::new(
+            0,
+            Rect::default(),
+            Rect::default(),
+            "TestMonitor".to_string(),
+            "TestDevice".to_string(),
+            "TestDeviceID".to_string(),
+            Some("TestMonitorID".to_string()),
+        );
+        wm.monitors_mut().push_back(m);
+
+        {
+            let workspace = wm.focused_workspace_mut().unwrap();
+            let mut container = Container::default();
+            container.windows_mut().push_back(Window::from(0x1000));
+            container.windows_mut().push_back(Window::from(0x1001));
+            container.focus_window(1);
+            workspace.add_container_to_back(container);
+
+            let mut monocle = Container::default();
+            monocle.windows_mut().push_back(Window::from(0x1002));
+            workspace.monocle_container = Some(monocle);
+            workspace.monocle_container_restore_idx = Some(0);
+
+            workspace.maximized_window = Some(Window::from(0x1003));
+            workspace.maximized_window_restore_idx = Some(0);
+
+            workspace
+                .floating_windows_mut()
+                .push_back(Window::from(0x1004));
+            workspace
+                .floating_windows_mut()
+                .push_back(Window::from(0x1005));
+        }
+
+        let mut state = State::from(&wm);
+
+        let removed = WindowManager::sanitize_state(&mut state);
+        assert_eq!(removed, 6);
+
+        let workspace = &state.monitors.elements()[0].workspaces()[0];
+        assert_eq!(workspace.containers()[0].windows().len(), 0);
+        assert_eq!(workspace.containers()[0].focused_window_idx(), 0);
+        assert!(workspace.monocle_container.is_none());
+        assert!(workspace.maximized_window.is_none());
+        assert!(workspace.floating_windows().is_empty());
+    }
+
+    #[test]
+    fn test_sanitize_state_keeps_live_windows() {
+        use crate::state::State;
+
+        // The keep branch of the sanitizer needs a real, live window; skip the
+        // end-to-end check otherwise and rely on the prune tests above.
+        let Ok(foreground_hwnd) = WindowsApi::foreground_window() else {
+            return;
+        };
+
+        let (mut wm, _context) = setup_window_manager();
+
+        let m = monitor::new(
+            0,
+            Rect::default(),
+            Rect::default(),
+            "TestMonitor".to_string(),
+            "TestDevice".to_string(),
+            "TestDeviceID".to_string(),
+            Some("TestMonitorID".to_string()),
+        );
+        wm.monitors_mut().push_back(m);
+
+        {
+            let workspace = wm.focused_workspace_mut().unwrap();
+            let mut container = Container::default();
+            container
+                .windows_mut()
+                .push_back(Window::from(foreground_hwnd));
+            container.windows_mut().push_back(Window::from(0x3000));
+            container.focus_window(1);
+            workspace.add_container_to_back(container);
+        }
+
+        let mut state = State::from(&wm);
+
+        let removed = WindowManager::sanitize_state(&mut state);
+        assert_eq!(removed, 1);
+
+        let container = &state.monitors.elements()[0].workspaces()[0].containers()[0];
+        assert_eq!(container.windows().len(), 1);
+        assert_eq!(container.windows()[0].hwnd, foreground_hwnd);
+        assert_eq!(container.focused_window_idx(), 0);
     }
 
     #[test]

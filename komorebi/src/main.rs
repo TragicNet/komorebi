@@ -12,7 +12,6 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-#[cfg(feature = "deadlock_detection")]
 use std::time::Duration;
 
 use clap::Parser;
@@ -317,12 +316,32 @@ fn main() -> eyre::Result<()> {
     };
 
     if static_config.is_none() {
-        std::thread::spawn(|| load_configuration().expect("could not load configuration"));
+        std::thread::spawn(|| {
+            if let Err(error) = load_configuration() {
+                tracing::error!("could not load configuration: {error}");
+            }
+            // Always unblock the startup wait, even when the config failed to
+            // load, so a broken or missing configuration script can never hang
+            // the daemon; it continues with the default configuration.
+            INITIAL_CONFIGURATION_LOADED.store(true, Ordering::SeqCst);
+        });
 
         if opts.await_configuration {
             let backoff = Backoff::new();
-            while !INITIAL_CONFIGURATION_LOADED.load(Ordering::SeqCst) {
+            // Bound the wait: the thread above unblocks it on completion, but a
+            // hung child process (e.g. an unresponsive pwsh) must not stall
+            // startup forever.
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            while !INITIAL_CONFIGURATION_LOADED.load(Ordering::SeqCst)
+                && std::time::Instant::now() < deadline
+            {
                 backoff.snooze();
+            }
+
+            if !INITIAL_CONFIGURATION_LOADED.load(Ordering::SeqCst) {
+                tracing::warn!(
+                    "configuration did not load within 15s; continuing with the default configuration"
+                );
             }
         }
     }
