@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
+use uds_windows::UnixListener;
 use uds_windows::UnixStream;
 
 use crate::CUSTOM_FFM;
@@ -105,18 +106,13 @@ use stackbar_manager::STACKBAR_TAB_WIDTH;
 use stackbar_manager::STACKBAR_UNFOCUSED_TEXT_COLOUR;
 
 #[tracing::instrument]
-pub fn listen_for_commands(wm: Arc<Mutex<WindowManager>>) {
+pub fn listen_for_commands(listener: UnixListener, wm: Arc<Mutex<WindowManager>>) {
     std::thread::spawn(move || {
         loop {
             let wm = wm.clone();
+            let listener = listener.try_clone().expect("could not clone unix listener");
 
             let _ = std::thread::spawn(move || {
-                let listener = wm
-                    .lock()
-                    .command_listener
-                    .try_clone()
-                    .expect("could not clone unix listener");
-
                 tracing::info!("listening on komorebi.sock");
                 for client in listener.incoming() {
                     match client {
@@ -2125,64 +2121,82 @@ impl WindowManager {
                     // Set self to the new wm instance
                     *self = wm;
 
-                    // check if there are any bars
-                    let mut system = sysinfo::System::new_all();
-                    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+                    // Restart any bars off the WM lock: spawning PowerShell from
+                    // here used to hold the lock for the whole bar restart, stalling
+                    // command processing (and pushing other commands toward the
+                    // lock-wait budget) at the exact moment the swap was in flight.
+                    let config = config.clone();
+                    std::thread::spawn(move || {
+                        // check if there are any bars
+                        let mut system = sysinfo::System::new_all();
+                        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
 
-                    let has_bar = system
-                        .processes_by_name("komorebi-bar.exe".as_ref())
-                        .next()
-                        .is_some();
+                        let has_bar = system
+                            .processes_by_name("komorebi-bar.exe".as_ref())
+                            .next()
+                            .is_some();
 
-                    // stop bar(s)
-                    if has_bar {
-                        let script = r"
+                        // stop bar(s)
+                        if has_bar {
+                            let script = r"
 Stop-Process -Name:komorebi-bar -ErrorAction SilentlyContinue
                 ";
-                        match powershell_script::run(script) {
-                            Ok(_) => {
-                                println!("{script}");
+                            match powershell_script::run(script) {
+                                Ok(_) => {
+                                    println!("{script}");
 
-                                // start new bar(s)
-                                let mut config = StaticConfig::read(config)?;
-                                if let Some(display_bar_configurations) =
-                                    &mut config.bar_configurations
-                                {
-                                    for config_file_path in &mut *display_bar_configurations {
-                                        let script = r#"Start-Process "komorebi-bar" '"--config" "CONFIGFILE"' -WindowStyle hidden"#
-                                            .replace("CONFIGFILE", &config_file_path.to_string_lossy());
+                                    // start new bar(s)
+                                    match StaticConfig::read(&config) {
+                                        Ok(mut config) => {
+                                            if let Some(display_bar_configurations) =
+                                                &mut config.bar_configurations
+                                            {
+                                                for config_file_path in
+                                                    &mut *display_bar_configurations
+                                                {
+                                                    let script = r#"Start-Process "komorebi-bar" '"--config" "CONFIGFILE"' -WindowStyle hidden"#
+                                                        .replace(
+                                                            "CONFIGFILE",
+                                                            &config_file_path.to_string_lossy(),
+                                                        );
 
-                                        match powershell_script::run(&script) {
-                                            Ok(_) => {
-                                                println!("{script}");
-                                            }
-                                            Err(error) => {
-                                                println!("Error: {error}");
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    let script = r"
+                                                    match powershell_script::run(&script) {
+                                                        Ok(_) => {
+                                                            println!("{script}");
+                                                        }
+                                                        Err(error) => {
+                                                            println!("Error: {error}");
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                let script = r"
 if (!(Get-Process komorebi-bar -ErrorAction SilentlyContinue))
 {
   Start-Process komorebi-bar -WindowStyle hidden
 }
                 ";
-                                    match powershell_script::run(script) {
-                                        Ok(_) => {
-                                            println!("{script}");
+                                                match powershell_script::run(script) {
+                                                    Ok(_) => {
+                                                        println!("{script}");
+                                                    }
+                                                    Err(error) => {
+                                                        println!("Error: {error}");
+                                                    }
+                                                }
+                                            }
                                         }
                                         Err(error) => {
                                             println!("Error: {error}");
                                         }
                                     }
                                 }
-                            }
-                            Err(error) => {
-                                println!("Error: {error}");
+                                Err(error) => {
+                                    println!("Error: {error}");
+                                }
                             }
                         }
-                    }
+                    });
 
                     force_update_borders = true;
                 }

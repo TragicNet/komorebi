@@ -41,6 +41,7 @@ use crate::core::OperationBehaviour;
 use crate::core::OperationDirection;
 use crate::core::Rect;
 use crate::core::Sizing;
+use crate::core::SocketMessage;
 use crate::core::WindowContainerBehaviour;
 use crate::core::WindowManagementBehaviour;
 use crate::core::WorkspaceLayerFocusBehaviour;
@@ -51,6 +52,7 @@ use crate::DATA_DIR;
 use crate::FLOATING_APPLICATIONS;
 use crate::HOME_DIR;
 use crate::NO_TITLEBAR;
+use crate::NotificationEvent;
 use crate::PINNED_FLOATING_APPLICATIONS;
 use crate::REGEX_IDENTIFIERS;
 use crate::SUBSCRIPTION_SOCKETS;
@@ -62,6 +64,7 @@ use crate::container::Container;
 use crate::current_virtual_desktop;
 use crate::load_configuration;
 use crate::monitor::Monitor;
+use crate::notify_subscribers;
 use crate::ring::Ring;
 use crate::should_act;
 use crate::should_act_individual;
@@ -899,6 +902,7 @@ impl WindowManager {
     #[tracing::instrument(skip(self))]
     pub fn retile_all(&mut self, preserve_resize_dimensions: bool) -> eyre::Result<()> {
         let offset = self.work_area_offset;
+        let mut applied_themes = vec![];
 
         for monitor in self.monitors_mut() {
             let offset = if monitor.work_area_offset.is_some() {
@@ -923,13 +927,28 @@ impl WindowManager {
                 }
             }
 
-            if (workspace.wallpaper.is_some() || monitor_wp.is_some())
-                && let Err(error) = workspace.apply_wallpaper(hmonitor, &monitor_wp)
-            {
-                tracing::error!("failed to apply wallpaper: {}", error);
+            let applied_theme = match workspace.apply_wallpaper(hmonitor, &monitor_wp) {
+                Ok(Some(theme)) => Some(theme),
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::error!("failed to apply wallpaper: {error}");
+                    None
+                }
+            };
+
+            if let Some(theme) = applied_theme {
+                applied_themes.push(theme);
             }
 
             workspace.update()?;
+        }
+
+        for theme in applied_themes {
+            notify_subscribers(
+                NotificationEvent::Socket(SocketMessage::Theme(theme)),
+                false,
+                || self.as_ref().into(),
+            )?;
         }
 
         Ok(())
@@ -975,13 +994,24 @@ impl WindowManager {
             }
         }
 
-        if (workspace.wallpaper.is_some() || monitor_wp.is_some())
-            && let Err(error) = workspace.apply_wallpaper(hmonitor, &monitor_wp)
-        {
-            tracing::error!("failed to apply wallpaper: {}", error);
-        }
+        let applied_theme = match workspace.apply_wallpaper(hmonitor, &monitor_wp) {
+            Ok(Some(theme)) => Some(theme),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::error!("failed to apply wallpaper: {error}");
+                None
+            }
+        };
 
         workspace.update()?;
+
+        if let Some(theme) = applied_theme {
+            notify_subscribers(
+                NotificationEvent::Socket(SocketMessage::Theme(theme)),
+                false,
+                || self.as_ref().into(),
+            )?;
+        }
 
         Ok(())
     }
@@ -1732,8 +1762,7 @@ impl WindowManager {
 
         {
             let ws = self.focused_workspace_mut()?;
-            let hwnds: Vec<isize> =
-                ws.restoration_indices.keys().copied().collect();
+            let hwnds: Vec<isize> = ws.restoration_indices.keys().copied().collect();
 
             tracing::debug!("restoration_indices hwnds: {:?}", hwnds);
 
@@ -1761,9 +1790,7 @@ impl WindowManager {
             let ws = self.focused_workspace_mut()?;
 
             for &hwnd in &untracked {
-                if managed_hwnds.contains(&hwnd)
-                    || ws.restoration_indices.contains_key(&hwnd)
-                {
+                if managed_hwnds.contains(&hwnd) || ws.restoration_indices.contains_key(&hwnd) {
                     continue;
                 }
 
@@ -1816,10 +1843,7 @@ impl WindowManager {
                     (should_float, should_pin)
                 };
 
-                tracing::info!(
-                    "reclaiming untracked minimized window: {}",
-                    hwnd
-                );
+                tracing::info!("reclaiming untracked minimized window: {}", hwnd);
 
                 WindowsApi::restore_window_sync(hwnd);
 
@@ -1943,7 +1967,21 @@ impl WindowManager {
             .get(workspace_idx)
             .ok_or_eyre("there is no workspace")?;
 
-        workspace.apply_wallpaper(hmonitor, &monitor_wp)
+        match workspace.apply_wallpaper(hmonitor, &monitor_wp) {
+            Ok(Some(theme)) => {
+                notify_subscribers(
+                    NotificationEvent::Socket(SocketMessage::Theme(theme)),
+                    false,
+                    || self.as_ref().into(),
+                )?;
+                Ok(())
+            }
+            Ok(None) => Ok(()),
+            Err(error) => {
+                tracing::error!("failed to apply wallpaper: {error}");
+                Ok(())
+            }
+        }
     }
 
     pub fn update_focused_workspace_by_monitor_idx(&mut self, idx: usize) -> eyre::Result<()> {
@@ -2840,7 +2878,8 @@ impl WindowManager {
             .is_some_and(|container| container.windows().len() > 1);
 
         if is_stack {
-            self.focused_workspace_mut()?.new_container_for_focused_window()?;
+            self.focused_workspace_mut()?
+                .new_container_for_focused_window()?;
         }
 
         Ok(is_stack)
@@ -3074,9 +3113,7 @@ impl WindowManager {
         let current_idx = pool
             .iter()
             .position(|hwnd| *hwnd == focused_hwnd)
-            .or_else(|| {
-                remembered_hwnd.and_then(|hwnd| pool.iter().position(|h| *h == hwnd))
-            });
+            .or_else(|| remembered_hwnd.and_then(|hwnd| pool.iter().position(|h| *h == hwnd)));
 
         let target_idx = match current_idx {
             Some(idx) if len > 1 => match direction {
@@ -3139,13 +3176,10 @@ impl WindowManager {
 
         tracing::info!("focusing container");
 
-        let cycle_across = cycle_focus_across_monitors_override
-            .unwrap_or(self.cycle_focus_across_monitors);
+        let cycle_across =
+            cycle_focus_across_monitors_override.unwrap_or(self.cycle_focus_across_monitors);
 
-        if cycle_across
-            && self.monitors().len() > 1
-            && self.should_wrap_cycle_focus(direction)?
-        {
+        if cycle_across && self.monitors().len() > 1 && self.should_wrap_cycle_focus(direction)? {
             if let Some(target_monitor_idx) =
                 self.cycle_focus_target_monitor_idx(self.focused_monitor_idx(), direction)?
             {
@@ -3633,10 +3667,7 @@ impl WindowManager {
             // pinned, so the command works on both floating and tiling
             // windows; the float is driven by komorebi's focus, not the
             // (possibly stale) live foreground.
-            let is_floating = workspace
-                .floating_windows()
-                .iter()
-                .any(|w| w.hwnd == hwnd);
+            let is_floating = workspace.floating_windows().iter().any(|w| w.hwnd == hwnd);
             let is_focused_tiled = workspace
                 .focused_container()
                 .and_then(|container| container.focused_window())
@@ -3813,17 +3844,26 @@ impl WindowManager {
         let workspace = self.focused_workspace()?;
 
         if workspace.monocle_container.is_some() {
-            tracing::debug!(hwnd = window.hwnd, "should_capture: skipped, monocle_container exists");
+            tracing::debug!(
+                hwnd = window.hwnd,
+                "should_capture: skipped, monocle_container exists"
+            );
             return Ok(false);
         }
 
         if workspace.maximized_window.is_some() {
-            tracing::debug!(hwnd = window.hwnd, "should_capture: skipped, maximized_window exists");
+            tracing::debug!(
+                hwnd = window.hwnd,
+                "should_capture: skipped, maximized_window exists"
+            );
             return Ok(false);
         }
 
         if !workspace.contains_window(window.hwnd) {
-            tracing::debug!(hwnd = window.hwnd, "should_capture: skipped, window not in workspace");
+            tracing::debug!(
+                hwnd = window.hwnd,
+                "should_capture: skipped, window not in workspace"
+            );
             return Ok(false);
         }
 
@@ -3832,17 +3872,27 @@ impl WindowManager {
             .iter()
             .any(|floating| floating.hwnd == window.hwnd)
         {
-            tracing::debug!(hwnd = window.hwnd, "should_capture: skipped, window is floating");
+            tracing::debug!(
+                hwnd = window.hwnd,
+                "should_capture: skipped, window is floating"
+            );
             return Ok(false);
         }
 
         let Some(container_idx) = workspace.container_idx_for_window(window.hwnd) else {
-            tracing::debug!(hwnd = window.hwnd, "should_capture: skipped, no container for window");
+            tracing::debug!(
+                hwnd = window.hwnd,
+                "should_capture: skipped, no container for window"
+            );
             return Ok(false);
         };
 
         let Some(expected_rect) = workspace.latest_layout.get(container_idx) else {
-            tracing::debug!(hwnd = window.hwnd, container_idx, "should_capture: skipped, no layout rect");
+            tracing::debug!(
+                hwnd = window.hwnd,
+                container_idx,
+                "should_capture: skipped, no layout rect"
+            );
             return Ok(false);
         };
 
@@ -3882,12 +3932,18 @@ impl WindowManager {
         }
 
         if workspace.maximized_window.is_some() {
-            tracing::debug!(hwnd = window.hwnd, "capture: rejected, maximized window exists");
+            tracing::debug!(
+                hwnd = window.hwnd,
+                "capture: rejected, maximized window exists"
+            );
             return Ok(false);
         }
 
         if !workspace.contains_window(window.hwnd) {
-            tracing::debug!(hwnd = window.hwnd, "capture: rejected, window not in workspace");
+            tracing::debug!(
+                hwnd = window.hwnd,
+                "capture: rejected, window not in workspace"
+            );
             return Ok(false);
         }
 
@@ -3963,7 +4019,10 @@ impl WindowManager {
         }
 
         if !is_maxed && !self.should_capture_native_maximize(window)? {
-            tracing::debug!(hwnd = window.hwnd, "capture: skipping, not maximized and should_capture=false");
+            tracing::debug!(
+                hwnd = window.hwnd,
+                "capture: skipping, not maximized and should_capture=false"
+            );
             return Ok(false);
         }
 
@@ -3983,7 +4042,10 @@ impl WindowManager {
             return Ok(true);
         }
 
-        tracing::info!(hwnd = window.hwnd, "capture: capture_native_maximized_window returned false");
+        tracing::info!(
+            hwnd = window.hwnd,
+            "capture: capture_native_maximized_window returned false"
+        );
         Ok(false)
     }
 
@@ -4008,9 +4070,7 @@ impl WindowManager {
                 let focus = c.focused_window().map(|w| w.hwnd).unwrap_or(0);
                 format!("{} ({}w, focused_hwnd={})", c.id, c.windows().len(), focus)
             });
-            let mw_str = ws
-                .maximized_window
-                .map(|w| format!("hwnd={}", w.hwnd));
+            let mw_str = ws.maximized_window.map(|w| format!("hwnd={}", w.hwnd));
             tracing::info!(
                 label,
                 containers = %container_state.join(" | "),
@@ -5074,7 +5134,9 @@ impl WindowManager {
             }
 
             // Save to file
-            if let Err(error) = crate::write_known_hwnds(&known_hwnds.keys().copied().collect::<Vec<_>>()) {
+            if let Err(error) =
+                crate::write_known_hwnds(&known_hwnds.keys().copied().collect::<Vec<_>>())
+            {
                 tracing::error!("Failed to save list of known_hwnds on file: {}", error);
             }
 
@@ -5661,7 +5723,10 @@ mod tests {
     fn test_floating_cycle_pool_own_pinned_window_stays_at_pin_position() {
         let pins = [Window::from(2)];
         let own_floats = [Window::from(2), Window::from(3)];
-        assert_eq!(WindowManager::floating_cycle_pool(&pins, &own_floats), vec![2, 3]);
+        assert_eq!(
+            WindowManager::floating_cycle_pool(&pins, &own_floats),
+            vec![2, 3]
+        );
     }
 
     #[test]
@@ -6515,12 +6580,9 @@ mod tests {
     #[test]
     fn test_stack_right_single_window_joins_right_container() {
         let mut wm = setup_workspace_with_containers(&[1, 1, 1]);
-        wm.focused_workspace_mut()
-            .unwrap()
-            .focus_container(1);
+        wm.focused_workspace_mut().unwrap().focus_container(1);
 
-        wm.add_window_to_container(OperationDirection::Right)
-            .ok();
+        wm.add_window_to_container(OperationDirection::Right).ok();
 
         let workspace = wm.focused_workspace().unwrap();
         assert_eq!(workspace.containers().len(), 2);
@@ -6532,12 +6594,9 @@ mod tests {
     #[test]
     fn test_stack_left_single_window_joins_left_container() {
         let mut wm = setup_workspace_with_containers(&[1, 1, 1]);
-        wm.focused_workspace_mut()
-            .unwrap()
-            .focus_container(1);
+        wm.focused_workspace_mut().unwrap().focus_container(1);
 
-        wm.add_window_to_container(OperationDirection::Left)
-            .ok();
+        wm.add_window_to_container(OperationDirection::Left).ok();
 
         let workspace = wm.focused_workspace().unwrap();
         assert_eq!(workspace.containers().len(), 2);
@@ -6549,12 +6608,9 @@ mod tests {
     #[test]
     fn test_stack_right_expands_focused_stack_into_single_neighbor() {
         let mut wm = setup_workspace_with_containers(&[1, 2, 1]);
-        wm.focused_workspace_mut()
-            .unwrap()
-            .focus_container(1);
+        wm.focused_workspace_mut().unwrap().focus_container(1);
 
-        wm.add_window_to_container(OperationDirection::Right)
-            .ok();
+        wm.add_window_to_container(OperationDirection::Right).ok();
 
         let workspace = wm.focused_workspace().unwrap();
         assert_eq!(workspace.containers().len(), 2);
@@ -6566,12 +6622,9 @@ mod tests {
     #[test]
     fn test_stack_left_expands_focused_stack_into_single_neighbor() {
         let mut wm = setup_workspace_with_containers(&[1, 2, 1]);
-        wm.focused_workspace_mut()
-            .unwrap()
-            .focus_container(1);
+        wm.focused_workspace_mut().unwrap().focus_container(1);
 
-        wm.add_window_to_container(OperationDirection::Left)
-            .ok();
+        wm.add_window_to_container(OperationDirection::Left).ok();
 
         let workspace = wm.focused_workspace().unwrap();
         assert_eq!(workspace.containers().len(), 2);
@@ -6583,12 +6636,9 @@ mod tests {
     #[test]
     fn test_stack_right_stack_to_stack_moves_focused_window() {
         let mut wm = setup_workspace_with_containers(&[1, 2, 2]);
-        wm.focused_workspace_mut()
-            .unwrap()
-            .focus_container(1);
+        wm.focused_workspace_mut().unwrap().focus_container(1);
 
-        wm.add_window_to_container(OperationDirection::Right)
-            .ok();
+        wm.add_window_to_container(OperationDirection::Right).ok();
 
         let workspace = wm.focused_workspace().unwrap();
         assert_eq!(workspace.containers().len(), 3);
@@ -6601,12 +6651,9 @@ mod tests {
     #[test]
     fn test_stack_left_stack_to_stack_moves_focused_window() {
         let mut wm = setup_workspace_with_containers(&[2, 2, 1]);
-        wm.focused_workspace_mut()
-            .unwrap()
-            .focus_container(1);
+        wm.focused_workspace_mut().unwrap().focus_container(1);
 
-        wm.add_window_to_container(OperationDirection::Left)
-            .ok();
+        wm.add_window_to_container(OperationDirection::Left).ok();
 
         let workspace = wm.focused_workspace().unwrap();
         assert_eq!(workspace.containers().len(), 3);

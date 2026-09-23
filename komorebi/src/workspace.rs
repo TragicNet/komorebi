@@ -3,7 +3,6 @@ use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::fmt::Display;
 use std::fmt::Formatter;
-use std::io::Write;
 use std::num::NonZeroUsize;
 use std::sync::atomic::Ordering;
 
@@ -16,7 +15,6 @@ use crate::KomorebiTheme;
 use crate::NO_TITLEBAR;
 use crate::REGEX_IDENTIFIERS;
 use crate::REMOVE_TITLEBARS;
-use crate::SocketMessage;
 use crate::Wallpaper;
 use crate::WindowContainerBehaviour;
 use crate::border_manager;
@@ -38,6 +36,7 @@ use crate::stackbar_manager;
 use crate::stackbar_manager::STACKBAR_TAB_HEIGHT;
 use crate::static_config::WorkspaceConfig;
 use crate::static_config::register_workspace_rule_regex;
+use crate::theme_manager;
 use crate::window::Window;
 use crate::window::WindowDetails;
 use crate::windows_api::WindowsApi;
@@ -48,7 +47,6 @@ use komorebi_themes::KomorebiThemeCustom as Custom;
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
-use uds_windows::UnixStream;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WindowRestorationState {
@@ -516,7 +514,8 @@ impl Workspace {
         &self,
         hmonitor: isize,
         monitor_wp: &Option<Wallpaper>,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<Option<Box<KomorebiTheme>>> {
+        let mut applied_theme = None;
         if let Some(wallpaper) = self.wallpaper.as_ref().or(monitor_wp.as_ref()) {
             if let Err(error) = WindowsApi::set_wallpaper(&wallpaper.path, hmonitor) {
                 tracing::error!("failed to set wallpaper: {error}");
@@ -616,24 +615,13 @@ impl Workspace {
                         bar_accent: wallpaper.theme_options.as_ref().and_then(|o| o.bar_accent),
                     });
 
-                    let bytes = SocketMessage::Theme(Box::new(komorebi_theme)).as_bytes()?;
-
-                    let socket = DATA_DIR.join("komorebi.sock");
-                    match UnixStream::connect(socket) {
-                        Ok(mut stream) => {
-                            if let Err(error) = stream.write_all(&bytes) {
-                                tracing::error!("failed to send theme update message: {error}")
-                            }
-                        }
-                        Err(error) => {
-                            tracing::error!("{error}")
-                        }
-                    }
+                    theme_manager::send_notification(komorebi_theme.clone());
+                    applied_theme = Some(Box::new(komorebi_theme));
                 }
             }
         }
 
-        Ok(())
+        Ok(applied_theme)
     }
 
     pub fn restore(
@@ -650,7 +638,7 @@ impl Workspace {
             if trigger_focus {
                 window.focus(mouse_follows_focus)?;
             }
-            return self.apply_wallpaper(hmonitor, monitor_wp);
+            return self.apply_wallpaper(hmonitor, monitor_wp).map(|_| ());
         }
 
         // If we have a record of the last focused hwnd, use it to find the right container.
@@ -738,7 +726,7 @@ impl Workspace {
             self.last_focused_hwnd = Some(floating_window.hwnd);
         }
 
-        self.apply_wallpaper(hmonitor, monitor_wp)
+        self.apply_wallpaper(hmonitor, monitor_wp).map(|_| ())
     }
 
     pub fn update(&mut self) -> eyre::Result<()> {

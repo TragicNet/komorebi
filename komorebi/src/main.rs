@@ -57,7 +57,11 @@ struct LocalTimer;
 
 impl FormatTime for LocalTimer {
     fn format_time(&self, w: &mut Writer<'_>) -> fmt::Result {
-        write!(w, "{}", chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z"))
+        write!(
+            w,
+            "{}",
+            chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z")
+        )
     }
 }
 
@@ -305,6 +309,11 @@ fn main() -> eyre::Result<()> {
         )?))
     };
 
+    // Start accepting commands as early as possible: the listener socket is
+    // already bound, so begin draining it before `init`/`postload` run so that
+    // configuration scripts and early user commands are never refused.
+    listen_for_commands(wm.lock().command_listener.try_clone()?, wm.clone());
+
     wm.lock().init()?;
 
     if let Some(config) = &static_config {
@@ -368,8 +377,6 @@ fn main() -> eyre::Result<()> {
     reaper::listen_for_notifications(wm.clone(), wm.lock().known_hwnds.clone());
     focus_manager::listen_for_notifications(wm.clone());
     theme_manager::listen_for_notifications();
-
-    listen_for_commands(wm.clone());
 
     if let Some(port) = opts.tcp_port {
         listen_for_commands_tcp(wm.clone(), port);

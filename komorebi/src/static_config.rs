@@ -122,6 +122,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use uds_windows::UnixListener;
 use uds_windows::UnixStream;
 
@@ -1621,16 +1622,35 @@ impl StaticConfig {
 
         let bytes = SocketMessage::ReloadStaticConfiguration(path.clone()).as_bytes()?;
 
-        wm.hotwatch.watch(path, move |event| match event.kind {
+        // The `move` closure below needs an owned path to log reload failures.
+        let path = path.clone();
+        let watch_path = path.clone();
+
+        wm.hotwatch.watch(watch_path, move |event| match event.kind {
             // Editing in Notepad sends a NoticeWrite while editing in (Neo)Vim sends
             // a NoticeRemove, presumably because of the use of swap files?
             EventKind::Modify(_) | EventKind::Remove(_) => {
                 let socket = DATA_DIR.join("komorebi.sock");
-                let mut stream =
-                    UnixStream::connect(socket).expect("could not connect to komorebi.sock");
-                stream
-                    .write_all(&bytes)
-                    .expect("could not write to komorebi.sock");
+                // The daemon restarting, or a config swap, can briefly refuse
+                // connections; retry instead of panicking, since panicking would
+                // kill the hotwatch thread and silently disable future reloads.
+                for _ in 0..3 {
+                    match UnixStream::connect(&socket) {
+                        Ok(mut stream) => {
+                            if let Err(error) = stream.write_all(&bytes) {
+                                tracing::warn!(
+                                    "could not notify komorebi of configuration change: {error}"
+                                );
+                            }
+                            return;
+                        }
+                        Err(_) => std::thread::sleep(Duration::from_millis(100)),
+                    }
+                }
+                tracing::warn!(
+                    "could not connect to komorebi.sock to reload {}; configuration reloads may not be picked up",
+                    path.display()
+                );
             }
             _ => {}
         })?;
