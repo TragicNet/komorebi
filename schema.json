@@ -3670,6 +3670,13 @@
           ],
           "default": "Tile"
         },
+        "transparency": {
+          "description": "Enable or disable transparency for unfocused windows on this monitor,\noverriding the global toggle. None follows the global setting.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "wallpaper": {
           "description": "Specify a wallpaper for this monitor",
           "anyOf": [
@@ -4592,6 +4599,13 @@
             "null"
           ],
           "default": true
+        },
+        "transparency": {
+          "description": "Enable or disable transparency for unfocused windows on this workspace,\noverriding the monitor setting and the global toggle. None follows the\nmonitor transparency, then the global setting.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "wallpaper": {
           "description": "Specify a wallpaper for this workspace",

@@ -319,6 +319,11 @@ pub struct WorkspaceConfig {
     /// Specify a wallpaper for this workspace
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wallpaper: Option<Wallpaper>,
+    /// Enable or disable transparency for unfocused windows on this workspace,
+    /// overriding the monitor setting and the global toggle. None follows the
+    /// monitor transparency, then the global setting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transparency: Option<bool>,
 }
 
 impl From<&Workspace> for WorkspaceConfig {
@@ -423,6 +428,7 @@ impl From<&Workspace> for WorkspaceConfig {
             layout_flip: value.layout_flip,
             floating_layer_behaviour: value.floating_layer_behaviour,
             wallpaper: None,
+            transparency: value.transparency,
         }
     }
 }
@@ -456,6 +462,10 @@ pub struct MonitorConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = FloatingLayerBehaviour::Tile)))]
     pub floating_layer_behaviour: Option<FloatingLayerBehaviour>,
+    /// Enable or disable transparency for unfocused windows on this monitor,
+    /// overriding the global toggle. None follows the global setting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transparency: Option<bool>,
 }
 
 impl From<&Monitor> for MonitorConfig {
@@ -493,6 +503,7 @@ impl From<&Monitor> for MonitorConfig {
             workspace_padding,
             wallpaper: value.wallpaper.clone(),
             floating_layer_behaviour: value.floating_layer_behaviour,
+            transparency: value.transparency,
         }
     }
 }
@@ -1791,6 +1802,7 @@ impl StaticConfig {
                 monitor.workspace_padding = monitor_config.workspace_padding;
                 monitor.wallpaper = monitor_config.wallpaper.clone();
                 monitor.floating_layer_behaviour = monitor_config.floating_layer_behaviour;
+                monitor.transparency = monitor_config.transparency;
 
                 monitor.update_workspaces_globals(offset);
                 for (j, ws) in monitor.workspaces_mut().iter_mut().enumerate() {
@@ -1893,6 +1905,7 @@ impl StaticConfig {
                     m.container_padding = monitor_config.container_padding;
                     m.workspace_padding = monitor_config.workspace_padding;
                     m.floating_layer_behaviour = monitor_config.floating_layer_behaviour;
+                    m.transparency = monitor_config.transparency;
 
                     m.update_workspaces_globals(offset);
 
@@ -1979,6 +1992,7 @@ impl StaticConfig {
                 monitor.workspace_padding = monitor_config.workspace_padding;
                 monitor.wallpaper = monitor_config.wallpaper.clone();
                 monitor.floating_layer_behaviour = monitor_config.floating_layer_behaviour;
+                monitor.transparency = monitor_config.transparency;
 
                 monitor.update_workspaces_globals(offset);
 
@@ -2073,6 +2087,7 @@ impl StaticConfig {
                     m.container_padding = monitor_config.container_padding;
                     m.workspace_padding = monitor_config.workspace_padding;
                     m.floating_layer_behaviour = monitor_config.floating_layer_behaviour;
+                    m.transparency = monitor_config.transparency;
 
                     m.update_workspaces_globals(offset);
 
@@ -2396,6 +2411,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::HIDE_PINNED_ON_EMPTY_WORKSPACES;
+    use crate::MonitorConfig;
     use crate::StaticConfig;
     use crate::TransparencyValue;
     use crate::WorkspaceConfig;
@@ -2683,5 +2699,69 @@ mod tests {
             }
             _ => panic!("expected detailed transparency settings"),
         }
+    }
+
+    #[test]
+    fn deserialize_per_scope_transparency_config() {
+        let config = serde_json::from_str::<StaticConfig>(
+            r#"
+        {
+            "monitors": [
+                {
+                    "transparency": false,
+                    "workspaces": [
+                        { "name": "I", "transparency": true },
+                        { "name": "II", "transparency": false }
+                    ]
+                }
+            ]
+        }
+        "#,
+        )
+        .unwrap();
+
+        let monitors = config.monitors.as_ref().unwrap();
+        assert_eq!(monitors.len(), 1);
+        assert_eq!(monitors[0].transparency, Some(false));
+        assert_eq!(monitors[0].workspaces[0].transparency, Some(true));
+        assert_eq!(monitors[0].workspaces[1].transparency, Some(false));
+    }
+
+    #[test]
+    fn load_static_config_seeds_workspace_transparency() {
+        let config: WorkspaceConfig =
+            serde_json::from_str(r#"{ "name": "I", "transparency": true }"#).unwrap();
+        let mut workspace = crate::workspace::Workspace::default();
+        workspace.load_static_config(&config, None).unwrap();
+        assert_eq!(workspace.transparency, Some(true));
+
+        let config: WorkspaceConfig = serde_json::from_str(r#"{ "name": "I" }"#).unwrap();
+        let mut workspace = crate::workspace::Workspace::default();
+        workspace.load_static_config(&config, None).unwrap();
+        assert_eq!(workspace.transparency, None);
+    }
+
+    #[test]
+    fn workspace_config_from_workspace_roundtrips_transparency() {
+        let mut workspace = crate::workspace::Workspace::default();
+        workspace.transparency = Some(false);
+        let config = WorkspaceConfig::from(&workspace);
+        assert_eq!(config.transparency, Some(false));
+    }
+
+    #[test]
+    fn monitor_config_from_monitor_roundtrips_transparency() {
+        let mut monitor = crate::monitor::new(
+            0,
+            crate::core::Rect::default(),
+            crate::core::Rect::default(),
+            "".into(),
+            "".into(),
+            "".into(),
+            None,
+        );
+        monitor.transparency = Some(false);
+        let config = MonitorConfig::from(&monitor);
+        assert_eq!(config.transparency, Some(false));
     }
 }

@@ -59,9 +59,11 @@ pub struct Monitor {
     pub workspace_padding: Option<i32>,
     pub wallpaper: Option<Wallpaper>,
     pub floating_layer_behaviour: Option<FloatingLayerBehaviour>,
-    /// Runtime-only transparency override for this monitor. None means "follow the
-    /// global transparency toggle"; set by toggle-monitor-transparency. Never
-    /// persisted to the static configuration.
+    /// Transparency override for this monitor. Seeded from the `transparency`
+    /// key in the `monitors` section of the static configuration at load time;
+    /// toggled at runtime by toggle-monitor-transparency. None means "follow
+    /// the global transparency toggle". Reloading the configuration reseeds
+    /// this field from config.
     #[serde(default)]
     pub transparency: Option<bool>,
     /// HWNDs of floating windows pinned across all workspaces on this monitor.

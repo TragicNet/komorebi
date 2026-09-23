@@ -4561,7 +4561,7 @@
           "$ref": "#/$defs/Rect"
         },
         "transparency": {
-          "description": "Runtime-only transparency override for this monitor. None means \"follow the\nglobal transparency toggle\"; set by toggle-monitor-transparency. Never\npersisted to the static configuration.",
+          "description": "Transparency override for this monitor. Seeded from the `transparency`\nkey in the `monitors` section of the static configuration at load time;\ntoggled at runtime by toggle-monitor-transparency. None means \"follow\nthe global transparency toggle\". Reloading the configuration reseeds\nthis field from config.",
           "type": [
             "boolean",
             "null"
@@ -10129,7 +10129,7 @@
           "type": "boolean"
         },
         "transparency": {
-          "description": "Runtime-only transparency override for this workspace. None means \"follow the\nmonitor setting, then the global transparency toggle\"; set by\ntoggle-workspace-transparency. Never persisted to the static configuration.",
+          "description": "Transparency override for this workspace. Seeded from the `transparency`\nkey in the workspace's static configuration entry at load time; toggled\nat runtime by toggle-workspace-transparency. None means \"follow the\nmonitor setting, then the global transparency toggle\". Reloading the\nconfiguration reseeds this field from config.",
           "type": [
             "boolean",
             "null"
@@ -10396,6 +10396,13 @@
             "null"
           ],
           "default": true
+        },
+        "transparency": {
+          "description": "Enable or disable transparency for unfocused windows on this workspace,\noverriding the monitor setting and the global toggle. None follows the\nmonitor transparency, then the global setting.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "wallpaper": {
           "description": "Specify a wallpaper for this workspace",

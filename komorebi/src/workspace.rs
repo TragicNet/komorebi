@@ -84,9 +84,11 @@ pub struct Workspace {
     pub latest_layout: Vec<Rect>,
     pub resize_dimensions: Vec<Option<Rect>>,
     pub tile: bool,
-    /// Runtime-only transparency override for this workspace. None means "follow the
-    /// monitor setting, then the global transparency toggle"; set by
-    /// toggle-workspace-transparency. Never persisted to the static configuration.
+    /// Transparency override for this workspace. Seeded from the `transparency`
+    /// key in the workspace's static configuration entry at load time; toggled
+    /// at runtime by toggle-workspace-transparency. None means "follow the
+    /// monitor setting, then the global transparency toggle". Reloading the
+    /// configuration reseeds this field from config.
     #[serde(default)]
     pub transparency: Option<bool>,
     pub work_area_offset: Option<Rect>,
@@ -405,6 +407,7 @@ impl Workspace {
         self.layout_flip = config.layout_flip;
         self.floating_layer_behaviour = config.floating_layer_behaviour;
         self.wallpaper = config.wallpaper.clone();
+        self.transparency = config.transparency;
 
         // Load layout options directly (LayoutOptions is used in both config and runtime)
         self.layout_options = config.layout_options;
