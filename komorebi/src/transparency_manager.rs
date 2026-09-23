@@ -155,14 +155,38 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
             continue 'receiver;
         }
 
-        // Settle: if a pass just ran, wait out the remainder of the settle window so a rapid focus
-        // chase (clicking/alt-tabbing across containers) paints the final state instead of flipping
-        // windows transparent/opaque on every intermediate focus event.
-        let elapsed = last_pass.elapsed();
-        if elapsed < SETTLE_DURATION {
-            std::thread::sleep(SETTLE_DURATION - elapsed);
+        // Coalesce a monitor/workspace switch burst into a single final pass. During a switch the
+        // OS foreground is transient and bounces across the workspaces being shown/hidden, so every
+        // intermediate decide+apply repaints against a transient foreground: windows that will end
+        // dimmed are restored opaque by a middle pass and then dimmed only when the foreground
+        // finally settles, which is the all-windows-opaque flash on every switch (even a single one).
+        // While any monitor is inside its (bounded, self-clearing) switch-stabilization window, keep
+        // draining and wait out the rest of that window, then let exactly one decide+apply run
+        // against the settled foreground.
+        let mut switch_settling = { wm.lock().any_monitor_switch_settling() };
+        if switch_settling {
+            // Bounded wait for the stabilization grace window to clear. The flag always clears
+            // (grace is time-based, 400 ms), so this loop terminates; the deadline only guards
+            // against a pathological event storm that keeps re-arming the window.
+            const SWITCH_COALESCE_DEADLINE_MS: u64 = 600;
+            let deadline = Instant::now() + Duration::from_millis(SWITCH_COALESCE_DEADLINE_MS);
+
+            while switch_settling && Instant::now() < deadline {
+                std::thread::sleep(SETTLE_DURATION);
+                switch_settling = wm.lock().any_monitor_switch_settling();
+            }
+
+            last_pass = Instant::now();
+        } else {
+            // Settle: if a pass just ran, wait out the remainder of the settle window so a rapid focus
+            // chase (clicking/alt-tabbing across containers) paints the final state instead of flipping
+            // windows transparent/opaque on every intermediate focus event.
+            let elapsed = last_pass.elapsed();
+            if elapsed < SETTLE_DURATION {
+                std::thread::sleep(SETTLE_DURATION - elapsed);
+            }
+            last_pass = Instant::now();
         }
-        last_pass = Instant::now();
 
         // Decide phase: compute which windows need their transparency state changed. The
         // WindowManager lock is held only while reading state; the OS foreground window and
