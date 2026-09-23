@@ -56,7 +56,9 @@ use windows::Win32::Graphics::Gdi::MonitorFromWindow;
 use windows::Win32::Graphics::Gdi::Rectangle;
 use windows::Win32::Graphics::Gdi::RoundRect;
 use windows::Win32::System::Com::CLSCTX_ALL;
+use windows::Win32::System::Com::COINIT_APARTMENTTHREADED;
 use windows::Win32::System::Com::CoCreateInstance;
+use windows::Win32::System::Com::CoInitializeEx;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Power::HPOWERNOTIFY;
 use windows::Win32::System::Power::RegisterPowerSettingNotification;
@@ -1693,6 +1695,23 @@ impl WindowsApi {
     }
 
     pub fn monitor_device_path(hmonitor: isize) -> Option<String> {
+        let now = Instant::now();
+        if let Some((path, cached_at)) = MONITOR_DEVICE_PATHS.lock().get(&hmonitor)
+            && now.duration_since(*cached_at) < MONITOR_DEVICE_PATH_TTL
+        {
+            return Some(path.clone());
+        }
+
+        let path = Self::enumerate_monitor_device_path(hmonitor);
+        if let Some(path) = &path {
+            MONITOR_DEVICE_PATHS
+                .lock()
+                .insert(hmonitor, (path.clone(), now));
+        }
+        path
+    }
+
+    fn enumerate_monitor_device_path(hmonitor: isize) -> Option<String> {
         for display in win32_display_data::connected_displays_all().flatten() {
             if display.hmonitor == hmonitor {
                 return Some(display.device_path.clone());
@@ -2093,16 +2112,48 @@ impl WindowsApi {
         unsafe { WTSRegisterSessionNotification(HWND(as_ptr!(hwnd)), 1) }.process()
     }
 
+    /// Initialise COM on the current thread as an STA apartment. The
+    /// `IDesktopWallpaper` interface is STA-registered, so it must be created
+    /// (and used) on the apartment thread that owns it; the wallpaper worker
+    /// calls this once at thread start and then reuses a cached instance.
+    pub fn co_initialize_sta() {
+        // S_OK and S_FALSE (already initialised on this thread) both count as
+        // success (`HRESULT::is_ok`); only a genuine failure is worth logging.
+        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        if !hr.is_ok() {
+            tracing::warn!("could not initialise COM apartment: {hr:?}");
+        }
+    }
+
+    /// A cached `IDesktopWallpaper` interface created on the calling thread's
+    /// apartment, so `set_wallpaper`/`get_wallpaper` no longer pay a full
+    /// `CoCreateInstance` round-trip on every wallpaper switch.
+    fn desktop_wallpaper() -> eyre::Result<IDesktopWallpaper> {
+        WALLPAPER_INSTANCE.with(|cell| {
+            if let Some(instance) = cell.get() {
+                return Ok(instance.clone());
+            }
+
+            let instance: IDesktopWallpaper =
+                unsafe { CoCreateInstance(&DesktopWallpaper, None, CLSCTX_ALL)? };
+            let _ = cell.set(instance.clone());
+            Ok(instance)
+        })
+    }
+
     pub fn set_wallpaper(path: &Path, hmonitor: isize) -> eyre::Result<()> {
         let path = path.canonicalize()?;
 
-        let wallpaper: IDesktopWallpaper =
-            unsafe { CoCreateInstance(&DesktopWallpaper, None, CLSCTX_ALL)? };
+        let wallpaper = Self::desktop_wallpaper()?;
+
+        if !WALLPAPER_POSITION_FILL.with(|cell| cell.get()) {
+            unsafe {
+                wallpaper.SetPosition(DWPOS_FILL)?;
+            }
+            WALLPAPER_POSITION_FILL.with(|cell| cell.set(true));
+        }
 
         let wallpaper_path = HSTRING::from(path.to_str().unwrap_or_default());
-        unsafe {
-            wallpaper.SetPosition(DWPOS_FILL)?;
-        }
 
         let monitor_id = if let Some(path) = Self::monitor_device_path(hmonitor) {
             PCWSTR::from_raw(HSTRING::from(path).as_ptr())
@@ -2118,8 +2169,7 @@ impl WindowsApi {
     }
 
     pub fn get_wallpaper(hmonitor: isize) -> eyre::Result<String> {
-        let wallpaper: IDesktopWallpaper =
-            unsafe { CoCreateInstance(&DesktopWallpaper, None, CLSCTX_ALL)? };
+        let wallpaper = Self::desktop_wallpaper()?;
 
         let monitor_id = if let Some(path) = Self::monitor_device_path(hmonitor) {
             PCWSTR::from_raw(HSTRING::from(path).as_ptr())
@@ -2136,3 +2186,26 @@ impl WindowsApi {
         .process()
     }
 }
+
+thread_local! {
+    /// Cached `IDesktopWallpaper` interface for the current thread. The coclass
+    /// is STA-registered, so the instance is created on (and confined to) the
+    /// first thread that uses it - the wallpaper worker - and reused for every
+    /// subsequent call instead of paying a full `CoCreateInstance` round-trip
+    /// per wallpaper switch.
+    static WALLPAPER_INSTANCE: std::cell::OnceCell<IDesktopWallpaper> =
+        const { std::cell::OnceCell::new() };
+    /// Whether `SetPosition(DWPOS_FILL)` has already been applied on this
+    /// thread's instance, avoiding a redundant COM round-trip on every call.
+    static WALLPAPER_POSITION_FILL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// How long a monitor-to-device-path mapping is reused before it is refreshed
+/// from the display data, so a monitor hotplug settles into a new path within a
+/// few seconds without paying a full display enumeration on every wallpaper set.
+const MONITOR_DEVICE_PATH_TTL: Duration = Duration::from_secs(10);
+
+/// Cache of `hmonitor -> device path`, so `set_wallpaper`/`get_wallpaper` do not
+/// enumerate every connected display on each call.
+static MONITOR_DEVICE_PATHS: LazyLock<Mutex<HashMap<isize, (String, Instant)>>> =
+    LazyLock::new(Default::default);

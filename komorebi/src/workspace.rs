@@ -1,12 +1,10 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::ffi::OsStr;
 use std::fmt::Display;
 use std::fmt::Formatter;
 use std::num::NonZeroUsize;
 use std::sync::atomic::Ordering;
 
-use crate::DATA_DIR;
 use crate::DEFAULT_CONTAINER_PADDING;
 use crate::DEFAULT_WORKSPACE_PADDING;
 use crate::FloatingLayerBehaviour;
@@ -36,14 +34,13 @@ use crate::stackbar_manager;
 use crate::stackbar_manager::STACKBAR_TAB_HEIGHT;
 use crate::static_config::WorkspaceConfig;
 use crate::static_config::register_workspace_rule_regex;
-use crate::theme_manager;
+use crate::wallpaper_worker;
 use crate::window::Window;
 use crate::window::WindowDetails;
 use crate::windows_api::WindowsApi;
 use color_eyre::eyre;
 use color_eyre::eyre::OptionExt;
 use komorebi_themes::Base16ColourPalette;
-use komorebi_themes::KomorebiThemeCustom as Custom;
 use regex::Regex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -510,6 +507,10 @@ impl Workspace {
         self.floating_windows().iter().any(|w| w.hwnd == hwnd)
     }
 
+    /// Apply this workspace's (or the monitor's) wallpaper. The slow Win32 shell
+    /// render and any uncached palette generation happen on the wallpaper worker;
+    /// a cached palette is resolved here so retile/refresh paths can hand the
+    /// theme to subscribers as before.
     pub fn apply_wallpaper(
         &self,
         hmonitor: isize,
@@ -517,9 +518,10 @@ impl Workspace {
     ) -> eyre::Result<Option<Box<KomorebiTheme>>> {
         let mut applied_theme = None;
         if let Some(wallpaper) = self.wallpaper.as_ref().or(monitor_wp.as_ref()) {
-            if let Err(error) = WindowsApi::set_wallpaper(&wallpaper.path, hmonitor) {
-                tracing::error!("failed to set wallpaper: {error}");
-            }
+            wallpaper_worker::WallpaperWorker::enqueue(wallpaper_worker::WallpaperRequest {
+                hmonitor,
+                wallpaper: wallpaper.clone(),
+            });
 
             if wallpaper.generate_theme.unwrap_or(true) {
                 let variant = wallpaper
@@ -528,95 +530,15 @@ impl Workspace {
                     .and_then(|t| t.theme_variant)
                     .unwrap_or_default();
 
-                let cached_palette = DATA_DIR.join(format!(
-                    "{}.base16.{variant}.json",
-                    wallpaper
-                        .path
-                        .file_name()
-                        .unwrap_or(OsStr::new("tmp"))
-                        .to_string_lossy()
-                ));
+                let cached_palette = wallpaper_worker::palette_cache_path(&wallpaper.path, variant);
 
-                let mut base16_palette = None;
-
-                if cached_palette.is_file() {
-                    tracing::info!(
-                        "colour palette for wallpaper {} found in cache",
-                        cached_palette.display()
-                    );
-
-                    // this code is VERY slow on debug builds - should only be a one-time issue when loading
-                    // an uncached wallpaper
-                    if let Ok(palette) = serde_json::from_str::<Base16ColourPalette>(
+                if cached_palette.is_file()
+                    && let Ok(palette) = serde_json::from_str::<Base16ColourPalette>(
                         &std::fs::read_to_string(&cached_palette)?,
-                    ) {
-                        base16_palette = Some(palette);
-                    }
-                };
-
-                if base16_palette.is_none() {
-                    base16_palette =
-                        komorebi_themes::generate_base16_palette(&wallpaper.path, variant).ok();
-
-                    std::fs::write(
-                        &cached_palette,
-                        serde_json::to_string_pretty(&base16_palette)?,
-                    )?;
-
-                    tracing::info!(
-                        "colour palette for wallpaper {} cached",
-                        cached_palette.display()
-                    );
-                }
-
-                if let Some(palette) = base16_palette {
-                    let komorebi_theme = KomorebiTheme::Custom(Custom {
-                        colours: Box::new(palette),
-                        single_border: wallpaper
-                            .theme_options
-                            .as_ref()
-                            .and_then(|o| o.single_border),
-                        stack_border: wallpaper
-                            .theme_options
-                            .as_ref()
-                            .and_then(|o| o.stack_border),
-                        monocle_border: wallpaper
-                            .theme_options
-                            .as_ref()
-                            .and_then(|o| o.monocle_border),
-                        floating_border: wallpaper
-                            .theme_options
-                            .as_ref()
-                            .and_then(|o| o.floating_border),
-                        pinned_border: wallpaper
-                            .theme_options
-                            .as_ref()
-                            .and_then(|o| o.pinned_border),
-                        unfocused_border: wallpaper
-                            .theme_options
-                            .as_ref()
-                            .and_then(|o| o.unfocused_border),
-                        unfocused_locked_border: wallpaper
-                            .theme_options
-                            .as_ref()
-                            .and_then(|o| o.unfocused_locked_border),
-                        stackbar_focused_text: wallpaper
-                            .theme_options
-                            .as_ref()
-                            .and_then(|o| o.stackbar_focused_text),
-                        stackbar_unfocused_text: wallpaper
-                            .theme_options
-                            .as_ref()
-                            .and_then(|o| o.stackbar_unfocused_text),
-                        stackbar_background: wallpaper
-                            .theme_options
-                            .as_ref()
-                            .and_then(|o| o.stackbar_background),
-                        bar_accent: wallpaper.theme_options.as_ref().and_then(|o| o.bar_accent),
-                    });
-
-                    theme_manager::send_notification(komorebi_theme.clone());
-                    applied_theme = Some(Box::new(komorebi_theme));
+                    )
+                {
+                    applied_theme =
+                        Some(Box::new(wallpaper_worker::build_theme(wallpaper, palette)));
                 }
             }
         }

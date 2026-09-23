@@ -24,6 +24,7 @@ pub mod static_config;
 pub mod styles;
 pub mod theme_manager;
 pub mod transparency_manager;
+pub mod wallpaper_worker;
 pub mod window;
 pub mod window_manager;
 pub mod window_manager_event;
