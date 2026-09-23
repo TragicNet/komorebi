@@ -4947,6 +4947,18 @@ impl WindowManager {
             .unwrap_or(false)
     }
 
+    /// Whether a workspace/monitor switch is still settling on any monitor.
+    /// During that window the OS foreground and the focus/show fallout it
+    /// generates are komorebi's own doing - asynchronous activations,
+    /// hide-induced auto-promotions and raise-dance echoes - so reactive paths
+    /// (the transparency pass, the alt-tab reconciliation) must gate on this
+    /// instead of trusting live OS focus state.
+    pub(crate) fn any_monitor_switch_settling(&self) -> bool {
+        self.monitors()
+            .iter()
+            .any(|monitor| monitor.within_switch_stabilization())
+    }
+
     /// Record that a Floating-overlay maintenance pass just ran; the next one
     /// is skipped for `OVERLAY_MAINTENANCE_INTERVAL` so a focus-change storm
     /// (an OS SystemForeground echo caused by the transient TopMost raise)
@@ -5119,6 +5131,36 @@ mod tests {
     #[test]
     fn test_create_window_manager() {
         let (_wm, _test_context) = setup_window_manager();
+    }
+
+    #[test]
+    fn test_any_monitor_switch_settling() {
+        let (mut wm, _test_context) = setup_window_manager();
+
+        let m = monitor::new(
+            0,
+            Rect::default(),
+            Rect::default(),
+            "TestMonitor".to_string(),
+            "TestDevice".to_string(),
+            "TestDeviceID".to_string(),
+            Some("TestMonitorID".to_string()),
+        );
+
+        assert!(!wm.any_monitor_switch_settling());
+
+        wm.monitors_mut().push_back(m);
+        assert!(!wm.any_monitor_switch_settling());
+
+        let now_epoch_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or_default();
+        wm.monitors_mut()[0].last_switch_at = Some(now_epoch_ms);
+        assert!(wm.any_monitor_switch_settling());
+
+        wm.monitors_mut()[0].last_switch_at = Some(now_epoch_ms.saturating_sub(500));
+        assert!(!wm.any_monitor_switch_settling());
     }
 
     #[test]
