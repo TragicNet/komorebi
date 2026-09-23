@@ -795,6 +795,10 @@ impl WindowManager {
                         let monocle_container = workspace.monocle_container.clone();
                         let previous_layer = workspace.layer;
                         let mut monitor_pinned_hwnd = None;
+                        // Whether the new window will actually receive focus below;
+                        // the pinned-band re-assert that follows must not bury a
+                        // new window that just took focus under the pins.
+                        let mut focused_new_window = false;
 
                         if !workspace_contains_window && needs_reconciliation.is_none() {
                             // The rule locks are scoped to the float/pin matching
@@ -935,6 +939,8 @@ impl WindowManager {
                                 || (self.focused_workspace()?.containers().is_empty()
                                     && self.focused_workspace()?.floating_windows().len() == 1)
                             {
+                                focused_new_window = true;
+
                                 // If after adding this window the workspace only contains 1 window, it
                                 // means it was previously empty and we focused the desktop to unfocus
                                 // any previous window from other workspace, so now we need to focus
@@ -946,6 +952,18 @@ impl WindowManager {
                             }
                         }
 
+                        // The new float just took focus: make it the layer's
+                        // remembered last-used float so enforce_layer_stack()
+                        // surfaces it instead of a previously remembered window —
+                        // usually a pinned window that would otherwise keep
+                        // re-raising above the new float. Read back through the
+                        // monitor so the workspace borrow above can end first.
+                        if focused_new_window {
+                            let workspace = self.focused_workspace_mut()?;
+                            workspace.last_focused_floating_hwnd = Some(window.hwnd);
+                            workspace.last_focused_cycle_window_hwnd = Some(window.hwnd);
+                        }
+
                         // If adding the window flipped the workspace layer, re-establish
                         // the layer stack so the whole layer the new window joined is
                         // drawn above its base consistently.
@@ -955,14 +973,23 @@ impl WindowManager {
                                 .enforce_layer_stack()?;
                         }
 
-                        // Re-assert the pinned floating band even without a layer flip
-                        // so a window that just joined a Floating workspace cannot bury
-                        // the pinned windows above it.
+                        // Re-assert the pinned floating band even without a layer
+                        // flip so the pins stay in their overlay band, then lift a
+                        // newly focused float above it: a window that just joined a
+                        // Floating workspace must not open buried behind the pins.
+                        // The float raise is enqueued after the pin band, so the
+                        // overlay invariant (base -> pins -> floats -> focused)
+                        // holds and mirrors what enforce_layer_stack() builds.
                         let focused_workspace = self.focused_workspace()?;
                         if focused_workspace.layer == WorkspaceLayer::Floating {
-                            self.focused_monitor()
-                                .ok_or_eyre("there is no monitor with this idx")?
-                                .raise_pinned_windows();
+                            let monitor = self
+                                .focused_monitor()
+                                .ok_or_eyre("there is no monitor with this idx")?;
+                            monitor.raise_pinned_windows();
+
+                            if focused_new_window {
+                                ApplyWorker::raise_above_active(vec![window]);
+                            }
                         }
 
                         if workspace_contains_window {

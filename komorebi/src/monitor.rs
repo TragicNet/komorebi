@@ -350,21 +350,7 @@ impl Monitor {
                 .focused_container()
                 .and_then(|container| container.focused_window())
                 .copied(),
-            WorkspaceLayer::Floating => {
-                // Surface a pinned window only when it is the layer's remembered
-                // last-used float, i.e. the user's last float interaction was
-                // that pinned window. Do NOT consult the live foreground here:
-                // Window::focus() activates asynchronously via sendInput, so the
-                // foreground is stale mid-toggle and an incidentally active pin
-                // would wrongly be raised above the window that was focused.
-                if let Some(hwnd) = workspace.last_focused_floating_hwnd
-                    && self.is_pinned(hwnd)
-                {
-                    Some(Window::from(hwnd))
-                } else {
-                    workspace.focused_floating_window().copied()
-                }
-            }
+            WorkspaceLayer::Floating => self.focused_floating_layer_window(workspace),
         };
 
         // With `climb_active` every managed band is raised via the transient
@@ -544,6 +530,25 @@ impl Monitor {
         self.apply_pin_visibility()?;
 
         Ok(())
+    }
+
+    /// The window to surface on top of the Floating overlay when the layer stack
+    /// is rebuilt. A pinned window is surfaced only when it is the layer's
+    /// remembered last-used float, i.e. the user's last float interaction was
+    /// that pinned window; otherwise the workspace's ring-focused float wins.
+    ///
+    /// The live foreground is deliberately not consulted: `Window::focus()`
+    /// activates asynchronously via sendInput, so the foreground is stale
+    /// mid-toggle and an incidentally active pin would wrongly be raised above
+    /// the window that was focused.
+    fn focused_floating_layer_window(&self, workspace: &Workspace) -> Option<Window> {
+        if let Some(hwnd) = workspace.last_focused_floating_hwnd
+            && self.is_pinned(hwnd)
+        {
+            Some(Window::from(hwnd))
+        } else {
+            workspace.focused_floating_window().copied()
+        }
     }
 
     /// Places the pinned floating windows of all workspaces on this monitor in
@@ -1741,5 +1746,47 @@ mod tests {
         assert_eq!(m.pinned_floating, vec![10]);
 
         HIDE_PINNED_ON_EMPTY_WORKSPACES.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn test_floating_focused_layer_window_tracks_last_focused_float() {
+        let mut m = Monitor::new(
+            0,
+            Rect::default(),
+            Rect::default(),
+            "TestMonitor".to_string(),
+            "TestDevice".to_string(),
+            "TestDeviceID".to_string(),
+            Some("TestMonitorID".to_string()),
+        );
+
+        m.pin_floating_window(10);
+        {
+            let workspace = m.focused_workspace_mut().unwrap();
+            workspace.floating_windows_mut().push_back(Window::from(20));
+
+            // The newly added float takes over the layer's last-used memory, so
+            // it wins the surface even though a pinned window was remembered.
+            workspace.last_focused_floating_hwnd = Some(20);
+            workspace.last_focused_cycle_window_hwnd = Some(20);
+        }
+
+        let workspace = m.focused_workspace().unwrap();
+        assert_eq!(
+            m.focused_floating_layer_window(workspace).map(|w| w.hwnd),
+            Some(20)
+        );
+
+        // A remembered pinned window still surfaces when the user's last float
+        // interaction was that pin: raise_pinned and the layer-flip path report
+        // it as the focused window on top of the overlay.
+        m.focused_workspace_mut()
+            .unwrap()
+            .last_focused_floating_hwnd = Some(10);
+        let workspace = m.focused_workspace().unwrap();
+        assert_eq!(
+            m.focused_floating_layer_window(workspace).map(|w| w.hwnd),
+            Some(10)
+        );
     }
 }

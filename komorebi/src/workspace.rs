@@ -3253,6 +3253,35 @@ mod tests {
         assert_eq!(workspace.last_focused_floating_hwnd, Some(10));
     }
 
+    /// The new-window handler records a freshly focused float as the layer's
+    /// last-use memory. Direct field assignment mirrors the handler (and the
+    /// FocusChange handler for pinned windows): pins never join the workspace's
+    /// floating ring, so a "previously remembered float" cannot be expressed
+    /// through the ring API.
+    #[allow(clippy::field_reassign_with_default)]
+    #[test]
+    fn test_new_float_replaces_pinned_last_focused_floating_hwnd() {
+        let mut workspace = Workspace::default();
+
+        // A pinned window was the layer's last-used float (pins live on the
+        // monitor, not in the workspace's floating ring).
+        workspace.last_focused_floating_hwnd = Some(10);
+        workspace.last_focused_cycle_window_hwnd = Some(10);
+
+        // The new-window handler pushes the new float onto the ring and records
+        // it as the last-used float so layer-stack enforcement surfaces the new
+        // float above the pinned band instead of the stale pin.
+        workspace.floating_windows_mut().push_back(Window::from(20));
+        workspace.last_focused_floating_hwnd = Some(20);
+        workspace.last_focused_cycle_window_hwnd = Some(20);
+
+        assert_eq!(workspace.last_focused_floating_hwnd, Some(20));
+        assert_eq!(
+            workspace.focused_floating_window(),
+            Some(&Window { hwnd: 20 })
+        );
+    }
+
     #[test]
     fn test_contains_managed_window() {
         let mut workspace = Workspace::default();
