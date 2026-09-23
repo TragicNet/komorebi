@@ -2750,6 +2750,12 @@ if (!(Get-Process komorebi-bar -ErrorAction SilentlyContinue))
                 let current = transparency_manager::TRANSPARENCY_MONOCLE.load(Ordering::SeqCst);
                 transparency_manager::TRANSPARENCY_MONOCLE.store(!current, Ordering::SeqCst);
             }
+            SocketMessage::ToggleWorkspaceTransparency => {
+                self.toggle_workspace_transparency()?;
+            }
+            SocketMessage::ToggleMonitorTransparency => {
+                self.toggle_monitor_transparency()?;
+            }
             SocketMessage::TransparencyMonocle(enable) => {
                 transparency_manager::TRANSPARENCY_MONOCLE.store(enable, Ordering::SeqCst);
             }

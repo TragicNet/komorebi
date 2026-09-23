@@ -226,6 +226,8 @@ pub enum SocketMessage {
     ToggleTransparencyFloating,
     TransparencyMonocle(bool),
     ToggleTransparencyMonocle,
+    ToggleWorkspaceTransparency,
+    ToggleMonitorTransparency,
     InvisibleBorders(Rect),
     StackbarMode(StackbarMode),
     StackbarLabel(StackbarLabel),

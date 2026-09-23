@@ -3604,6 +3604,28 @@ impl WindowManager {
     }
 
     #[tracing::instrument(skip(self))]
+    pub fn toggle_monitor_transparency(&mut self) -> eyre::Result<()> {
+        let global_enabled = transparency_manager::TRANSPARENCY_ENABLED.load(Ordering::SeqCst);
+        let monitor = self
+            .focused_monitor_mut()
+            .ok_or_eyre("there is no monitor")?;
+        let current = monitor.transparency.unwrap_or(global_enabled);
+        monitor.transparency = Option::from(!current);
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub fn toggle_workspace_transparency(&mut self) -> eyre::Result<()> {
+        let global_enabled = transparency_manager::TRANSPARENCY_ENABLED.load(Ordering::SeqCst);
+        let monitor = self.focused_monitor().ok_or_eyre("there is no monitor")?;
+        let monitor_transparency = monitor.transparency.unwrap_or(global_enabled);
+        let workspace = self.focused_workspace_mut()?;
+        let current = workspace.transparency.unwrap_or(monitor_transparency);
+        workspace.transparency = Option::from(!current);
+        Ok(())
+    }
+
+    #[tracing::instrument(skip(self))]
     pub fn toggle_float(&mut self, force_float: bool) -> eyre::Result<()> {
         let hwnd = WindowsApi::foreground_window()?;
 

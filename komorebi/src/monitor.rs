@@ -59,6 +59,11 @@ pub struct Monitor {
     pub workspace_padding: Option<i32>,
     pub wallpaper: Option<Wallpaper>,
     pub floating_layer_behaviour: Option<FloatingLayerBehaviour>,
+    /// Runtime-only transparency override for this monitor. None means "follow the
+    /// global transparency toggle"; set by toggle-monitor-transparency. Never
+    /// persisted to the static configuration.
+    #[serde(default)]
+    pub transparency: Option<bool>,
     /// HWNDs of floating windows pinned across all workspaces on this monitor.
     /// Pinned windows live here (not in any workspace's `floating_windows`) and
     /// are treated as part of the floating overlay of whichever workspace is
@@ -129,6 +134,7 @@ pub fn new(
         workspace_padding: None,
         wallpaper: None,
         floating_layer_behaviour: None,
+        transparency: None,
         pinned_floating: vec![],
         pinned_always_on_top: vec![],
     }
@@ -183,6 +189,7 @@ impl Monitor {
             workspace_padding: None,
             wallpaper: None,
             floating_layer_behaviour: None,
+            transparency: None,
             pinned_floating: vec![],
             pinned_always_on_top: vec![],
         }

@@ -160,6 +160,7 @@ impl State {
                 || stripped.workspace_padding != live.workspace_padding
                 || stripped.wallpaper != live.wallpaper
                 || stripped.floating_layer_behaviour != live.floating_layer_behaviour
+                || stripped.transparency != live.transparency
                 || stripped.pinned_floating != live.pinned_floating
                 || stripped.pinned_always_on_top != live.pinned_always_on_top
             {
@@ -215,6 +216,7 @@ fn workspaces_modified(stripped: &Ring<Workspace>, live: &Ring<Workspace>) -> bo
             || s.layer_lock != l.layer_lock
             || s.ignored_windows_above_managed != l.ignored_windows_above_managed
             || s.floating_layer_behaviour != l.floating_layer_behaviour
+            || s.transparency != l.transparency
             || s.globals != l.globals
             || s.wallpaper != l.wallpaper
         {
@@ -392,6 +394,7 @@ impl From<&WindowManager> for State {
                             layer_lock: workspace.layer_lock,
                             ignored_windows_above_managed: workspace.ignored_windows_above_managed,
                             floating_layer_behaviour: workspace.floating_layer_behaviour,
+                            transparency: workspace.transparency,
                             globals: workspace.globals,
                             wallpaper: workspace.wallpaper.clone(),
                             workspace_config: None,
@@ -414,6 +417,7 @@ impl From<&WindowManager> for State {
                 workspace_padding: monitor.workspace_padding,
                 wallpaper: monitor.wallpaper.clone(),
                 floating_layer_behaviour: monitor.floating_layer_behaviour,
+                transparency: monitor.transparency,
                 pinned_floating: monitor.pinned_floating.clone(),
                 pinned_always_on_top: monitor.pinned_always_on_top.clone(),
             })

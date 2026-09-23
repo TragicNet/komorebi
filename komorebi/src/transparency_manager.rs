@@ -135,7 +135,20 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
         // nothing to coalesce, so restoring any leftover dimmed windows and returning straight
         // away avoids waking up and sleeping on every event. A restore is also not the kind of
         // visual flip-flopping the settle window exists to coalesce.
-        if !TRANSPARENCY_ENABLED.load_consume() {
+        // Transparency stays active even when the global toggle is off if any monitor or
+        // workspace has a runtime override explicitly enabling it (the focused-scope toggles
+        // work independently of the global switch). The monitor/workspace state is read under
+        // the lock for this brief scan only; the restore path below never holds the WM lock.
+        let transparency_active = TRANSPARENCY_ENABLED.load_consume() || {
+            let state = wm.lock();
+            state.monitors.elements().iter().any(|m| {
+                m.transparency == Some(true)
+                    || m.workspaces()
+                        .iter()
+                        .any(|ws| ws.transparency == Some(true))
+            })
+        };
+        if !transparency_active {
             // Restore every window komorebi made transparent, including windows on non-focused
             // workspaces that were dimmed while their workspace was focused: KNOWN_HWNDS persists
             // across passes, so this is the full set rather than last pass's focused-workspace set.
@@ -310,8 +323,14 @@ fn decide_targets(
 
     let focused_monitor_idx = state.focused_monitor_idx();
 
+    let global_enabled = TRANSPARENCY_ENABLED.load_consume();
+
     'monitors: for (monitor_idx, m) in state.monitors.elements().iter().enumerate() {
         let focused_workspace_idx = m.focused_workspace_idx();
+
+        // Per-scope effective transparency: a runtime override on the monitor wins over the
+        // global toggle, and an override on the workspace wins over both.
+        let monitor_transparency = m.transparency.unwrap_or(global_enabled);
 
         // Pinned floating windows stay visible across all workspaces on the
         // monitor, so they are always kept opaque.
@@ -320,6 +339,8 @@ fn decide_targets(
         }
 
         'workspaces: for (workspace_idx, ws) in m.workspaces().iter().enumerate() {
+            let workspace_transparency = ws.transparency.unwrap_or(monitor_transparency);
+
             // Non-focused workspaces are hidden; leave their windows at the transparency computed
             // when they were last focused. Force-opaquing them here would reveal them fully opaque
             // for one pass when the user switches to them, because the workspace is restored
@@ -342,7 +363,8 @@ fn decide_targets(
             // so it is only dimmed when the user is looking at another monitor.
             if let Some(monocle) = &ws.monocle_container {
                 if let Some(window) = monocle.focused_window() {
-                    let transparent = TRANSPARENCY_MONOCLE.load_consume()
+                    let transparent = workspace_transparency
+                        && TRANSPARENCY_MONOCLE.load_consume()
                         && monitor_idx != focused_monitor_idx
                         && !is_transparency_blacklisted(
                             window,
@@ -358,6 +380,16 @@ fn decide_targets(
                 }
 
                 continue 'monitors;
+            }
+
+            // A workspace with transparency disabled never dims its windows: restore the visible
+            // ones to opaque (they were dimmed while the scope was enabled) and move on.
+            if !workspace_transparency {
+                for window in ws.visible_windows().iter().flatten() {
+                    opaque_targets.push(window.hwnd);
+                }
+
+                continue 'workspaces;
             }
 
             // A maximized foreground window covers its whole monitor, so skip the container pass
@@ -484,13 +516,17 @@ mod tests {
     }
 
     impl StateGuard {
-        fn enable() -> Self {
-            let guard = Self {
+        fn lock() -> Self {
+            Self {
                 _state_lock: TEST_LOCK.lock(),
                 previous_enabled: TRANSPARENCY_ENABLED.load_consume(),
                 previous_floating: TRANSPARENCY_FLOATING.load_consume(),
                 previous_monocle: TRANSPARENCY_MONOCLE.load_consume(),
-            };
+            }
+        }
+
+        fn enable() -> Self {
+            let guard = Self::lock();
 
             TRANSPARENCY_ENABLED.store(true, Ordering::SeqCst);
             TRANSPARENCY_FLOATING.store(true, Ordering::SeqCst);
@@ -796,5 +832,156 @@ mod tests {
         // The hidden workspace's dimmed window must still be tracked so that toggling
         // transparency off restores it to opaque; previously the per-pass clear dropped it.
         assert!(known.contains(&20));
+    }
+
+    #[test]
+    fn test_toggle_monitor_transparency() {
+        let _guard = StateGuard::enable();
+        let mut wm = window_manager_with_floats(&[&[10]]);
+
+        // The global toggle is on and the focused monitor carries no override yet, so toggling
+        // flips the monitor override to off; its windows are restored to opaque.
+        wm.toggle_monitor_transparency().unwrap();
+        assert_eq!(wm.monitors_mut()[0].transparency, Some(false));
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+        assert!(transparent.is_empty());
+        assert_eq!(opaque, vec![10]);
+
+        // Toggling again flips the override back to on, which wins over the now-off state being
+        // applied to the focused workspace (the global toggle is still on).
+        wm.toggle_monitor_transparency().unwrap();
+        assert_eq!(wm.monitors_mut()[0].transparency, Some(true));
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+        assert_eq!(transparent, vec![10]);
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_toggle_workspace_transparency_precedence() {
+        let _guard = StateGuard::enable();
+        let mut wm = window_manager_with_floats(&[&[10]]);
+
+        // The focused monitor and workspace carry no overrides; the effective value falls back to
+        // the global toggle (on), so toggling the workspace flips it to off.
+        wm.toggle_workspace_transparency().unwrap();
+        let workspace = wm.focused_workspace_mut().unwrap();
+        assert_eq!(workspace.transparency, Some(false));
+
+        // A monitor override is introduced; with the workspace override still unset the effective
+        // value falls back to it, and the workspace toggle flips from that override.
+        wm.monitors_mut()[0].transparency = Some(false);
+        wm.toggle_workspace_transparency().unwrap();
+        assert_eq!(wm.focused_workspace_mut().unwrap().transparency, Some(true));
+    }
+
+    #[test]
+    fn test_workspace_override_disables_dimming_with_global_enabled() {
+        let _guard = StateGuard::enable();
+        let mut wm = window_manager_with_floats(&[&[10]]);
+        wm.focused_workspace_mut().unwrap().transparency = Some(false);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert!(transparent.is_empty());
+        assert_eq!(opaque, vec![10]);
+    }
+
+    #[test]
+    fn test_workspace_override_enables_dimming_with_global_disabled() {
+        let _guard = StateGuard::lock();
+        TRANSPARENCY_ENABLED.store(false, Ordering::SeqCst);
+        TRANSPARENCY_FLOATING.store(true, Ordering::SeqCst);
+        let mut wm = window_manager_with_floats(&[&[10]]);
+        wm.focused_workspace_mut().unwrap().transparency = Some(true);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert_eq!(transparent, vec![10]);
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_workspace_override_beats_monitor_override() {
+        let _guard = StateGuard::lock();
+        TRANSPARENCY_ENABLED.store(false, Ordering::SeqCst);
+        TRANSPARENCY_FLOATING.store(true, Ordering::SeqCst);
+        let mut wm = window_manager_with_floats(&[&[10]]);
+        wm.focused_workspace_mut().unwrap().transparency = Some(true);
+        wm.monitors_mut()[0].transparency = Some(false);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert_eq!(transparent, vec![10]);
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_monitor_override_enables_dimming_with_global_disabled() {
+        let _guard = StateGuard::lock();
+        TRANSPARENCY_ENABLED.store(false, Ordering::SeqCst);
+        TRANSPARENCY_FLOATING.store(true, Ordering::SeqCst);
+        let mut wm = window_manager_with_floats(&[&[10]]);
+        wm.monitors_mut()[0].transparency = Some(true);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert_eq!(transparent, vec![10]);
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_static_config_transparency_legacy_boolean_applies() {
+        let _guard = StateGuard::lock();
+        let mut config =
+            serde_json::from_str::<crate::StaticConfig>(r#"{ "transparency": true }"#).unwrap();
+        config.apply_globals().unwrap();
+
+        assert!(TRANSPARENCY_ENABLED.load_consume());
+        assert!(!TRANSPARENCY_FLOATING.load_consume());
+        assert!(!TRANSPARENCY_MONOCLE.load_consume());
+        assert_eq!(TRANSPARENCY_ALPHA.load_consume(), 200);
+    }
+
+    #[test]
+    fn test_static_config_transparency_nested_settings_apply() {
+        let _guard = StateGuard::lock();
+        let mut config = serde_json::from_str::<crate::StaticConfig>(
+            r#"
+            {
+                "transparency": {
+                    "enabled": true,
+                    "alpha": 120,
+                    "floating": true,
+                    "monocle": true
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        config.apply_globals().unwrap();
+
+        assert!(TRANSPARENCY_ENABLED.load_consume());
+        assert!(TRANSPARENCY_FLOATING.load_consume());
+        assert!(TRANSPARENCY_MONOCLE.load_consume());
+        assert_eq!(TRANSPARENCY_ALPHA.load_consume(), 120);
+    }
+
+    #[test]
+    fn test_static_config_transparency_nested_settings_take_precedence() {
+        let _guard = StateGuard::lock();
+        let mut config = serde_json::from_str::<crate::StaticConfig>(
+            r#"
+            {
+                "transparency": { "alpha": 90, "floating": true },
+                "transparency_alpha": 150,
+                "transparency_floating": false
+            }
+            "#,
+        )
+        .unwrap();
+        config.apply_globals().unwrap();
+
+        assert_eq!(TRANSPARENCY_ALPHA.load_consume(), 90);
+        assert!(TRANSPARENCY_FLOATING.load_consume());
     }
 }

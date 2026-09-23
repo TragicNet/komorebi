@@ -4560,6 +4560,14 @@
         "size": {
           "$ref": "#/$defs/Rect"
         },
+        "transparency": {
+          "description": "Runtime-only transparency override for this monitor. None means \"follow the\nglobal transparency toggle\"; set by toggle-monitor-transparency. Never\npersisted to the static configuration.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
         "wallpaper": {
           "anyOf": [
             {
@@ -7880,6 +7888,30 @@
         {
           "type": "object",
           "properties": {
+            "type": {
+              "type": "string",
+              "const": "ToggleWorkspaceTransparency"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "ToggleMonitorTransparency"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "content": {
               "$ref": "#/$defs/Rect"
             },
@@ -10095,6 +10127,14 @@
         },
         "tile": {
           "type": "boolean"
+        },
+        "transparency": {
+          "description": "Runtime-only transparency override for this workspace. None means \"follow the\nmonitor setting, then the global transparency toggle\"; set by\ntoggle-workspace-transparency. Never persisted to the static configuration.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
         },
         "wallpaper": {
           "anyOf": [

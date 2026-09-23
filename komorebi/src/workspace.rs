@@ -84,6 +84,11 @@ pub struct Workspace {
     pub latest_layout: Vec<Rect>,
     pub resize_dimensions: Vec<Option<Rect>>,
     pub tile: bool,
+    /// Runtime-only transparency override for this workspace. None means "follow the
+    /// monitor setting, then the global transparency toggle"; set by
+    /// toggle-workspace-transparency. Never persisted to the static configuration.
+    #[serde(default)]
+    pub transparency: Option<bool>,
     pub work_area_offset: Option<Rect>,
     pub apply_window_based_work_area_offset: bool,
     pub window_container_behaviour: Option<WindowContainerBehaviour>,
@@ -174,6 +179,7 @@ impl Default for Workspace {
             latest_layout: vec![],
             resize_dimensions: vec![],
             tile: true,
+            transparency: None,
             work_area_offset: None,
             apply_window_based_work_area_offset: true,
             window_container_behaviour: None,

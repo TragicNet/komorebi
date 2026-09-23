@@ -812,6 +812,7 @@ where
                                                 && cached.pinned_floating.contains(hwnd)
                                         })
                                         .collect(),
+                                    transparency: cached.transparency,
                                 };
 
                                 let focused_workspace_idx = m.focused_workspace_idx();

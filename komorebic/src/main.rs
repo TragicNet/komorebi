@@ -1568,6 +1568,10 @@ enum SubCommand {
     TransparencyMonocle(TransparencyMonocle),
     /// Toggle transparency for unfocused monocle windows
     ToggleTransparencyMonocle,
+    /// Toggle transparency for unfocused windows on the focused workspace
+    ToggleWorkspaceTransparency,
+    /// Toggle transparency for unfocused windows on the focused monitor
+    ToggleMonitorTransparency,
     /// Enable or disable movement animations
     #[clap(arg_required_else_help = true)]
     Animation(Animation),
@@ -3314,6 +3318,12 @@ if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
         }
         SubCommand::ToggleTransparencyMonocle => {
             send_message(&SocketMessage::ToggleTransparencyMonocle)?;
+        }
+        SubCommand::ToggleWorkspaceTransparency => {
+            send_message(&SocketMessage::ToggleWorkspaceTransparency)?;
+        }
+        SubCommand::ToggleMonitorTransparency => {
+            send_message(&SocketMessage::ToggleMonitorTransparency)?;
         }
         SubCommand::Animation(args) => {
             send_message(&SocketMessage::Animation(

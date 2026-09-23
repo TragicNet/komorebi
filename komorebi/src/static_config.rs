@@ -509,6 +509,42 @@ pub enum AppSpecificConfigurationPath {
     Multiple(#[serde_as(as = "Vec<ResolvedPathBuf>")] Vec<PathBuf>),
 }
 
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+/// Settings for unfocused window transparency, grouped under the `transparency` key
+pub struct TransparencySettings {
+    /// Add transparency to unfocused windows
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(extend("default" = transparency_manager::TRANSPARENCY_ENABLED)))]
+    pub enabled: Option<bool>,
+    /// Alpha value for unfocused window transparency [[0-255]]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(extend("default" = transparency_manager::TRANSPARENCY_ALPHA)))]
+    pub alpha: Option<u8>,
+    /// Add transparency to unfocused floating windows
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(extend("default" = transparency_manager::TRANSPARENCY_FLOATING)))]
+    pub floating: Option<bool>,
+    /// Add transparency to unfocused monocle windows
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(extend("default" = transparency_manager::TRANSPARENCY_MONOCLE)))]
+    pub monocle: Option<bool>,
+    /// Individual window transparency ignore rules
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ignore_rules: Option<Vec<MatchingRule>>,
+}
+
+/// Transparency configuration: either the legacy boolean toggle or a grouped settings object
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum TransparencyValue {
+    /// Add transparency to unfocused windows
+    Legacy(bool),
+    /// Grouped transparency settings
+    Detailed(TransparencySettings),
+}
+
 #[serde_with::serde_as]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -638,10 +674,10 @@ pub struct StaticConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = BorderImplementation::Komorebi)))]
     pub border_implementation: Option<BorderImplementation>,
-    /// Add transparency to unfocused windows
+    /// Add transparency to unfocused windows: either a boolean toggle or a grouped settings object
+    /// (nested fields take precedence over the legacy flat keys below)
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "schemars", schemars(extend("default" = transparency_manager::TRANSPARENCY_ENABLED)))]
-    pub transparency: Option<bool>,
+    pub transparency: Option<TransparencyValue>,
     /// Alpha value for unfocused window transparency [[0-255]]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = transparency_manager::TRANSPARENCY_ALPHA)))]
@@ -989,19 +1025,25 @@ impl From<&WindowManager> for StaticConfig {
             border_offset: Option::from(border_manager::BORDER_OFFSET.load(Ordering::SeqCst)),
             border: Option::from(border_manager::BORDER_ENABLED.load(Ordering::SeqCst)),
             border_colours,
-            transparency: Option::from(
-                transparency_manager::TRANSPARENCY_ENABLED.load(Ordering::SeqCst),
-            ),
-            transparency_alpha: Option::from(
-                transparency_manager::TRANSPARENCY_ALPHA.load(Ordering::SeqCst),
-            ),
-            transparency_floating: Option::from(
-                transparency_manager::TRANSPARENCY_FLOATING.load(Ordering::SeqCst),
-            ),
-            transparency_monocle: Option::from(
-                transparency_manager::TRANSPARENCY_MONOCLE.load(Ordering::SeqCst),
-            ),
+            transparency: Option::from(TransparencyValue::Detailed(TransparencySettings {
+                enabled: Option::from(
+                    transparency_manager::TRANSPARENCY_ENABLED.load(Ordering::SeqCst),
+                ),
+                alpha: Option::from(
+                    transparency_manager::TRANSPARENCY_ALPHA.load(Ordering::SeqCst),
+                ),
+                floating: Option::from(
+                    transparency_manager::TRANSPARENCY_FLOATING.load(Ordering::SeqCst),
+                ),
+                monocle: Option::from(
+                    transparency_manager::TRANSPARENCY_MONOCLE.load(Ordering::SeqCst),
+                ),
+                ignore_rules: None,
+            })),
+            transparency_alpha: None,
             transparency_ignore_rules: None,
+            transparency_floating: None,
+            transparency_monocle: None,
             border_style: Option::from(STYLE.load()),
             #[allow(deprecated)]
             border_z_order: None,
@@ -1067,7 +1109,7 @@ impl From<&WindowManager> for StaticConfig {
 
 impl StaticConfig {
     #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
-    fn apply_globals(&mut self) -> eyre::Result<()> {
+    pub(crate) fn apply_globals(&mut self) -> eyre::Result<()> {
         *FLOATING_WINDOW_TOGGLE_ASPECT_RATIO.lock() = self
             .floating_window_aspect_ratio
             .unwrap_or(AspectRatio::Predefined(PredefinedAspectRatio::Standard));
@@ -1268,19 +1310,44 @@ impl StaticConfig {
             border_manager::send_notification(None);
         }
 
+        let transparency_settings = match &self.transparency {
+            Some(TransparencyValue::Detailed(settings)) => Some(settings),
+            _ => None,
+        };
+
+        let transparency_enabled = match &self.transparency {
+            Some(TransparencyValue::Legacy(enabled)) => Some(*enabled),
+            Some(TransparencyValue::Detailed(settings)) => settings.enabled,
+            _ => None,
+        };
+
+        // Nested settings under the `transparency` key take precedence over the legacy flat keys.
         transparency_manager::TRANSPARENCY_ENABLED
-            .store(self.transparency.unwrap_or(false), Ordering::SeqCst);
+            .store(transparency_enabled.unwrap_or(false), Ordering::SeqCst);
 
         transparency_manager::TRANSPARENCY_FLOATING.store(
-            self.transparency_floating.unwrap_or(false),
+            transparency_settings
+                .and_then(|settings| settings.floating)
+                .or(self.transparency_floating)
+                .unwrap_or(false),
             Ordering::SeqCst,
         );
 
-        transparency_manager::TRANSPARENCY_MONOCLE
-            .store(self.transparency_monocle.unwrap_or(false), Ordering::SeqCst);
+        transparency_manager::TRANSPARENCY_MONOCLE.store(
+            transparency_settings
+                .and_then(|settings| settings.monocle)
+                .or(self.transparency_monocle)
+                .unwrap_or(false),
+            Ordering::SeqCst,
+        );
 
-        transparency_manager::TRANSPARENCY_ALPHA
-            .store(self.transparency_alpha.unwrap_or(200), Ordering::SeqCst);
+        transparency_manager::TRANSPARENCY_ALPHA.store(
+            transparency_settings
+                .and_then(|settings| settings.alpha)
+                .or(self.transparency_alpha)
+                .unwrap_or(200),
+            Ordering::SeqCst,
+        );
 
         let mut ignore_identifiers = IGNORE_IDENTIFIERS.lock();
         let mut regex_identifiers = REGEX_IDENTIFIERS.lock();
@@ -1363,8 +1430,16 @@ impl StaticConfig {
         }
 
         transparency_blacklist.clear();
-        if let Some(rules) = &mut self.transparency_ignore_rules {
-            populate_rules(rules, &mut transparency_blacklist, &mut regex_identifiers)?;
+        let transparency_ignore_rules = transparency_settings
+            .and_then(|settings| settings.ignore_rules.as_ref())
+            .or(self.transparency_ignore_rules.as_ref());
+        if let Some(rules) = transparency_ignore_rules {
+            let mut rules = rules.clone();
+            populate_rules(
+                &mut rules,
+                &mut transparency_blacklist,
+                &mut regex_identifiers,
+            )?;
         }
 
         slow_application_identifiers.clear();
@@ -2322,6 +2397,7 @@ mod tests {
 
     use crate::HIDE_PINNED_ON_EMPTY_WORKSPACES;
     use crate::StaticConfig;
+    use crate::TransparencyValue;
     use crate::WorkspaceConfig;
     use crate::core::config_generation::FloatingApplicationRule;
     use crate::core::config_generation::FloatingApplicationRuleSimple;
@@ -2548,5 +2624,64 @@ mod tests {
         );
 
         HIDE_PINNED_ON_EMPTY_WORKSPACES.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn deserialize_transparency_legacy_boolean() {
+        let config = serde_json::from_str::<StaticConfig>(r#"{ "transparency": true }"#).unwrap();
+        assert!(matches!(
+            config.transparency,
+            Some(TransparencyValue::Legacy(true))
+        ));
+
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(serialized.contains("\"transparency\":true"));
+    }
+
+    #[test]
+    fn deserialize_transparency_detailed_object() {
+        let config = serde_json::from_str::<StaticConfig>(
+            r#"
+        {
+            "transparency": {
+                "enabled": true,
+                "alpha": 120,
+                "floating": true,
+                "monocle": false,
+                "ignore_rules": [{ "kind": "exe", "id": "steam.exe" }]
+            }
+        }
+        "#,
+        )
+        .unwrap();
+
+        match config.transparency {
+            Some(TransparencyValue::Detailed(settings)) => {
+                assert_eq!(settings.enabled, Some(true));
+                assert_eq!(settings.alpha, Some(120));
+                assert_eq!(settings.floating, Some(true));
+                assert_eq!(settings.monocle, Some(false));
+                assert_eq!(settings.ignore_rules.unwrap().len(), 1);
+            }
+            _ => panic!("expected detailed transparency settings"),
+        }
+    }
+
+    #[test]
+    fn transparency_settings_fields_are_optional() {
+        let config =
+            serde_json::from_str::<StaticConfig>(r#"{ "transparency": { "enabled": true } }"#)
+                .unwrap();
+
+        match config.transparency {
+            Some(TransparencyValue::Detailed(settings)) => {
+                assert_eq!(settings.enabled, Some(true));
+                assert_eq!(settings.alpha, None);
+                assert_eq!(settings.floating, None);
+                assert_eq!(settings.monocle, None);
+                assert_eq!(settings.ignore_rules, None);
+            }
+            _ => panic!("expected detailed transparency settings"),
+        }
     }
 }
