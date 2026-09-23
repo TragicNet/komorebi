@@ -42,6 +42,7 @@ use komorebi::load_configuration;
 use komorebi::monitor_reconciliator;
 use komorebi::process_command::listen_for_commands;
 use komorebi::process_command::listen_for_commands_tcp;
+use komorebi::process_command::start_socket_watchdog;
 use komorebi::process_event::listen_for_events;
 use komorebi::process_movement::listen_for_movements;
 use komorebi::reaper;
@@ -313,6 +314,10 @@ fn main() -> eyre::Result<()> {
     // already bound, so begin draining it before `init`/`postload` run so that
     // configuration scripts and early user commands are never refused.
     listen_for_commands(wm.lock().command_listener.try_clone()?, wm.clone());
+
+    // Watch for the listener silently stopping to accept (clients observe
+    // `os error 10061` while the daemon stays alive) and rebind it in place.
+    start_socket_watchdog(wm.clone());
 
     wm.lock().init()?;
 

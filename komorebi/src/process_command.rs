@@ -14,6 +14,7 @@ use std::io::Read;
 use std::net::TcpListener;
 use std::net::TcpStream;
 use std::num::NonZeroUsize;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -110,13 +111,24 @@ pub fn listen_for_commands(listener: UnixListener, wm: Arc<Mutex<WindowManager>>
     std::thread::spawn(move || {
         loop {
             let wm = wm.clone();
-            let listener = listener.try_clone().expect("could not clone unix listener");
+            // Cloning the listener once per accept-service attempt should never
+            // fail; if it ever does, retry with a clear log line rather than
+            // silently killing the accept service with a panic.
+            let listener = match listener.try_clone() {
+                Ok(listener) => listener,
+                Err(error) => {
+                    tracing::error!("could not clone unix listener, retrying: {error}");
+                    std::thread::sleep(Duration::from_secs(1));
+                    continue;
+                }
+            };
 
             let _ = std::thread::spawn(move || {
                 tracing::info!("listening on komorebi.sock");
                 for client in listener.incoming() {
                     match client {
                         Ok(stream) => {
+                            tracing::trace!("accepted connection on komorebi.sock");
                             let wm_clone = wm.clone();
                             std::thread::spawn(move || {
                                 match stream.set_read_timeout(Some(Duration::from_secs(1))) {
@@ -130,7 +142,32 @@ pub fn listen_for_commands(listener: UnixListener, wm: Arc<Mutex<WindowManager>>
                             });
                         }
                         Err(error) => {
-                            tracing::error!("{}", error);
+                            // Surface as much listener state as possible before
+                            // tearing down this accept attempt, so a listener
+                            // that stops accepting without this loop being
+                            // involved is still attributable from the logs.
+                            tracing::error!("accept failed on komorebi.sock: {error}");
+                            match listener.take_error() {
+                                Ok(Some(socket_error)) => {
+                                    tracing::error!("listener socket error: {socket_error}");
+                                }
+                                Ok(None) => {}
+                                Err(take_error) => {
+                                    tracing::error!(
+                                        "could not read listener socket error: {take_error}"
+                                    );
+                                }
+                            }
+                            match listener.local_addr() {
+                                Ok(addr) => {
+                                    tracing::error!("listener still bound to {addr:?}");
+                                }
+                                Err(addr_error) => {
+                                    tracing::error!(
+                                        "listener no longer has a local address: {addr_error}"
+                                    );
+                                }
+                            }
                             break;
                         }
                     }
@@ -139,8 +176,113 @@ pub fn listen_for_commands(listener: UnixListener, wm: Arc<Mutex<WindowManager>>
             .join();
 
             tracing::error!("restarting failed thread");
+            // Bound the respawn rate: a listener that is permanently refusing
+            // connections would otherwise hot-loop the accept thread.
+            std::thread::sleep(Duration::from_secs(1));
         }
     });
+}
+
+/// How often [`start_socket_watchdog`] probes `komorebi.sock` for liveness.
+const SOCKET_WATCHDOG_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Minimum time between listener recoveries, so a permanently failing listener
+/// cannot trigger a rebinding loop.
+const SOCKET_WATCHDOG_RECOVERY_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// Starts a side-channel thread that monitors the command socket the same way
+/// a client does.
+///
+/// Every few seconds it opens a connection to `komorebi.sock` and immediately
+/// closes it again; the accept loop sees a clean EOF and reports nothing, so a
+/// healthy daemon produces no extra log traffic. If the OS ever starts
+/// refusing those connections while the daemon keeps running - the `komorebic`
+/// symptom `os error 10061` - the listener is rebound in place and a fresh
+/// accept loop is started, so command processing recovers without a full
+/// daemon restart.
+#[tracing::instrument(skip(wm))]
+pub fn start_socket_watchdog(wm: Arc<Mutex<WindowManager>>) {
+    std::thread::spawn(move || {
+        let socket_path = DATA_DIR.join("komorebi.sock");
+        // Start out of cooldown so the very first failure can recover immediately.
+        let mut last_recovery = Instant::now()
+            .checked_sub(SOCKET_WATCHDOG_RECOVERY_COOLDOWN)
+            .unwrap_or(Instant::now());
+        loop {
+            std::thread::sleep(SOCKET_WATCHDOG_INTERVAL);
+
+            match UnixStream::connect(&socket_path) {
+                Ok(stream) => {
+                    tracing::trace!("komorebi.sock probe connected");
+                    // Close without writing anything: the accept loop just sees
+                    // EOF, keeping the probe invisible in the logs.
+                    drop(stream);
+                }
+                Err(error) => {
+                    tracing::warn!("komorebi.sock probe failed: {error}");
+                    if last_recovery.elapsed() >= SOCKET_WATCHDOG_RECOVERY_COOLDOWN {
+                        last_recovery = Instant::now();
+                        recover_komorebi_listener(&wm, &socket_path);
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Replaces the command listener with a freshly bound one and starts a new
+/// accept loop from it, restoring `komorebi.sock` without restarting the
+/// daemon.
+fn recover_komorebi_listener(wm: &Arc<Mutex<WindowManager>>, socket_path: &Path) {
+    tracing::error!("komorebi.sock is refusing connections; rebinding the listener");
+
+    match std::fs::remove_file(socket_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::error!("could not remove stale komorebi.sock: {error}");
+            return;
+        }
+    }
+
+    let listener = match UnixListener::bind(socket_path) {
+        Ok(listener) => listener,
+        Err(error) => {
+            tracing::error!("could not rebind komorebi.sock: {error}");
+            return;
+        }
+    };
+
+    // Install the fresh bind-owning handle under the window manager lock so any
+    // later ReplaceConfiguration and similar paths clone the live listener.
+    let mut guard = match wm.try_lock_for(Duration::from_secs(10)) {
+        Some(guard) => guard,
+        None => {
+            tracing::error!(
+                "timed out waiting for the window manager lock while recovering komorebi.sock"
+            );
+            drop(listener);
+            return;
+        }
+    };
+    guard.command_listener = listener;
+
+    let new_listener = match guard.command_listener.try_clone() {
+        Ok(listener) => listener,
+        Err(error) => {
+            tracing::error!("could not clone rebound komorebi.sock listener: {error}");
+            drop(guard);
+            return;
+        }
+    };
+    drop(guard);
+
+    // Restart the accept service on the new listener. The old accept thread may
+    // still be blocked on the stale handle; it is left alone and simply loses
+    // all future connections to the freshly bound listener.
+    listen_for_commands(new_listener, wm.clone());
+
+    tracing::info!("komorebi.sock listener recovered");
 }
 
 #[tracing::instrument]
