@@ -223,10 +223,21 @@ impl Monitor {
         let focused_idx = self.focused_workspace_idx();
         let hmonitor = self.id;
         let monitor_wp = self.wallpaper.clone();
+
+        // Restore the incoming workspace BEFORE hiding the outgoing one, in
+        // both switch directions (a single index-ordered loop hid first when
+        // switching to a higher index and restored first when switching to a
+        // lower one). The restore shows the incoming windows and requests
+        // focus on the to-focus window, so when the outgoing workspace's
+        // foreground is hidden below it is no longer the foreground: Windows
+        // then has nothing to auto-promote, which stops a pinned window (not
+        // in any workspace's list, never hidden) from being promoted to the
+        // foreground and jumping to the top of the Z order mid-switch.
+        if let Some(workspace) = self.workspaces_mut().get_mut(focused_idx) {
+            workspace.restore(mouse_follows_focus, trigger_focus, hmonitor, &monitor_wp)?;
+        }
         for (i, workspace) in self.workspaces_mut().iter_mut().enumerate() {
-            if i == focused_idx {
-                workspace.restore(mouse_follows_focus, trigger_focus, hmonitor, &monitor_wp)?;
-            } else {
+            if i != focused_idx {
                 // hide() hides the workspace's floats and containers; pinned
                 // windows are not in any workspace's floating list, so they
                 // remain visible across all workspaces on this monitor.
@@ -252,13 +263,15 @@ impl Monitor {
         // tically renders above it without ever reordering the ignored window.
         //
         // The Tiling band itself is always raised via the transient TopMost
-        // band on the switch path (`climb_tiled`): hiding the previous
-        // workspace's windows auto-promotes whatever is visible next - usually
-        // a pinned window, which is not contained in any workspace - and that
-        // promotion races the plain HWND_TOP raises, leaving the pins stuck
-        // above the tiled layer. The TopMost dance climbs the active window
-        // unconditionally at apply time, so the tiled band is positioned above
-        // the promoted foreground regardless of the timing.
+        // band on the switch path (`climb_tiled`) as a safety net: the
+        // restore-before-hide ordering above normally prevents the
+        // hide-induced foreground auto-promotion of a pinned window, but the
+        // activation is asynchronous (and some paths pass
+        // `trigger_focus = false`), so a pin can still end up as the
+        // foreground while the switch is in flight. The TopMost dance climbs
+        // the active window unconditionally at apply time, so the tiled band
+        // is positioned above such a promoted foreground regardless of the
+        // timing.
         let climb_active = !WindowsApi::foreground_window()
             .ok()
             .is_some_and(|foreground| {
@@ -367,14 +380,21 @@ impl Monitor {
 
         match workspace.layer {
             WorkspaceLayer::Tiling => {
-                // Pinned windows join the floating base of the managed band:
-                // they are raised first (base of the band) so the working
-                // floats and the tiled layer stack above them, instead of being
-                // sunk to the very bottom of the Z order. The transparent
-                // TopMost-band raise cannot climb a window stuck in the
-                // persistent TopMost band, so the normal pins and the working
-                // floats are demoted out of it before the band raises,
-                // preserving the deterministic ordering.
+                // Pinned windows join the floating base of the managed band,
+                // below the working floats and the tiled layer, without ever
+                // being sunk to the very bottom of the Z order (below the
+                // ignored windows). They are therefore NOT raised first: a
+                // raise-first pass pulls the pins to HWND_TOP above the
+                // freshly restored workspace and only later ops cover them
+                // again, which visibly flashes the pins on top while the
+                // async worker drains. Instead the floats and the tiled band
+                // are assembled first and the pins are then inserted directly
+                // below the band's bottom window, so during the whole pass
+                // the pins only ever move down. The transparent TopMost-band
+                // raise cannot climb a window stuck in the persistent TopMost
+                // band, so the normal pins and the working floats are demoted
+                // out of it before the band raises, preserving the
+                // deterministic ordering.
                 let pins = self
                     .pinned_windows()
                     .into_iter()
@@ -390,21 +410,26 @@ impl Monitor {
                     .copied()
                     .collect::<Vec<_>>();
                 ApplyWorker::clear_topmost(topmost_batch);
-                for window in &normal_pins {
-                    raise(window);
-                }
+                // Bottom window of the managed band: the first float raised
+                // (raise order leaves the earliest raise at the bottom of the
+                // raised group), falling back to the first tiled window
+                // raised when the workspace has no floats. The pins are
+                // inserted directly below it once the band is assembled.
+                let mut band_bottom: Option<Window> = None;
                 for window in floats.iter() {
                     raise(window);
+                    band_bottom.get_or_insert(*window);
                 }
                 // The tiled band ends the managed-band assembly, so it must be
-                // raised above the pins and floats that came before it AND above
-                // whatever holds the foreground at apply time. A plain HWND_TOP
-                // raise cannot climb the active window, so when the switch path
-                // requests it (`climb_tiled`) the band climbs via the transient
-                // TopMost-band raise: hiding the previous workspace's windows
-                // auto-promotes a visible window - usually a pinned window - to
-                // the foreground while these raises drain, and only the TopMost
-                // dance is immune to that timing.
+                // raised above the floats AND above whatever holds the
+                // foreground at apply time. A plain HWND_TOP raise cannot
+                // climb the active window, so when the switch path requests it
+                // (`climb_tiled`) the band climbs via the transient
+                // TopMost-band raise: the restore-before-hide ordering
+                // normally prevents the hide-induced foreground promotion of
+                // a pinned window, but the activation is asynchronous, so a
+                // pin can still hold the foreground while these raises drain,
+                // and only the TopMost dance is immune to that timing.
                 for window in workspace.containers().iter().rev() {
                     if let Some(window) = window.focused_window() {
                         if climb_tiled {
@@ -412,6 +437,27 @@ impl Monitor {
                         } else {
                             raise(window);
                         }
+                        band_bottom.get_or_insert(*window);
+                    }
+                }
+                // Insert the pins below the assembled band so the layer reads
+                // ignored < pins < floats < tiled: a relative insert below the
+                // band bottom can never surface the pins above the incoming
+                // workspace, even when one of them was auto-promoted to the
+                // foreground while the switch was in flight. The insert is
+                // enqueued after the band raises, so the worker positions the
+                // pins last, once the band's windows actually sit at the top.
+                if let Some(band_bottom) = band_bottom {
+                    for window in &normal_pins {
+                        ApplyWorker::raise_below(*window, band_bottom);
+                    }
+                } else {
+                    // Defensive fallback: a Tiling workspace past the empty
+                    // check always has a float or a tiled window, but if the
+                    // band could not be assembled the pins keep the previous
+                    // raise-first behaviour instead of being left unplaced.
+                    for window in &normal_pins {
+                        raise(window);
                     }
                 }
                 // Raised last so the always-on-top pins top the whole Tiling
