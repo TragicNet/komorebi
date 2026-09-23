@@ -833,7 +833,7 @@ impl Monitor {
     /// `ABN_FULLSCREENAPP` and make `hide_on_fullscreen` status bars flicker.
     /// Once the storm settles the foreground is left alone so the game keeps
     /// focus during gameplay.
-    fn within_switch_stabilization(&self) -> bool {
+    pub(crate) fn within_switch_stabilization(&self) -> bool {
         const STABILIZATION_GRACE_MS: u64 = 400;
 
         self.last_switch_at

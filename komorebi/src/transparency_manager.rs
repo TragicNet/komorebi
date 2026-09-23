@@ -235,6 +235,16 @@ fn decide_targets(
     let mut transparent_targets = Vec::new();
     let mut opaque_targets = Vec::new();
 
+    // A workspace/monitor switch has just happened on one or more monitors. During the
+    // switch's event storm the OS foreground is transient: komorebi activates the new
+    // focused window asynchronously and hiding the previous workspace auto-promotes other
+    // windows in between, so the foreground bounces across the workspaces being restored.
+    // Trusting the raw foreground here makes those transient windows stay opaque, pass
+    // after pass, until the foreground finally settles - the sequential opaque flash
+    // observed on `focus-workspaces`. While settling, base the "don't dim" rule purely on
+    // WM focus state (which the workspace restore already set) and ignore the foreground.
+    let switch_settling = state.any_monitor_switch_settling();
+
     let focused_monitor_idx = state.focused_monitor_idx();
 
     'monitors: for (monitor_idx, m) in state.monitors.elements().iter().enumerate() {
@@ -290,7 +300,7 @@ fn decide_targets(
                 continue 'monitors;
             }
 
-            if is_maximized {
+            if is_maximized && !switch_settling {
                 opaque_targets.push(foreground_hwnd);
 
                 continue 'monitors;
@@ -319,7 +329,7 @@ fn decide_targets(
                                 window,
                                 &transparency_blacklist,
                                 &regex_identifiers,
-                            ) || window.hwnd == foreground_hwnd;
+                            ) || (!switch_settling && window.hwnd == foreground_hwnd);
 
                             if opaque {
                                 opaque_targets.push(window.hwnd);
@@ -357,7 +367,7 @@ fn decide_targets(
 
             for window in ws.floating_windows() {
                 let opaque = !floating_transparency
-                    || window.hwnd == foreground_hwnd
+                    || (!switch_settling && window.hwnd == foreground_hwnd)
                     || is_transparency_blacklisted(
                         window,
                         &transparency_blacklist,
@@ -472,6 +482,45 @@ mod tests {
         wm
     }
 
+    fn window_manager_with_two_monitors(floats: &[&[isize]]) -> WindowManager {
+        let (_tx, rx) = crossbeam_channel::bounded(1);
+
+        let mut wm = WindowManager::new(rx, None).unwrap();
+
+        for (monitor_idx, workspace_floats) in floats.iter().enumerate() {
+            let mut m = monitor::new(
+                monitor_idx as isize,
+                Rect::default(),
+                Rect::default(),
+                format!("TestMonitor{monitor_idx}"),
+                "TestDevice".to_string(),
+                "TestDeviceID".to_string(),
+                Some("TestMonitorID".to_string()),
+            );
+
+            let workspace = m.workspaces_mut().back_mut().unwrap();
+
+            for hwnd in *workspace_floats {
+                workspace
+                    .floating_windows_mut()
+                    .push_back(Window::from(*hwnd));
+            }
+
+            wm.monitors_mut().push_back(m);
+        }
+
+        wm
+    }
+
+    fn now_epoch_ms() -> u64 {
+        use std::time::SystemTime;
+        use std::time::UNIX_EPOCH;
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or_default()
+    }
+
     #[test]
     fn test_unfocused_floating_windows_are_dimmed() {
         let _guard = StateGuard::enable();
@@ -561,6 +610,55 @@ mod tests {
 
         assert!(transparent.is_empty());
         assert_eq!(opaque, vec![999]);
+    }
+
+    #[test]
+    fn test_transient_foreground_is_dimmed_while_switch_settling() {
+        let _guard = StateGuard::enable();
+        // Monitor 1 is unfocused and was just switched to (settling); its float 20 is the
+        // transient OS foreground auto-promoted during the switch's event storm.
+        let mut wm = window_manager_with_two_monitors(&[&[10], &[20]]);
+        wm.monitors_mut()[1].last_switch_at = Some(now_epoch_ms());
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 20, false);
+
+        // While settling, the raw foreground must not keep window 20 opaque: WM focus state
+        // is authoritative, so on the unfocused monitor 20 is dimmed like everything else.
+        assert!(transparent.contains(&20));
+        assert!(transparent.contains(&10));
+        assert!(!opaque.contains(&20));
+    }
+
+    #[test]
+    fn test_foreground_exemption_restored_after_switch_settle() {
+        let _guard = StateGuard::enable();
+        let mut wm = window_manager_with_two_monitors(&[&[10], &[20]]);
+        // The switch finished more than the grace window ago, so 20 is the settled,
+        // trustworthy foreground again.
+        wm.monitors_mut()[1].last_switch_at = Some(now_epoch_ms().saturating_sub(500));
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 20, false);
+
+        assert!(opaque.contains(&20));
+        assert!(!transparent.contains(&20));
+        assert!(transparent.contains(&10));
+    }
+
+    #[test]
+    fn test_maximized_short_circuit_ignored_while_switch_settling() {
+        let _guard = StateGuard::enable();
+        // Both monitors were just switched to (a `focus-workspaces` on all monitors), and the
+        // transient foreground is reported as maximized. The short-circuit must not skip the
+        // settling monitors, otherwise their restored windows flash opaque until it ends.
+        let mut wm = window_manager_with_two_monitors(&[&[10], &[20]]);
+        wm.monitors_mut()[0].last_switch_at = Some(now_epoch_ms());
+        wm.monitors_mut()[1].last_switch_at = Some(now_epoch_ms());
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 20, true);
+
+        assert!(transparent.contains(&10));
+        assert!(transparent.contains(&20));
+        assert!(opaque.is_empty());
     }
 
     #[test]

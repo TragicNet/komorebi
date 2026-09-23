@@ -717,11 +717,28 @@ impl WindowManager {
                     // duplicates across multiple workspaces, as it results in ghost layout tiles.
                     let mut proceed = true;
 
-                    // Check for potential `alt-tab` event
+                    // Check for potential `alt-tab` event. A komorebi-initiated workspace/monitor
+                    // switch restores the other monitors' workspaces, and each restore broadcasts
+                    // Show/Uncloak events for windows already managed on those (monitor, workspace)
+                    // pairs. Without the guard below each such Show is read as an alt-tab:
+                    // needs_reconciliation() flags the window and perform_reconciliation() yanks the
+                    // focused monitor and activation to that monitor, bouncing focus across monitors
+                    // while the storm settles and flashing every window opaque as it briefly becomes
+                    // the newly-focused monitor's focused window. A window whose own monitor just
+                    // switched is therefore treated as switch fallout, not as a user navigating.
+                    let switch_fallout = self.known_hwnds.get(&window.hwnd).is_some_and(
+                        |(window_monitor_idx, _)| {
+                            self.monitors()
+                                .get(*window_monitor_idx)
+                                .is_some_and(|monitor| monitor.within_switch_stabilization())
+                        },
+                    );
+
                     if matches!(
                         event,
                         WindowManagerEvent::Uncloak(_, _) | WindowManagerEvent::Show(_, _)
-                    ) {
+                    ) && !switch_fallout
+                    {
                         needs_reconciliation = self.needs_reconciliation(window)?;
 
                         if let Some((m_idx, ws_idx)) = needs_reconciliation {
