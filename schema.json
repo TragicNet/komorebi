@@ -435,6 +435,17 @@
         "type": "string"
       }
     },
+    "pinning": {
+      "description": "Pinning configuration options",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PinningConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "remove_titlebar_applications": {
       "description": "HEAVILY DISCOURAGED: Identify applications for which komorebi should forcibly remove title bars",
       "type": [
@@ -527,6 +538,14 @@
       "maximum": 255,
       "minimum": 0
     },
+    "transparency_floating": {
+      "description": "Add transparency to unfocused floating windows",
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "default": false
+    },
     "transparency_ignore_rules": {
       "description": "Individual window transparency ignore rules",
       "type": [
@@ -536,6 +555,14 @@
       "items": {
         "$ref": "#/$defs/MatchingRule"
       }
+    },
+    "transparency_monocle": {
+      "description": "Add transparency to unfocused monocle windows",
+      "type": [
+        "boolean",
+        "null"
+      ],
+      "default": false
     },
     "tray_and_multi_window_applications": {
       "description": "Identify tray and multi-window applications",
@@ -594,6 +621,18 @@
         }
       ],
       "default": "Cloak"
+    },
+    "workspace_layer_focus_behaviour": {
+      "description": "What happens to the workspace layer when a managed (tiling) window is\nfocused while the workspace is on the Floating layer",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkspaceLayerFocusBehaviour"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "RespectLock"
     }
   },
   "$defs": {
@@ -2484,6 +2523,17 @@
             }
           ]
         },
+        "pinned": {
+          "description": "Border colour when the window is pinned across all workspaces",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Colour"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "single": {
           "description": "Border colour when the container contains a single window",
           "anyOf": [
@@ -2803,6 +2853,48 @@
         }
       ]
     },
+    "FloatingApplicationRule": {
+      "description": "Rule for matching applications which should be managed as floating windows",
+      "anyOf": [
+        {
+          "description": "Simple matching rule which must evaluate to true",
+          "$ref": "#/$defs/FloatingApplicationRuleSimple"
+        },
+        {
+          "description": "Composite matching rule where all conditions must evaluate to true",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IdWithIdentifier"
+          }
+        }
+      ]
+    },
+    "FloatingApplicationRuleSimple": {
+      "description": "A single floating application matching rule with optional pinning",
+      "type": "object",
+      "properties": {
+        "pinned": {
+          "description": "Pin the floating window so it is visible across all workspaces on its monitor",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "anyOf": [
+        {
+          "description": "Simple matching rule which must evaluate to true",
+          "$ref": "#/$defs/IdWithIdentifier"
+        },
+        {
+          "description": "Composite matching rule where all conditions must evaluate to true",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IdWithIdentifier"
+          }
+        }
+      ]
+    },
     "FloatingLayerBehaviour": {
       "description": "Floating layer behaviour when a new window is opened",
       "oneOf": [
@@ -2997,6 +3089,18 @@
           "description": "Name of the Base16 theme (theme previews: https://tinted-theming.github.io/tinted-gallery/)",
           "$ref": "#/$defs/Base16"
         },
+        "pinned_border": {
+          "description": "Pinned floating window border colour",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Base16Value"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "Base0E"
+        },
         "single_border": {
           "description": "Single window border colour",
           "anyOf": [
@@ -3130,6 +3234,18 @@
           "description": "Name of the Catppuccin theme (previews: https://github.com/catppuccin/catppuccin)",
           "$ref": "#/$defs/Catppuccin"
         },
+        "pinned_border": {
+          "description": "Pinned floating window border colour",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CatppuccinValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "Mauve"
+        },
         "single_border": {
           "description": "Single window border colour",
           "anyOf": [
@@ -3262,6 +3378,18 @@
             }
           ],
           "default": "Base0F"
+        },
+        "pinned_border": {
+          "description": "Pinned floating window border colour",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Base16Value"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "Base0E"
         },
         "single_border": {
           "description": "Single window border colour",
@@ -3450,53 +3578,6 @@
         {
           "description": "Simple matching rule which must evaluate to true",
           "$ref": "#/$defs/IdWithIdentifier"
-        },
-        {
-          "description": "Composite matching rule where all conditions must evaluate to true",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/IdWithIdentifier"
-          }
-        }
-      ]
-    },
-    "FloatingApplicationRule": {
-      "description": "Rule for matching applications which should be managed as floating windows",
-      "anyOf": [
-        {
-          "type": "object",
-          "properties": {
-            "pinned": {
-              "description": "Pin the floating window so it is visible across all workspaces on its monitor",
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "kind": {
-              "description": "Kind of identifier to target",
-              "$ref": "#/$defs/ApplicationIdentifier"
-            },
-            "id": {
-              "description": "Target identifier",
-              "type": "string"
-            },
-            "matching_strategy": {
-              "description": "Matching strategy to use",
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/MatchingStrategy"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "kind",
-            "id"
-          ]
         },
         {
           "description": "Composite matching rule where all conditions must evaluate to true",
@@ -3773,6 +3854,20 @@
           "$ref": "#/$defs/AnimationStyle"
         }
       ]
+    },
+    "PinningConfig": {
+      "description": "Pinning configuration options",
+      "type": "object",
+      "properties": {
+        "hide_on_empty_workspaces": {
+          "description": "Hide all pinned floating windows while the focused workspace is empty",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": false
+        }
+      }
     },
     "Placement": {
       "description": "Placement behaviour for floating windows",
@@ -4081,6 +4176,18 @@
             }
           ],
           "default": "Base0F"
+        },
+        "pinned_border": {
+          "description": "Border colour when the window is pinned across all workspaces",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Base16Value"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "Base0E"
         },
         "single_border": {
           "description": "Border colour when the container contains a single window",
@@ -4500,6 +4607,26 @@
       },
       "required": [
         "name"
+      ]
+    },
+    "WorkspaceLayerFocusBehaviour": {
+      "description": "Behaviour when a managed (tiled) window is focused while the workspace is\non the Floating layer",
+      "oneOf": [
+        {
+          "description": "Respect the workspace layer lock: only switch to Tiling when the layer\nis not locked, then re-order the window stack (default)",
+          "type": "string",
+          "const": "RespectLock"
+        },
+        {
+          "description": "Always switch the workspace to Tiling and release the layer lock, then\nre-order the window stack",
+          "type": "string",
+          "const": "SwitchLayer"
+        },
+        {
+          "description": "Always switch the workspace to Tiling and release the layer lock\nwithout re-ordering (raising/lowering) the whole window stack: the\nfloating overlay is kept intact and only the focused tiling window is\nraised above it",
+          "type": "string",
+          "const": "SwitchLayerOverlay"
+        }
       ]
     },
     "ZOrder": {

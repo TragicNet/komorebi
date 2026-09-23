@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "KomobarConfig",
-  "description": "The `komorebi.bar.json` configuration file reference for `v0.1.41`",
+  "description": "The `komorebi.bar.json` configuration file reference for `v0.1.42`",
   "type": "object",
   "properties": {
     "center_widgets": {
@@ -2566,6 +2566,29 @@
         "Next"
       ]
     },
+    "CycleFocusWindowContent": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CycleDirection"
+        },
+        {
+          "type": "array",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/CycleDirection"
+            },
+            {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            }
+          ]
+        }
+      ]
+    },
     "DateConfig": {
       "description": "Date widget configuration",
       "type": "object",
@@ -3715,6 +3738,18 @@
           "description": "Name of the Base16 theme (theme previews: https://tinted-theming.github.io/tinted-gallery/)",
           "$ref": "#/$defs/Base16"
         },
+        "pinned_border": {
+          "description": "Pinned floating window border colour",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Base16Value"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "Base0E"
+        },
         "single_border": {
           "description": "Single window border colour",
           "anyOf": [
@@ -3848,6 +3883,18 @@
           "description": "Name of the Catppuccin theme (previews: https://github.com/catppuccin/catppuccin)",
           "$ref": "#/$defs/Catppuccin"
         },
+        "pinned_border": {
+          "description": "Pinned floating window border colour",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CatppuccinValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "Mauve"
+        },
         "single_border": {
           "description": "Single window border colour",
           "anyOf": [
@@ -3980,6 +4027,18 @@
             }
           ],
           "default": "Base0F"
+        },
+        "pinned_border": {
+          "description": "Pinned floating window border colour",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Base16Value"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "Base0E"
         },
         "single_border": {
           "description": "Single window border colour",
@@ -4462,8 +4521,35 @@
           "format": "uint",
           "minimum": 0
         },
+        "last_switch_at": {
+          "description": "Epoch milliseconds (`SystemTime`) of the last workspace/monitor switch. Used\nonly to scope non-widget (fullscreen game) foreground restoration to the short\nevent storm that follows a switch, so games never lose focus during gameplay.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
         "name": {
           "type": "string"
+        },
+        "pinned_always_on_top": {
+          "description": "Subset of `pinned_floating` rendered above everything else via the\npersistent TopMost band (`WS_EX_TOPMOST`), like an \"always on top\"\nstatus bar. Toggled per pinned window; never lowered or cleared by the\nlayer stack, only by the toggle itself or by unpinning.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "integer",
+            "format": "int"
+          }
+        },
+        "pinned_floating": {
+          "description": "HWNDs of floating windows pinned across all workspaces on this monitor.\nPinned windows live here (not in any workspace's `floating_windows`) and\nare treated as part of the floating overlay of whichever workspace is\nfocused. Only floating windows can be pinned.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "integer",
+            "format": "int"
+          }
         },
         "serial_number_id": {
           "type": [
@@ -4581,6 +4667,21 @@
         {
           "description": "The full monitor options with the index and an optional work_area_offset",
           "$ref": "#/$defs/MonitorConfig"
+        }
+      ]
+    },
+    "MonocleFocusBehaviour": {
+      "description": "Behaviour when focusing in a direction while a monocle container is active",
+      "oneOf": [
+        {
+          "description": "Cycle the monocle container to the next/previous container in the workspace",
+          "type": "string",
+          "const": "Cycle"
+        },
+        {
+          "description": "Do nothing, allowing focus to fall through to cross-monitor logic",
+          "type": "string",
+          "const": "NoOp"
         }
       ]
     },
@@ -5208,7 +5309,7 @@
           "type": "object",
           "properties": {
             "content": {
-              "$ref": "#/$defs/CycleDirection"
+              "$ref": "#/$defs/CycleFocusWindowContent"
             },
             "type": {
               "type": "string",
@@ -5735,6 +5836,30 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "ReclaimMinimizedWindows"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "ReclaimLastMinimizedWindow"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "Promote"
             }
           },
@@ -5917,6 +6042,32 @@
           ]
         },
         {
+          "description": "Pin or unpin the focused window so it is visible across all workspaces.\nTiling windows are floated first, then pinned.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "TogglePin"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Toggle whether the focused pinned window is rendered above everything\nelse via the persistent TopMost band, like an \"always on top\" status bar.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "TogglePinAlwaysOnTop"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
           "type": "object",
           "properties": {
             "type": {
@@ -5977,6 +6128,34 @@
             "type": {
               "type": "string",
               "const": "CrossMonitorMoveBehaviour"
+            }
+          },
+          "required": [
+            "type",
+            "content"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "ToggleMonocleFocusBehaviour"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "content": {
+              "$ref": "#/$defs/MonocleFocusBehaviour"
+            },
+            "type": {
+              "type": "string",
+              "const": "MonocleFocusBehaviour"
             }
           },
           "required": [
@@ -7245,6 +7424,18 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "ToggleIgnoredWindowLayer"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "ReloadConfiguration"
             }
           },
@@ -7628,6 +7819,62 @@
           "required": [
             "type",
             "content"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "const": "TransparencyFloating"
+            }
+          },
+          "required": [
+            "type",
+            "content"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "ToggleTransparencyFloating"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "const": "TransparencyMonocle"
+            }
+          },
+          "required": [
+            "type",
+            "content"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "ToggleTransparencyMonocle"
+            }
+          },
+          "required": [
+            "type"
           ]
         },
         {
@@ -8153,6 +8400,18 @@
             "type": {
               "type": "string",
               "const": "EnforceWorkspaceRules"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "EnforceStackRules"
             }
           },
           "required": [
@@ -8800,6 +9059,9 @@
         "monitors": {
           "$ref": "#/$defs/Ring"
         },
+        "monocle_focus_behaviour": {
+          "$ref": "#/$defs/MonocleFocusBehaviour"
+        },
         "mouse_follows_focus": {
           "type": "boolean"
         },
@@ -8844,6 +9106,7 @@
         "new_window_behaviour",
         "float_override",
         "cross_monitor_move_behaviour",
+        "monocle_focus_behaviour",
         "unmanaged_window_operation_behaviour",
         "mouse_follows_focus",
         "has_pending_raise_op"
@@ -9094,6 +9357,18 @@
             }
           ],
           "default": "Base0F"
+        },
+        "pinned_border": {
+          "description": "Border colour when the window is pinned across all workspaces",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Base16Value"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "Base0E"
         },
         "single_border": {
           "description": "Border colour when the container contains a single window",
@@ -9613,6 +9888,11 @@
           "description": "Floating window",
           "type": "string",
           "const": "Floating"
+        },
+        {
+          "description": "Pinned floating window",
+          "type": "string",
+          "const": "Pinned"
         }
       ]
     },
@@ -9651,6 +9931,11 @@
         "floating_windows": {
           "$ref": "#/$defs/Ring4"
         },
+        "ignored_windows_above_managed": {
+          "description": "When true, ignored/unmanaged windows on this workspace's monitor are raised\nabove managed windows; when false they are lowered below the base layer.",
+          "type": "boolean",
+          "default": false
+        },
         "latest_layout": {
           "type": "array",
           "items": {
@@ -9659,6 +9944,11 @@
         },
         "layer": {
           "$ref": "#/$defs/WorkspaceLayer"
+        },
+        "layer_lock": {
+          "description": "When true, this workspace keeps its layer regardless of which window\ngains focus. Set by toggle-workspace-layer (Tiling->Floating) and\ncleared by toggling back; transient, defaults false.",
+          "type": "boolean",
+          "default": false
         },
         "layout": {
           "$ref": "#/$defs/Layout"
@@ -9790,6 +10080,17 @@
                 "type": "null"
               }
             ]
+          }
+        },
+        "stack_rules": {
+          "description": "Stack rules; each inner array defines a stack that matching windows are grouped into",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/MatchingRule"
+            }
           }
         },
         "tile": {
@@ -10034,6 +10335,19 @@
         "name": {
           "description": "Name",
           "type": "string"
+        },
+        "stack_rules": {
+          "description": "Stack rules; each inner array defines a stack that matching windows are grouped into",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/MatchingRule"
+            }
+          }
         },
         "tile": {
           "description": "Enable or disable tiling for the workspace",
