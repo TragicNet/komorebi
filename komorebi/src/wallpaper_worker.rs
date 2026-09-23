@@ -129,9 +129,12 @@ impl WallpaperWorker {
     }
 
     fn receive(receiver: Receiver<WallpaperRequest>) {
-        // IDesktopWallpaper is an STA COM class; initialise the worker's own
-        // apartment once so the cached thread-local interface stays in-process.
-        WindowsApi::co_initialize_sta();
+        // Initialise this thread's COM apartment as MTA before doing anything
+        // else: `win32-display-data` inits an MTA `wmi::COMLibrary` from a
+        // thread-local when it enumerates displays, so claiming the thread as
+        // STA (or leaving it uninitialised differently) would abort the whole
+        // worker with `RPC_E_CHANGED_MODE`.
+        WindowsApi::co_initialize_mta();
 
         tracing::info!("wallpaper worker listening");
 

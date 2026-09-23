@@ -56,7 +56,7 @@ use windows::Win32::Graphics::Gdi::MonitorFromWindow;
 use windows::Win32::Graphics::Gdi::Rectangle;
 use windows::Win32::Graphics::Gdi::RoundRect;
 use windows::Win32::System::Com::CLSCTX_ALL;
-use windows::Win32::System::Com::COINIT_APARTMENTTHREADED;
+use windows::Win32::System::Com::COINIT_MULTITHREADED;
 use windows::Win32::System::Com::CoCreateInstance;
 use windows::Win32::System::Com::CoInitializeEx;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -2112,14 +2112,18 @@ impl WindowsApi {
         unsafe { WTSRegisterSessionNotification(HWND(as_ptr!(hwnd)), 1) }.process()
     }
 
-    /// Initialise COM on the current thread as an STA apartment. The
-    /// `IDesktopWallpaper` interface is STA-registered, so it must be created
-    /// (and used) on the apartment thread that owns it; the wallpaper worker
-    /// calls this once at thread start and then reuses a cached instance.
-    pub fn co_initialize_sta() {
+    /// Initialise COM on the current thread as an MTA apartment. komorebi and
+    /// its dependencies (notably the `win32-display-data` crate, which inits an
+    /// MTA `wmi::COMLibrary` from a thread-local) all use the multithreaded
+    /// model, so the wallpaper worker must present the same model: a thread
+    /// whose first `CoInitializeEx` claimed STA would make that crate's init
+    /// abort the thread with `RPC_E_CHANGED_MODE` the moment it enumerates
+    /// displays. `IDesktopWallpaper` works fine from MTA (as it did when the
+    /// wallpaper code ran on the WM's MTA threads before the worker existed).
+    pub fn co_initialize_mta() {
         // S_OK and S_FALSE (already initialised on this thread) both count as
         // success (`HRESULT::is_ok`); only a genuine failure is worth logging.
-        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         if !hr.is_ok() {
             tracing::warn!("could not initialise COM apartment: {hr:?}");
         }
@@ -2188,11 +2192,9 @@ impl WindowsApi {
 }
 
 thread_local! {
-    /// Cached `IDesktopWallpaper` interface for the current thread. The coclass
-    /// is STA-registered, so the instance is created on (and confined to) the
-    /// first thread that uses it - the wallpaper worker - and reused for every
-    /// subsequent call instead of paying a full `CoCreateInstance` round-trip
-    /// per wallpaper switch.
+    /// Cached `IDesktopWallpaper` interface for the current thread, so the
+    /// wallpaper worker reuses one instance instead of paying a full
+    /// `CoCreateInstance` round-trip per wallpaper switch.
     static WALLPAPER_INSTANCE: std::cell::OnceCell<IDesktopWallpaper> =
         const { std::cell::OnceCell::new() };
     /// Whether `SetPosition(DWPOS_FILL)` has already been applied on this
