@@ -373,11 +373,31 @@ fn decide_targets(
                 continue 'workspaces;
             }
 
-            // The monocle container is never transparent unless the toggle is enabled and its
-            // monitor isn't focused: a monocle workspace is a fullscreen view of a single window,
-            // so it is only dimmed when the user is looking at another monitor.
-            if let Some(monocle) = &ws.monocle_container {
-                if let Some(window) = monocle.focused_window() {
+            // A workspace that presents one window fullscreen - a monocle container, or the sole
+            // tiled container of a workspace holding a single window - is never transparent unless
+            // the toggle is enabled and its monitor isn't focused: a fullscreen view of a single
+            // window is only dimmed when the user is looking at another monitor. A lone tiled
+            // container fills the adjusted work area exactly like a monocle does, so it takes the
+            // same rule here rather than falling through to the container pass below, which would
+            // dim it on any unfocused monitor regardless of the monocle toggle.
+            //
+            // A workspace with a captured maximized window, a floating layer or floating windows
+            // is excluded: the visible content isn't the lone tiled window in those cases, and
+            // `continue 'monitors` would skip the passes that restore it.
+            let fullscreen_container = if let Some(monocle) = &ws.monocle_container {
+                Some(monocle)
+            } else if ws.maximized_window.is_none()
+                && ws.layer == WorkspaceLayer::Tiling
+                && ws.floating_windows().is_empty()
+                && ws.containers().len() == 1
+            {
+                ws.containers().front()
+            } else {
+                None
+            };
+
+            if let Some(container) = fullscreen_container {
+                if let Some(window) = container.focused_window() {
                     let transparent = workspace_transparency
                         && TRANSPARENCY_MONOCLE.load_consume()
                         && monitor_idx != focused_monitor_idx
@@ -391,6 +411,15 @@ fn decide_targets(
                         transparent_targets.push(window.hwnd);
                     } else {
                         opaque_targets.push(window.hwnd);
+                    }
+                }
+
+                // The rest of the stack sits behind the fullscreen window; keep it in the restore
+                // set so that stackbar tabs can still bring it back opaque.
+                let focused_window_idx = container.focused_window_idx();
+                for (window_idx, window) in container.windows().iter().enumerate() {
+                    if window_idx != focused_window_idx {
+                        track_transparent_hwnd(&mut known, window.hwnd);
                     }
                 }
 
@@ -511,6 +540,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+    use crate::container::Container;
     use crate::core::Rect;
     use crate::monitor;
     use crate::workspace::Workspace;
@@ -546,6 +576,11 @@ mod tests {
             TRANSPARENCY_MONOCLE.store(false, Ordering::SeqCst);
 
             guard
+        }
+
+        fn enable_monocle(self) -> Self {
+            TRANSPARENCY_MONOCLE.store(true, Ordering::SeqCst);
+            self
         }
 
         fn disable_floating(self) -> Self {
@@ -622,6 +657,30 @@ mod tests {
         }
 
         wm
+    }
+
+    /// Fill the focused workspace of `monitor_idx` with tiled containers, each described by the
+    /// hwnds of its stack (the first hwnd of each stack is the container's ring-focused window).
+    ///
+    /// Windows are pushed straight into the container's ring instead of going through
+    /// `Container::add_window`, which would call `hide()` - a Win32 call - on the non-focused
+    /// windows of every stack.
+    fn with_tiled_containers(wm: &mut WindowManager, monitor_idx: usize, containers: &[&[isize]]) {
+        let workspace = wm.monitors_mut()[monitor_idx]
+            .workspaces_mut()
+            .front_mut()
+            .unwrap();
+
+        for stack in containers {
+            let mut container = Container::default();
+
+            for hwnd in *stack {
+                container.windows_mut().push_back(Window::from(*hwnd));
+            }
+
+            container.focus_window(0);
+            workspace.containers_mut().push_back(container);
+        }
     }
 
     fn now_epoch_ms() -> u64 {
@@ -819,6 +878,110 @@ mod tests {
         assert!(transparent.contains(&10));
         assert!(transparent.contains(&20));
         assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_lone_container_window_dimmed_when_monocle_enabled() {
+        let _guard = StateGuard::enable().enable_monocle();
+        let mut wm = window_manager_with_two_monitors(&[&[], &[]]);
+        // A workspace whose whole tiling layer is one container holds a lone window, which
+        // fills the work area just like a monocle: it follows the monocle rule.
+        with_tiled_containers(&mut wm, 1, &[&[10]]);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert_eq!(transparent, vec![10]);
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_lone_container_window_opaque_when_monocle_disabled() {
+        let _guard = StateGuard::enable();
+        let mut wm = window_manager_with_two_monitors(&[&[], &[]]);
+        with_tiled_containers(&mut wm, 1, &[&[10]]);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        // With the monocle toggle off the lone window is restored to opaque instead of falling
+        // through to the container pass, which would dim it on any unfocused monitor.
+        assert!(transparent.is_empty());
+        assert_eq!(opaque, vec![10]);
+    }
+
+    #[test]
+    fn test_lone_container_window_opaque_on_focused_monitor() {
+        let _guard = StateGuard::enable().enable_monocle();
+        let mut wm = window_manager_with_two_monitors(&[&[], &[]]);
+        // Monitor 0 is the focused one, so its lone window is the one the user is looking at.
+        with_tiled_containers(&mut wm, 0, &[&[10]]);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert!(transparent.is_empty());
+        assert_eq!(opaque, vec![10]);
+    }
+
+    #[test]
+    fn test_lone_container_stack_only_dims_ring_focused_window() {
+        let _guard = StateGuard::enable().enable_monocle();
+        let mut wm = window_manager_with_two_monitors(&[&[], &[]]);
+        with_tiled_containers(&mut wm, 1, &[&[10, 20]]);
+
+        let known_hwnds = Mutex::new(vec![]);
+        let (transparent, opaque) = decide_targets(&wm, &known_hwnds, 999, false);
+
+        // Only the ring-focused window of the lone container is a target, exactly like a monocle
+        // stack, and the window behind it stays in the restore set so it can be brought back
+        // opaque when the stack is cycled.
+        assert_eq!(transparent, vec![10]);
+        assert!(opaque.is_empty());
+        assert_eq!(known_hwnds.into_inner(), vec![20]);
+    }
+
+    #[test]
+    fn test_multi_container_workspace_still_uses_container_rule() {
+        let _guard = StateGuard::enable();
+        let mut wm = window_manager_with_two_monitors(&[&[], &[]]);
+        // Two containers is not a lone-window workspace, so it keeps the ordinary container rule
+        // and is still dimmed on an unfocused monitor with the monocle toggle off.
+        with_tiled_containers(&mut wm, 1, &[&[10], &[20]]);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert_eq!(transparent, vec![10, 20]);
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_lone_container_with_floating_window_uses_container_rule() {
+        let _guard = StateGuard::enable();
+        let mut wm = window_manager_with_two_monitors(&[&[], &[30]]);
+        // A floating overlay means the lone tiled container isn't the whole workspace view, so
+        // both it and the float must still be dimmed by their own rules.
+        with_tiled_containers(&mut wm, 1, &[&[10]]);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert_eq!(transparent, vec![10, 30]);
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_workspace_transparency_off_keeps_lone_container_opaque() {
+        let _guard = StateGuard::enable().enable_monocle();
+        let mut wm = window_manager_with_two_monitors(&[&[], &[]]);
+        with_tiled_containers(&mut wm, 1, &[&[10]]);
+        wm.monitors_mut()[1]
+            .workspaces_mut()
+            .front_mut()
+            .unwrap()
+            .transparency = Some(false);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        // The per-scope override still wins over the monocle toggle.
+        assert!(transparent.is_empty());
+        assert_eq!(opaque, vec![10]);
     }
 
     #[test]

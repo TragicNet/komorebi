@@ -560,7 +560,7 @@
       }
     },
     "transparency_monocle": {
-      "description": "Add transparency to unfocused monocle windows",
+      "description": "Add transparency to unfocused monocle windows, and to workspaces holding a single\nwindow (a tiling layer of exactly one container, stack included)",
       "type": [
         "boolean",
         "null"
@@ -4354,7 +4354,7 @@
           }
         },
         "monocle": {
-          "description": "Add transparency to unfocused monocle windows",
+          "description": "Add transparency to unfocused monocle windows, and to workspaces holding a single\nwindow (a tiling layer of exactly one container, stack included)",
           "type": [
             "boolean",
             "null"

@@ -536,7 +536,8 @@ pub struct TransparencySettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = transparency_manager::TRANSPARENCY_FLOATING)))]
     pub floating: Option<bool>,
-    /// Add transparency to unfocused monocle windows
+    /// Add transparency to unfocused monocle windows, and to workspaces holding a single
+    /// window (a tiling layer of exactly one container, stack included)
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(extend("default" = transparency_manager::TRANSPARENCY_MONOCLE)))]
     pub monocle: Option<bool>,
@@ -703,7 +704,8 @@ pub struct StaticConfig {
         schemars(extend("default" = transparency_manager::TRANSPARENCY_FLOATING))
     )]
     pub transparency_floating: Option<bool>,
-    /// Add transparency to unfocused monocle windows
+    /// Add transparency to unfocused monocle windows, and to workspaces holding a single
+    /// window (a tiling layer of exactly one container, stack included)
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(
         feature = "schemars",
