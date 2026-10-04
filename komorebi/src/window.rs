@@ -60,6 +60,7 @@ use std::sync::atomic::AtomicI32;
 use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 use strum::Display;
 use strum::EnumString;
 use windows::Win32::Foundation::HWND;
@@ -67,6 +68,64 @@ use windows::Win32::Graphics::Gdi::HMONITOR;
 
 pub static MINIMUM_WIDTH: AtomicI32 = AtomicI32::new(0);
 pub static MINIMUM_HEIGHT: AtomicI32 = AtomicI32::new(0);
+
+/// How long a recorded restore keeps suppressing the visibility events it
+/// produced. Long enough to cover the round trip through the WinEvent queue
+/// for a burst of restores, short enough that a genuine user alt-tab to the
+/// same window immediately afterwards is still honoured.
+const EXPECTED_UNCLOAK_WINDOW: Duration = Duration::from_millis(250);
+
+/// Records `hwnd` in `expected` as having just been un-shown by komorebi.
+///
+/// Entries older than `window` are dropped here as well as on consumption, so a
+/// restore for a window that never emits an event (Windows may coalesce or drop
+/// them) cannot leave the map growing.
+pub(crate) fn record_expected_uncloak(
+    expected: &mut HashMap<isize, Instant>,
+    hwnd: isize,
+    now: Instant,
+    window: Duration,
+) {
+    expected.retain(|_, at| now.saturating_duration_since(*at) <= window);
+    expected.insert(hwnd, now);
+}
+
+/// Reports whether the visibility event for `hwnd` was produced by komorebi's
+/// own recent restore, and so must not be read as the user alt-tabbing to it.
+///
+/// The entry is deliberately *not* removed: one restore can legitimately emit
+/// several events (an application focused across a workspace switch fires an
+/// extra `Show` on top of the `Uncloak`), and the entry ages out on its own.
+pub(crate) fn is_expected_uncloak(
+    expected: &mut HashMap<isize, Instant>,
+    hwnd: isize,
+    now: Instant,
+    window: Duration,
+) -> bool {
+    expected.retain(|_, at| now.saturating_duration_since(*at) <= window);
+    expected.contains_key(&hwnd)
+}
+
+/// Records that `hwnd` was just restored by komorebi. See [`crate::EXPECTED_UNCLOAKS`].
+pub(crate) fn expect_uncloak(hwnd: isize) {
+    record_expected_uncloak(
+        &mut crate::EXPECTED_UNCLOAKS.lock(),
+        hwnd,
+        Instant::now(),
+        EXPECTED_UNCLOAK_WINDOW,
+    );
+}
+
+/// Returns `true` when the current visibility event for `hwnd` was produced by
+/// komorebi's own recent restore. See [`crate::EXPECTED_UNCLOAKS`].
+pub(crate) fn consume_expected_uncloak(hwnd: isize) -> bool {
+    is_expected_uncloak(
+        &mut crate::EXPECTED_UNCLOAKS.lock(),
+        hwnd,
+        Instant::now(),
+        EXPECTED_UNCLOAK_WINDOW,
+    )
+}
 
 #[derive(Debug, Default, Clone, Copy, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -896,6 +955,16 @@ impl Window {
         }
 
         let hiding_behaviour = HIDING_BEHAVIOUR.lock();
+
+        // Every restore below re-shows the window and makes Windows broadcast a
+        // visibility event for it: `EVENT_OBJECT_UNCLOAKED` under the `Cloak`
+        // behaviour, `EVENT_OBJECT_SHOW` under `Hide`/`Minimize`. Those events
+        // re-enter the event loop, where the reconciliation path would read them
+        // as the user alt-tabbing to this window and switch workspaces in
+        // response. Record the restore first so the events it produces are
+        // recognised as ours. Scoped so the guard is released before the
+        // visibility change, which must never be made under a held global.
+        expect_uncloak(self.hwnd);
 
         #[allow(deprecated)]
         match *hiding_behaviour {
@@ -2101,5 +2170,96 @@ mod tests {
             FULLSCREEN_WORK_AREA_EDGE_TOLERANCE,
             FULLSCREEN_COVERAGE_RATIO,
         ));
+    }
+
+    const WINDOW: Duration = Duration::from_millis(250);
+
+    #[test]
+    fn test_expected_uncloak_suppresses_own_restore() {
+        let mut expected = HashMap::new();
+        let now = Instant::now();
+
+        // No restore has happened, so a visibility event is genuine navigation.
+        assert!(!is_expected_uncloak(&mut expected, 100, now, WINDOW));
+
+        record_expected_uncloak(&mut expected, 100, now, WINDOW);
+        assert!(is_expected_uncloak(&mut expected, 100, now, WINDOW));
+    }
+
+    #[test]
+    fn test_expected_uncloak_is_per_hwnd() {
+        let mut expected = HashMap::new();
+        let now = Instant::now();
+
+        // Restoring one window must not suppress events for any other: only the
+        // window komorebi actually re-showed is spared a reconciliation.
+        record_expected_uncloak(&mut expected, 100, now, WINDOW);
+        assert!(!is_expected_uncloak(&mut expected, 101, now, WINDOW));
+    }
+
+    #[test]
+    fn test_expected_uncloak_survives_repeated_events() {
+        let mut expected = HashMap::new();
+        let now = Instant::now();
+
+        // One restore can legitimately broadcast more than one event (an
+        // application focused across a workspace switch fires an extra Show on
+        // top of the Uncloak), so the entry must not be consumed on first use.
+        record_expected_uncloak(&mut expected, 100, now, WINDOW);
+        assert!(is_expected_uncloak(&mut expected, 100, now, WINDOW));
+        assert!(is_expected_uncloak(&mut expected, 100, now, WINDOW));
+        assert!(is_expected_uncloak(&mut expected, 100, now, WINDOW));
+    }
+
+    #[test]
+    fn test_expected_uncloak_expires() {
+        let mut expected = HashMap::new();
+        let restored_at = Instant::now();
+
+        record_expected_uncloak(&mut expected, 100, restored_at, WINDOW);
+
+        // Still inside the window, however many events arrive.
+        assert!(is_expected_uncloak(
+            &mut expected,
+            100,
+            restored_at + Duration::from_millis(249),
+            WINDOW
+        ));
+
+        // Once it has elapsed, a later event is genuine user navigation again.
+        let after = restored_at + Duration::from_millis(251);
+        assert!(!is_expected_uncloak(&mut expected, 100, after, WINDOW));
+    }
+
+    #[test]
+    fn test_expected_uncloak_does_not_leak() {
+        let mut expected = HashMap::new();
+        let restored_at = Instant::now();
+
+        // A restore whose events Windows drops must not leave the entry behind
+        // to swallow a later legitimate event.
+        for hwnd in 100..200 {
+            record_expected_uncloak(&mut expected, hwnd, restored_at, WINDOW);
+        }
+        assert_eq!(expected.len(), 100);
+
+        // The next restore prunes them all as it records its own.
+        let later = restored_at + Duration::from_millis(251);
+        record_expected_uncloak(&mut expected, 999, later, WINDOW);
+        assert_eq!(expected.len(), 1);
+        assert!(is_expected_uncloak(&mut expected, 999, later, WINDOW));
+    }
+
+    #[test]
+    fn test_expected_uncloak_does_not_swallow_later_restore_window() {
+        let mut expected = HashMap::new();
+        let restored_at = Instant::now();
+
+        // A restore that expires is fully forgotten, so the window behaves as if
+        // it had never been touched by komorebi.
+        record_expected_uncloak(&mut expected, 100, restored_at, WINDOW);
+        let later = restored_at + Duration::from_millis(300);
+        assert!(!is_expected_uncloak(&mut expected, 100, later, WINDOW));
+        assert!(expected.is_empty());
     }
 }

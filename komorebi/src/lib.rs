@@ -51,6 +51,7 @@ use std::sync::atomic::AtomicU32;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::Instant;
 
 pub use core::*;
 pub use komorebi_themes::colour::*;
@@ -86,6 +87,26 @@ use winreg::enums::HKEY_CURRENT_USER;
 
 lazy_static! {
     static ref HIDDEN_HWNDS: Arc<Mutex<Vec<isize>>> = Arc::new(Mutex::new(vec![]));
+    /// Windows whose next visibility event (`Uncloak`, or `Show` under the
+    /// `Hide` hiding behaviour) was produced by komorebi's own `Window::restore`
+    /// call, mapped to the moment of that restore.
+    ///
+    /// With the `Cloak` hiding behaviour every workspace switch uncloaks (or
+    /// cloaks) every window on the monitor, and each of those broadcasts an
+    /// `EVENT_OBJECT_UNCLOAKED` back into the event loop. `process_event` reads
+    /// those as the user alt-tabbing to that window and reconciles to it, which
+    /// switches workspaces again and emits the next round of events: a
+    /// self-sustaining storm whenever an application keeps enough windows alive
+    /// across workspaces for each pass to re-trigger the next. Recording the
+    /// restore lets the event loop tell komorebi's own visibility churn apart
+    /// from genuine user navigation.
+    ///
+    /// Keyed by `Instant` so every entry expires on its own. Windows may
+    /// coalesce or drop these events, and a single restore can emit more than
+    /// one, so the entry is kept for a short window rather than consumed once:
+    /// a stale entry must never swallow a later legitimate event.
+    pub static ref EXPECTED_UNCLOAKS: Arc<Mutex<HashMap<isize, Instant>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     static ref LAYERED_WHITELIST: Arc<Mutex<Vec<MatchingRule>>> = Arc::new(Mutex::new(vec![
         MatchingRule::Simple(IdWithIdentifier {
             kind: ApplicationIdentifier::Exe,

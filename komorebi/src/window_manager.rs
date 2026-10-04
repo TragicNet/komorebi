@@ -72,6 +72,7 @@ use crate::state::State;
 use crate::static_config::StaticConfig;
 use crate::transparency_manager;
 use crate::window::Window;
+use crate::window::expect_uncloak;
 use crate::window_manager_event::WindowManagerEvent;
 use crate::windows_api::WindowsApi;
 use crate::windows_callbacks;
@@ -84,6 +85,21 @@ use crate::workspace::WorkspaceLayer;
 /// band) on every FocusChange can make the OS re-emit a SystemForeground event
 /// for the raised window, feeding a self-sustaining focus-change storm.
 const OVERLAY_MAINTENANCE_INTERVAL: u64 = 250;
+
+/// Minimum interval between focused-workspace retiles triggered by the event
+/// loop. An application cloaking/uncloaking its own windows emits one event each
+/// way, and each one used to run a full retile that re-measured every window.
+const RETILE_COALESCE_INTERVAL: Duration = Duration::from_millis(32);
+
+/// Whether a retile request may be folded into the current coalescing window.
+///
+/// Only the side-effect-free retiles that the event loop issues are coalesced. A
+/// call carrying focus comes from a command, or from a window appearing or
+/// disappearing, where deferring would make the manager feel unresponsive, so
+/// those always run immediately.
+fn retile_is_coalescable(follow_focus: bool, trigger_focus: bool) -> bool {
+    !follow_focus && !trigger_focus
+}
 
 #[derive(Debug)]
 pub struct WindowManager {
@@ -119,17 +135,26 @@ pub struct WindowManager {
     /// the window unresponsive. Throttling them collapses the cascade to a
     /// single maintenance pass per interval without affecting layering.
     pub(crate) overlay_maintenance_until: Option<Instant>,
+    /// Deadline before which a focused-workspace retile requested by the event
+    /// loop is coalesced into a single deferred pass.
+    ///
+    /// Applications cloaking and uncloaking their own windows emit one event each
+    /// way, and every one of them used to run a full retile that re-measured every
+    /// window in the layout. Coalescing collapses such a burst into a single pass
+    /// so the tiles stop churning for as long as the burst lasts. Only the
+    /// side-effect-free event-driven retiles are coalesced; a call that carries
+    /// focus still runs immediately.
+    pub(crate) retile_coalesce_until: Option<Instant>,
+    /// Set when a retile was skipped because `retile_coalesce_until` had not
+    /// elapsed, so the final state of the burst is still applied once it has.
+    /// Drained on the event-loop tick.
+    pub(crate) retile_deferred: bool,
     pub hotwatch: Hotwatch,
     pub virtual_desktop_id: Option<Vec<u8>>,
     pub has_pending_raise_op: bool,
     pub keep_monocle_on_window_close: bool,
     pub pending_move_op: Arc<Option<(usize, usize, isize)>>,
     pub already_moved_window_handles: Arc<Mutex<HashSet<isize>>>,
-    /// HWNDs whose next `Uncloak` event is expected and must be ignored: the
-    /// windows uncloaked by a monocle restore during a drag-by-mouse workspace
-    /// move. Keyed by `Instant` so stale entries (whose uncloak event never
-    /// arrives) can be pruned instead of swallowing a later legitimate uncloak.
-    pub(crate) uncloacked_windows_to_ignore: HashMap<isize, Instant>,
     /// Maps each known window hwnd to the (monitor, workspace) index pair managing it
     pub known_hwnds: HashMap<isize, (usize, usize)>,
 }
@@ -141,29 +166,6 @@ impl AsRef<Self> for WindowManager {
 }
 
 impl_ring_elements!(WindowManager, Monitor);
-
-impl WindowManager {
-    /// Maximum age after which an expected-uncloak entry is considered stale
-    /// and pruned, so an uncloak event that never arrives for a hwnd cannot
-    /// cause a later legitimate uncloak of the same hwnd to be swallowed.
-    const UNCLOAK_IGNORE_TTL: Duration = Duration::from_secs(5);
-
-    /// Drops expected-uncloak entries that are older than
-    /// `UNCLOAK_IGNORE_TTL`.
-    pub(crate) fn prune_uncloak_ignores(&mut self) {
-        let expiry = Instant::now() - Self::UNCLOAK_IGNORE_TTL;
-        self.uncloacked_windows_to_ignore
-            .retain(|_, uncloaked_at| *uncloaked_at > expiry);
-    }
-
-    /// Returns `true` when the uncloak event for `hwnd` was expected (a window
-    /// restored by a recent monocle move by mouse) and should be ignored.
-    /// Consumes the entry so a single hwnd can only swallow one uncloak.
-    pub(crate) fn consume_expected_uncloak(&mut self, hwnd: isize) -> bool {
-        self.prune_uncloak_ignores();
-        self.uncloacked_windows_to_ignore.remove(&hwnd).is_some()
-    }
-}
 
 #[derive(Debug, Clone, Copy)]
 struct EnforceWorkspaceRuleOp {
@@ -223,12 +225,13 @@ impl WindowManager {
             workspace_layer_focus_behaviour: WorkspaceLayerFocusBehaviour::default(),
             layer_flip_suppress_until: None,
             overlay_maintenance_until: None,
+            retile_coalesce_until: None,
+            retile_deferred: false,
             hotwatch: Hotwatch::new()?,
             has_pending_raise_op: false,
             keep_monocle_on_window_close: true,
             pending_move_op: Arc::new(None),
             already_moved_window_handles: Arc::new(Mutex::new(HashSet::new())),
-            uncloacked_windows_to_ignore: HashMap::new(),
             known_hwnds: HashMap::new(),
         })
     }
@@ -1190,10 +1193,8 @@ impl WindowManager {
                 // That workspace reconciliation would focus the window on the origin monitor.
                 // So we need to ignore the uncloak events produced by the origin workspace
                 // restore to avoid that issue.
-                self.prune_uncloak_ignores();
                 for hwnd in uncloacked_windows {
-                    self.uncloacked_windows_to_ignore
-                        .insert(hwnd, Instant::now());
+                    expect_uncloak(hwnd);
                 }
             }
         } else if origin_workspace
@@ -1346,6 +1347,14 @@ impl WindowManager {
         follow_focus: bool,
         trigger_focus: bool,
     ) -> eyre::Result<()> {
+        // Coalesce only the side-effect-free event-driven retiles. A call carrying
+        // focus comes from a command or from a window appearing/disappearing, where
+        // deferring would make the manager feel unresponsive, so those always run.
+        if retile_is_coalescable(follow_focus, trigger_focus) && !self.begin_retile_now() {
+            self.retile_deferred = true;
+            return Ok(());
+        }
+
         tracing::info!("updating");
 
         let offset = self.work_area_offset;
@@ -5058,6 +5067,38 @@ impl WindowManager {
             .unwrap_or(false)
     }
 
+    /// Opens a retile coalescing window and reports whether a retile may run now.
+    /// The first call in a window always may; later calls within
+    /// `RETILE_COALESCE_INTERVAL` may not, and must instead mark
+    /// [`Self::retile_deferred`] so the burst's final state is still applied.
+    pub(crate) fn begin_retile_now(&mut self) -> bool {
+        let now = Instant::now();
+        if self
+            .retile_coalesce_until
+            .is_some_and(|deadline| now < deadline)
+        {
+            return false;
+        }
+        self.retile_coalesce_until = Some(now + RETILE_COALESCE_INTERVAL);
+        true
+    }
+
+    /// Runs a retile that [`Self::update_focused_workspace`] deferred, once the
+    /// coalescing window has elapsed. Called from the event-loop tick, which runs
+    /// with the window manager lock held but never while it is waiting for events.
+    ///
+    /// The deferred pass re-enters `update_focused_workspace`, so it takes the
+    /// gate's "not yet" branch again only if a newer burst has since opened a
+    /// fresh window; `retile_deferred` is cleared here so that case stays pending
+    /// rather than being lost.
+    pub(crate) fn drain_deferred_work(&mut self) -> eyre::Result<()> {
+        if !self.retile_deferred {
+            return Ok(());
+        }
+        self.retile_deferred = false;
+        self.update_focused_workspace(false, false)
+    }
+
     #[tracing::instrument(skip(self))]
     pub fn monitor_workspace_index_by_name(&mut self, name: &str) -> Option<(usize, usize)> {
         tracing::info!("looking up workspace by name");
@@ -5215,6 +5256,65 @@ mod tests {
     #[test]
     fn test_create_window_manager() {
         let (_wm, _test_context) = setup_window_manager();
+    }
+
+    // These exercise the retile coalescing gate only. `update_focused_workspace`
+    // and `drain_deferred_work` are deliberately not called here: with an empty
+    // workspace the retile path raises the desktop window, and `follow_focus`
+    // additionally centres the cursor, which would disturb a live komorebi
+    // session running alongside `cargo test`.
+
+    #[test]
+    fn test_retile_coalescing_admits_the_first_retile_then_defers_the_rest() {
+        let (mut wm, _test_context) = setup_window_manager();
+
+        assert!(wm.begin_retile_now());
+
+        // Everything inside the coalescing window is refused.
+        assert!(!wm.begin_retile_now());
+        assert!(!wm.begin_retile_now());
+    }
+
+    #[test]
+    fn test_retile_coalescing_window_reopens_once_it_has_elapsed() {
+        let (mut wm, _test_context) = setup_window_manager();
+
+        assert!(wm.begin_retile_now());
+        assert!(!wm.begin_retile_now());
+
+        // Rewind the deadline instead of sleeping out the real interval.
+        wm.retile_coalesce_until = Some(Instant::now() - Duration::from_millis(1));
+        assert!(wm.begin_retile_now());
+    }
+
+    #[test]
+    fn test_retile_coalescing_window_is_opened_by_the_first_admitted_retile() {
+        let (mut wm, _test_context) = setup_window_manager();
+
+        assert!(wm.retile_coalesce_until.is_none());
+        let before = Instant::now();
+        assert!(wm.begin_retile_now());
+        let after = Instant::now();
+
+        // `begin_retile_now` samples the clock itself, so the deadline is one
+        // interval ahead of some instant bracketed by the two reads around it.
+        let deadline = wm
+            .retile_coalesce_until
+            .expect("a retile must open a window");
+        assert!(deadline >= before + RETILE_COALESCE_INTERVAL);
+        assert!(deadline <= after + RETILE_COALESCE_INTERVAL);
+    }
+
+    #[test]
+    fn test_focus_carrying_retiles_are_never_coalesced() {
+        // An event-driven retile may be folded into the window.
+        assert!(retile_is_coalescable(false, false));
+
+        // A retile that carries focus must always run, so that neither a command
+        // nor a window appearing/disappearing is delayed behind the gate.
+        assert!(!retile_is_coalescable(true, false));
+        assert!(!retile_is_coalescable(false, true));
+        assert!(!retile_is_coalescable(true, true));
     }
 
     #[test]

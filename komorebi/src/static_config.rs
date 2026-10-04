@@ -1688,11 +1688,12 @@ impl StaticConfig {
                 .unwrap_or_default(),
             layer_flip_suppress_until: None,
             overlay_maintenance_until: None,
+            retile_coalesce_until: None,
+            retile_deferred: false,
             hotwatch: Hotwatch::new()?,
             has_pending_raise_op: false,
             pending_move_op: Arc::new(None),
             already_moved_window_handles: Arc::new(Mutex::new(HashSet::new())),
-            uncloacked_windows_to_ignore: HashMap::new(),
             known_hwnds: HashMap::new(),
         };
 

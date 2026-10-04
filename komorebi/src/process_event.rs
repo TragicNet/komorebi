@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 
 use color_eyre::eyre;
 use color_eyre::eyre::OptionExt;
+use crossbeam_channel::RecvTimeoutError;
 use crossbeam_utils::atomic::AtomicConsume;
 use parking_lot::Mutex;
 
@@ -37,12 +38,18 @@ use crate::stackbar_manager;
 use crate::state::State;
 use crate::transparency_manager;
 use crate::window::RuleDebug;
+use crate::window::consume_expected_uncloak;
 use crate::window::should_act;
 use crate::window_manager::WindowManager;
 use crate::window_manager_event::WindowManagerEvent;
 use crate::windows_api::WindowsApi;
 use crate::winevent::WinEvent;
 use crate::workspace::WorkspaceLayer;
+
+/// How long the event loop waits for a WinEvent before servicing deferred work.
+/// Coalesced retiles are flushed on this tick, so it must be short relative to
+/// `RETILE_COALESCE_INTERVAL` without spinning on an idle system.
+const EVENT_LOOP_TICK_MS: u64 = 16;
 
 #[tracing::instrument]
 pub fn listen_for_events(wm: Arc<Mutex<WindowManager>>) {
@@ -71,18 +78,34 @@ pub fn listen_for_events(wm: Arc<Mutex<WindowManager>>) {
     std::thread::spawn(move || {
         tracing::info!("listening");
         loop {
-            if let Ok(event) = receiver.recv() {
-                let mut guard = wm.lock();
-                match guard.process_event(event) {
-                    Ok(()) => {}
-                    Err(error) => {
-                        if cfg!(debug_assertions) {
-                            tracing::error!("{:?}", error)
-                        } else {
-                            tracing::error!("{}", error)
+            // Timeout rather than a plain blocking receive so there is a periodic
+            // point at which deferred work can be drained: a burst of retiles
+            // coalesced by `update_focused_workspace` is completed on the tick
+            // instead of waiting for the next unrelated event. The lock is taken
+            // only around actual work, never across the wait.
+            match receiver.recv_timeout(std::time::Duration::from_millis(EVENT_LOOP_TICK_MS)) {
+                Ok(event) => {
+                    let mut guard = wm.lock();
+                    match guard.process_event(event) {
+                        Ok(()) => {}
+                        Err(error) => {
+                            if cfg!(debug_assertions) {
+                                tracing::error!("{:?}", error)
+                            } else {
+                                tracing::error!("{}", error)
+                            }
                         }
                     }
                 }
+                Err(RecvTimeoutError::Timeout) => {
+                    let mut guard = wm.lock();
+                    if let Err(error) = guard.drain_deferred_work() {
+                        tracing::error!("{}", error);
+                    }
+                }
+                // Without this arm a closed channel would spin this loop at 100%
+                // CPU, where the previous blocking receive simply parked forever.
+                Err(RecvTimeoutError::Disconnected) => break,
             }
         }
     });
@@ -699,10 +722,22 @@ impl WindowManager {
                     return Ok(());
                 }
 
-                if matches!(event, WindowManagerEvent::Uncloak(_, _))
-                    && self.consume_expected_uncloak(window.hwnd)
+                // A visibility event komorebi itself produced by restoring the window. Every
+                // workspace switch restores every window on the incoming workspace and hides the
+                // outgoing one, and under the `Cloak`/`Hide` hiding behaviours each of those
+                // broadcasts an Uncloak/Show event back into this loop. Falling through to
+                // needs_reconciliation() below would read our own restore as the user alt-tabbing
+                // to that window, perform_reconciliation() would switch workspaces to it, and the
+                // next pass would emit the next round of events: a self-sustaining storm whenever an
+                // application keeps enough windows spread over workspaces for each pass to re-trigger
+                // the next. Genuine user navigation is unaffected because a restore is only recorded
+                // for a fraction of a second (see crate::EXPECTED_UNCLOAKS).
+                if matches!(
+                    event,
+                    WindowManagerEvent::Uncloak(_, _) | WindowManagerEvent::Show(_, _)
+                ) && consume_expected_uncloak(window.hwnd)
                 {
-                    tracing::info!("ignoring uncloak after monocle move by mouse across monitors");
+                    tracing::info!("ignoring uncloak/show produced by a komorebi restore");
                 } else {
                     let focused_monitor_idx = self.focused_monitor_idx();
                     let focused_workspace_idx =

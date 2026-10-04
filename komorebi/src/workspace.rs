@@ -1,9 +1,12 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fmt::Display;
 use std::fmt::Formatter;
 use std::num::NonZeroUsize;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
 
 use crate::DEFAULT_CONTAINER_PADDING;
 use crate::DEFAULT_WORKSPACE_PADDING;
@@ -137,6 +140,69 @@ pub struct Workspace {
     /// HWND of the most recently minimized window, used by reclaim-last-minimized-window.
     #[serde(skip)]
     pub last_minimized_hwnd: Option<isize>,
+    /// When each currently-cloaked window in this layout was first observed
+    /// cloaked. A window is only evicted from the layout once it has been
+    /// continuously cloaked for `CLOAKED_EVICTION_DELAY`; see
+    /// [`stale_cloaked_hwnds`].
+    #[serde(skip)]
+    pub cloaked_since: HashMap<isize, Instant>,
+}
+
+/// How long a window must be *continuously* cloaked before it is evicted from
+/// the focused workspace's layout.
+///
+/// `DWMWA_CLOAKED` is an application-owned flag: browsers such as Firefox
+/// cloak and uncloak their own windows transiently (measured on a live session:
+/// median ~320ms, 75% under one second) for occlusion and prerender purposes.
+/// Evicting on the first sighting meant every transient uncloak was followed by
+/// a re-insert at the window's remembered index, which renormalised the layout
+/// and repositioned every other window. Genuinely hidden windows stay cloaked
+/// for seconds to minutes (observed up to ~168s), so waiting a moment separates
+/// the two cases without leaving a real hidden window holding its tile for long.
+const CLOAKED_EVICTION_DELAY: Duration = Duration::from_millis(1500);
+
+/// Decides which of the currently-cloaked windows in a layout are cloaked
+/// stably enough to be evicted from it.
+///
+/// A hwnd that is not in `currently_cloaked` has uncloaked, so any record of it
+/// is forgotten and a later cloak starts a fresh delay. A hwnd seen for the
+/// first time only has its observation recorded, never returned: an application
+/// that flaps its cloak must not have its window pulled out of the layout, and
+/// therefore re-inserted and repositioning every sibling, on the first frame.
+/// Once a record is older than `delay` the hwnd is returned and its record
+/// dropped, so the eviction happens exactly once per cloaking.
+pub(crate) fn stale_cloaked_hwnds(
+    cloaked_since: &mut HashMap<isize, Instant>,
+    currently_cloaked: &HashSet<isize>,
+    now: Instant,
+    delay: Duration,
+) -> Vec<isize> {
+    // Drop the record of anything no longer cloaked, and collect the hwnds whose
+    // cloak has now persisted past the delay.
+    let mut stale = vec![];
+    cloaked_since.retain(|hwnd, since| {
+        if !currently_cloaked.contains(hwnd) {
+            return false;
+        }
+        if now.saturating_duration_since(*since) >= delay {
+            stale.push(*hwnd);
+            return false;
+        }
+        true
+    });
+
+    // Start a fresh delay for anything seen for the first time. Collect before
+    // inserting so the map is not borrowed twice at once.
+    let newly_cloaked: Vec<isize> = currently_cloaked
+        .iter()
+        .filter(|hwnd| !cloaked_since.contains_key(hwnd))
+        .copied()
+        .collect();
+    for hwnd in &newly_cloaked {
+        cloaked_since.insert(*hwnd, now);
+    }
+
+    stale
 }
 
 #[derive(Debug, Default, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -202,6 +268,7 @@ impl Default for Workspace {
             last_focused_cycle_window_hwnd: None,
             restoration_indices: HashMap::new(),
             last_minimized_hwnd: None,
+            cloaked_since: HashMap::new(),
         }
     }
 }
@@ -666,41 +733,65 @@ impl Workspace {
         }
 
         let mut hwnds_to_remove = vec![];
+        let mut cloaked_hwnds = HashSet::new();
         let hidden_hwnds = crate::HIDDEN_HWNDS.lock();
 
+        // A minimized window is unambiguously gone, so it is evicted at once. A
+        // cloaked one may only be transiently so: the flag belongs to the
+        // application, which can flap it to signal occlusion or prerender. Those
+        // go through `stale_cloaked_hwnds` instead so a flap cannot pull a window
+        // out of the layout and reposition every sibling. The `hidden_hwnds`
+        // guards keep komorebi's own workspace hides out of both paths.
         for container in self.containers() {
             for window in container.windows() {
-                if !hidden_hwnds.contains(&window.hwnd)
-                    && (window.is_minimized() || window.is_cloaked().unwrap_or(false))
-                {
+                if hidden_hwnds.contains(&window.hwnd) {
+                    continue;
+                }
+                if window.is_minimized() {
                     hwnds_to_remove.push(window.hwnd);
+                } else if window.is_cloaked().unwrap_or(false) {
+                    cloaked_hwnds.insert(window.hwnd);
                 }
             }
         }
 
         if let Some(container) = &self.monocle_container {
             for window in container.windows() {
-                if !hidden_hwnds.contains(&window.hwnd)
-                    && (window.is_minimized() || window.is_cloaked().unwrap_or(false))
-                {
+                if hidden_hwnds.contains(&window.hwnd) {
+                    continue;
+                }
+                if window.is_minimized() {
                     hwnds_to_remove.push(window.hwnd);
+                } else if window.is_cloaked().unwrap_or(false) {
+                    cloaked_hwnds.insert(window.hwnd);
                 }
             }
         }
 
         if let Some(window) = self.maximized_window {
-            if window.is_minimized() || window.is_cloaked().unwrap_or(false) {
+            if window.is_minimized() {
                 hwnds_to_remove.push(window.hwnd);
+            } else if window.is_cloaked().unwrap_or(false) {
+                cloaked_hwnds.insert(window.hwnd);
             }
         }
 
         for window in self.floating_windows() {
-            if window.is_minimized() || window.is_cloaked().unwrap_or(false) {
+            if window.is_minimized() {
                 hwnds_to_remove.push(window.hwnd);
+            } else if window.is_cloaked().unwrap_or(false) {
+                cloaked_hwnds.insert(window.hwnd);
             }
         }
 
         drop(hidden_hwnds);
+
+        hwnds_to_remove.extend(stale_cloaked_hwnds(
+            &mut self.cloaked_since,
+            &cloaked_hwnds,
+            Instant::now(),
+            CLOAKED_EVICTION_DELAY,
+        ));
 
         for hwnd in hwnds_to_remove {
             tracing::info!(hwnd, "removing minimized/cloaked window");
@@ -3755,5 +3846,119 @@ mod tests {
         // treated as a normal tiled window and must be repositioned.
         assert!(should_reposition_window(true, &target, &current, true));
         assert!(should_reposition_window(true, &target, &target, false));
+    }
+
+    const DELAY: Duration = CLOAKED_EVICTION_DELAY;
+
+    fn hwnds(values: &[isize]) -> HashSet<isize> {
+        values.iter().copied().collect()
+    }
+
+    #[test]
+    fn test_cloaked_window_is_not_evicted_on_first_sighting() {
+        let mut cloaked_since = HashMap::new();
+        let now = Instant::now();
+
+        // The first frame a window is seen cloaked must never evict it, however
+        // long ago the observation was taken.
+        assert!(stale_cloaked_hwnds(&mut cloaked_since, &hwnds(&[100]), now, DELAY).is_empty());
+        assert_eq!(cloaked_since.len(), 1);
+    }
+
+    #[test]
+    fn test_transient_cloak_flap_is_never_evicted() {
+        let mut cloaked_since = HashMap::new();
+        let start = Instant::now();
+
+        // Firefox cloaks and uncloaks its own windows in well under a second. Each
+        // pass sees it cloaked and each pass must leave it alone.
+        for step in 0..6 {
+            let now = start + Duration::from_millis(step * 100);
+            assert!(
+                stale_cloaked_hwnds(&mut cloaked_since, &hwnds(&[100]), now, DELAY).is_empty(),
+                "evicted on pass {step}"
+            );
+            // ...and it is no longer cloaked by the next update.
+            assert!(stale_cloaked_hwnds(&mut cloaked_since, &hwnds(&[]), now, DELAY).is_empty());
+        }
+        assert!(cloaked_since.is_empty());
+    }
+
+    #[test]
+    fn test_stable_cloak_is_evicted_after_the_delay() {
+        let mut cloaked_since = HashMap::new();
+        let start = Instant::now();
+
+        assert!(stale_cloaked_hwnds(&mut cloaked_since, &hwnds(&[100]), start, DELAY).is_empty());
+        // Just short of the delay the window is still held.
+        assert!(
+            stale_cloaked_hwnds(
+                &mut cloaked_since,
+                &hwnds(&[100]),
+                start + DELAY - Duration::from_millis(1),
+                DELAY
+            )
+            .is_empty()
+        );
+        // Past it, the window is evicted.
+        assert_eq!(
+            stale_cloaked_hwnds(&mut cloaked_since, &hwnds(&[100]), start + DELAY, DELAY),
+            vec![100]
+        );
+        // The eviction took the window out of the layout, so the next update no
+        // longer sees it cloaked and forgets it entirely.
+        assert!(
+            stale_cloaked_hwnds(&mut cloaked_since, &hwnds(&[]), start + DELAY * 2, DELAY)
+                .is_empty()
+        );
+        assert!(cloaked_since.is_empty());
+    }
+
+    #[test]
+    fn test_recloaking_restarts_the_delay() {
+        let mut cloaked_since = HashMap::new();
+        let start = Instant::now();
+
+        stale_cloaked_hwnds(&mut cloaked_since, &hwnds(&[100]), start, DELAY);
+
+        // It uncloaks partway through, which forgets the observation...
+        let reopened = start + DELAY - Duration::from_millis(400);
+        assert!(stale_cloaked_hwnds(&mut cloaked_since, &hwnds(&[]), reopened, DELAY).is_empty());
+        assert!(cloaked_since.is_empty());
+
+        // ...so re-cloaking starts the delay over rather than evicting immediately.
+        assert!(
+            stale_cloaked_hwnds(
+                &mut cloaked_since,
+                &hwnds(&[100]),
+                reopened + Duration::from_millis(400),
+                DELAY
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_cloak_eviction_is_per_hwnd() {
+        let mut cloaked_since = HashMap::new();
+        let start = Instant::now();
+
+        stale_cloaked_hwnds(&mut cloaked_since, &hwnds(&[100, 200]), start, DELAY);
+
+        // A third window appears cloaked halfway through, so it has only aged half
+        // the delay by the time the first two have.
+        let mid = start + DELAY / 2;
+        assert!(
+            stale_cloaked_hwnds(&mut cloaked_since, &hwnds(&[100, 200, 300]), mid, DELAY)
+                .is_empty()
+        );
+
+        // Only the two windows cloaked since the start are evicted; the newcomer is
+        // still inside its own delay.
+        let later = start + DELAY + Duration::from_millis(1);
+        let mut evicted =
+            stale_cloaked_hwnds(&mut cloaked_since, &hwnds(&[100, 200, 300]), later, DELAY);
+        evicted.sort_unstable();
+        assert_eq!(evicted, vec![100, 200]);
     }
 }
