@@ -3619,7 +3619,13 @@ impl WindowManager {
             .focused_monitor_mut()
             .ok_or_eyre("there is no monitor")?;
         let current = monitor.transparency.unwrap_or(global_enabled);
-        monitor.transparency = Option::from(!current);
+        // If the flipped value agrees with the global toggle, drop the override so the
+        // monitor follows the global toggle again; otherwise pin the disagreement.
+        monitor.transparency = if current != global_enabled {
+            None
+        } else {
+            Some(!current)
+        };
         Ok(())
     }
 
@@ -3630,7 +3636,14 @@ impl WindowManager {
         let monitor_transparency = monitor.transparency.unwrap_or(global_enabled);
         let workspace = self.focused_workspace_mut()?;
         let current = workspace.transparency.unwrap_or(monitor_transparency);
-        workspace.transparency = Option::from(!current);
+        // If the flipped value agrees with the monitor's effective transparency, drop the
+        // override so the workspace follows the monitor (then the global toggle) again;
+        // otherwise pin the disagreement.
+        workspace.transparency = if current != monitor_transparency {
+            None
+        } else {
+            Some(!current)
+        };
         Ok(())
     }
 

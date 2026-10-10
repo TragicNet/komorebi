@@ -62,8 +62,9 @@ pub struct Monitor {
     /// Transparency override for this monitor. Seeded from the `transparency`
     /// key in the `monitors` section of the static configuration at load time;
     /// toggled at runtime by toggle-monitor-transparency. None means "follow
-    /// the global transparency toggle". Reloading the configuration reseeds
-    /// this field from config.
+    /// the global transparency toggle". Toggling drops the override once it
+    /// agrees with the global toggle, so the monitor follows the global setting
+    /// again. Reloading the configuration reseeds this field from config.
     #[serde(default)]
     pub transparency: Option<bool>,
     /// HWNDs of floating windows pinned across all workspaces on this monitor.

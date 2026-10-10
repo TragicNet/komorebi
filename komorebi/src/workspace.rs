@@ -90,8 +90,10 @@ pub struct Workspace {
     /// Transparency override for this workspace. Seeded from the `transparency`
     /// key in the workspace's static configuration entry at load time; toggled
     /// at runtime by toggle-workspace-transparency. None means "follow the
-    /// monitor setting, then the global transparency toggle". Reloading the
-    /// configuration reseeds this field from config.
+    /// monitor setting, then the global transparency toggle". Toggling drops
+    /// the override once it agrees with the monitor's effective transparency,
+    /// so the workspace follows the monitor (then the global toggle) again.
+    /// Reloading the configuration reseeds this field from config.
     #[serde(default)]
     pub transparency: Option<bool>,
     pub work_area_offset: Option<Rect>,

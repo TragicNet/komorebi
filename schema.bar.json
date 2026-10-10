@@ -4561,7 +4561,7 @@
           "$ref": "#/$defs/Rect"
         },
         "transparency": {
-          "description": "Transparency override for this monitor. Seeded from the `transparency`\nkey in the `monitors` section of the static configuration at load time;\ntoggled at runtime by toggle-monitor-transparency. None means \"follow\nthe global transparency toggle\". Reloading the configuration reseeds\nthis field from config.",
+          "description": "Transparency override for this monitor. Seeded from the `transparency`\nkey in the `monitors` section of the static configuration at load time;\ntoggled at runtime by toggle-monitor-transparency. None means \"follow\nthe global transparency toggle\". Toggling drops the override once it\nagrees with the global toggle, so the monitor follows the global setting\nagain. Reloading the configuration reseeds this field from config.",
           "type": [
             "boolean",
             "null"
@@ -10129,7 +10129,7 @@
           "type": "boolean"
         },
         "transparency": {
-          "description": "Transparency override for this workspace. Seeded from the `transparency`\nkey in the workspace's static configuration entry at load time; toggled\nat runtime by toggle-workspace-transparency. None means \"follow the\nmonitor setting, then the global transparency toggle\". Reloading the\nconfiguration reseeds this field from config.",
+          "description": "Transparency override for this workspace. Seeded from the `transparency`\nkey in the workspace's static configuration entry at load time; toggled\nat runtime by toggle-workspace-transparency. None means \"follow the\nmonitor setting, then the global transparency toggle\". Toggling drops\nthe override once it agrees with the monitor's effective transparency,\nso the workspace follows the monitor (then the global toggle) again.\nReloading the configuration reseeds this field from config.",
           "type": [
             "boolean",
             "null"

@@ -19,8 +19,10 @@ use crate::TRANSPARENCY_BLACKLIST;
 use crate::Window;
 use crate::WindowManager;
 use crate::WindowsApi;
+use crate::container::Container;
 use crate::core::config_generation::MatchingRule;
 use crate::should_act;
+use crate::workspace::Workspace;
 use crate::workspace::WorkspaceLayer;
 
 pub static TRANSPARENCY_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -158,6 +160,17 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
                     continue;
                 }
 
+                // Probe before the marshalled SetWindowLongPtrW so one Not Responding renderer
+                // (e.g. a suspended window on a hidden workspace) can't stall the restore; a hung
+                // window keeps its opacity and is retried on the next pass.
+                if !WindowsApi::is_window_thread_responding(
+                    hwnd,
+                    WindowsApi::WINDOW_THREAD_RESPONSE_TIMEOUT_MS,
+                ) {
+                    tracing::debug!(hwnd, "skipping opacity restore for unresponsive window");
+                    continue;
+                }
+
                 if let Err(error) = Window::from(hwnd).opaque() {
                     tracing::error!("failed to make window {hwnd} opaque: {error}")
                 }
@@ -255,10 +268,12 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
 
             let window = Window::from(hwnd);
 
-            // Minimized / hidden windows belong to threads that may be suspending their renderer
-            // (e.g. Chromium occlusion tracking); applying layering to them is pointless and the
-            // marshalled SetWindowLongPtrW call can block indefinitely.
-            if window.is_minimized() || !window.is_visible() {
+            // Minimized windows belong to threads that may be suspending their renderer (e.g.
+            // Chromium occlusion tracking); applying layering to them is pointless and the
+            // marshalled SetWindowLongPtrW call can block indefinitely. Windows on hidden
+            // (non-focused) workspaces are pre-dimmed here on purpose: `WS_EX_LAYERED` + alpha
+            // persist across `ShowWindow`, so they appear already translucent when restored.
+            if window.is_minimized() {
                 continue;
             }
 
@@ -272,7 +287,15 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
                 continue;
             }
 
-            match window.transparent() {
+            // A hidden window is dimmed without an animation: animating an invisible window would
+            // only spawn render threads that paint nothing.
+            let result = if window.is_visible() {
+                window.transparent()
+            } else {
+                window.transparent_immediate()
+            };
+
+            match result {
                 Err(error) => {
                     tracing::error!("failed to make unfocused window {hwnd} transparent: {error}")
                 }
@@ -290,6 +313,24 @@ pub fn handle_notifications(wm: Arc<Mutex<WindowManager>>) -> color_eyre::Result
     }
 
     Ok(())
+}
+
+/// The container that presents one window fullscreen on `ws`: a monocle container, or the sole
+/// tiled container of a tiling workspace that holds a single window and no floating layer.
+/// `None` when the workspace holds a captured maximized window or a floating layer, since those
+/// workspaces' visible content isn't the lone tiled window.
+fn fullscreen_container(ws: &Workspace) -> Option<&Container> {
+    if let Some(monocle) = &ws.monocle_container {
+        Some(monocle)
+    } else if ws.maximized_window.is_none()
+        && ws.layer == WorkspaceLayer::Tiling
+        && ws.floating_windows().is_empty()
+        && ws.containers().len() == 1
+    {
+        ws.containers().front()
+    } else {
+        None
+    }
 }
 
 /// Decides which windows should be transparent and which should be opaque based on the current
@@ -356,11 +397,80 @@ fn decide_targets(
         'workspaces: for (workspace_idx, ws) in m.workspaces().iter().enumerate() {
             let workspace_transparency = ws.transparency.unwrap_or(monitor_transparency);
 
-            // Non-focused workspaces are hidden; leave their windows at the transparency computed
-            // when they were last focused. Force-opaquing them here would reveal them fully opaque
-            // for one pass when the user switches to them, because the workspace is restored
-            // before the next async pass runs.
+            // Non-focused workspaces are hidden. Their windows can't be updated while OS-hidden,
+            // so instead of leaving them for the post-switch pass (which runs only after the
+            // switch-settlement coalesce) pre-apply the dimming now: a later `focus-workspace`
+            // then shows the windows already translucent instead of fully opaque for a beat. Only
+            // the TRANSPARENT side is emitted here - never opaque - so a hidden window is never
+            // force-restored and then flashed opaque when it is shown. Windows that would stay
+            // opaque once the workspace is focused (the prospective active window, and everything
+            // on a currently-unfocused monitor is the exception) are left untouched to avoid a
+            // dimmed-then-restored flash on switch.
             if workspace_idx != focused_workspace_idx {
+                let workspace_monitor_is_focused = monitor_idx == focused_monitor_idx;
+                let dim_fully = !workspace_monitor_is_focused;
+
+                // Captured maximized windows and windows on tiling-disabled workspaces are never
+                // transparent, matching the focused-workspace rules below.
+                if ws.tile && workspace_transparency {
+                    let fullscreen = fullscreen_container(ws);
+
+                    if let Some(container) = fullscreen {
+                        // A monocle / lone fullscreen window is dimmed only with the monocle
+                        // toggle while its monitor is unfocused, matching the focused rule.
+                        if let Some(window) = container.focused_window()
+                            && !workspace_monitor_is_focused
+                            && TRANSPARENCY_MONOCLE.load_consume()
+                            && !is_transparency_blacklisted(
+                                window,
+                                &transparency_blacklist,
+                                &regex_identifiers,
+                            )
+                        {
+                            transparent_targets.push(window.hwnd);
+                        }
+                    } else {
+                        // Dim every container's focused window (its visible window when restored).
+                        // On the focused monitor the prospective active window - the focused
+                        // container's focused window - is kept opaque so switching to the
+                        // workspace doesn't flash it from dimmed to full.
+                        for (idx, c) in ws.containers().iter().enumerate() {
+                            if (dim_fully || idx != ws.focused_container_idx())
+                                && let Some(window) = c.focused_window()
+                                && !is_transparency_blacklisted(
+                                    window,
+                                    &transparency_blacklist,
+                                    &regex_identifiers,
+                                )
+                            {
+                                transparent_targets.push(window.hwnd);
+                            }
+                        }
+
+                        // Floating windows follow the floating toggle; only the focused float on
+                        // a focused monitor is kept opaque (it is the window the user will
+                        // interact with on switch).
+                        if floating_transparency {
+                            for window in ws.floating_windows() {
+                                let keep_opaque = workspace_monitor_is_focused
+                                    && ws
+                                        .focused_floating_window()
+                                        .is_some_and(|w| w.hwnd == window.hwnd);
+
+                                if !keep_opaque
+                                    && !is_transparency_blacklisted(
+                                        window,
+                                        &transparency_blacklist,
+                                        &regex_identifiers,
+                                    )
+                                {
+                                    transparent_targets.push(window.hwnd);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 continue 'workspaces;
             }
 
@@ -384,19 +494,9 @@ fn decide_targets(
             // A workspace with a captured maximized window, a floating layer or floating windows
             // is excluded: the visible content isn't the lone tiled window in those cases, and
             // `continue 'monitors` would skip the passes that restore it.
-            let fullscreen_container = if let Some(monocle) = &ws.monocle_container {
-                Some(monocle)
-            } else if ws.maximized_window.is_none()
-                && ws.layer == WorkspaceLayer::Tiling
-                && ws.floating_windows().is_empty()
-                && ws.containers().len() == 1
-            {
-                ws.containers().front()
-            } else {
-                None
-            };
+            let fullscreen = fullscreen_container(ws);
 
-            if let Some(container) = fullscreen_container {
+            if let Some(container) = fullscreen {
                 if let Some(window) = container.focused_window() {
                     let transparent = workspace_transparency
                         && TRANSPARENCY_MONOCLE.load_consume()
@@ -985,6 +1085,153 @@ mod tests {
     }
 
     #[test]
+    fn test_hidden_workspace_containers_pre_dimmed_except_prospective_focus() {
+        let _guard = StateGuard::enable();
+        // ws1 is hidden; it holds two tiled containers. The focused container's focused window is
+        // the prospective active window when the workspace is focused, so on the focused monitor
+        // it must stay out of the pre-dim set; the other container's focused window is pre-dimmed.
+        let mut wm = window_manager_with_floats(&[&[], &[]]);
+        let hidden = wm.monitors_mut()[0].workspaces_mut().back_mut().unwrap();
+
+        let mut focused_container = Container::default();
+        focused_container.windows_mut().push_back(Window::from(10));
+        focused_container.focus_window(0);
+
+        let mut unfocused_container = Container::default();
+        unfocused_container
+            .windows_mut()
+            .push_back(Window::from(20));
+        unfocused_container.focus_window(0);
+
+        hidden.containers_mut().push_back(focused_container);
+        hidden.containers_mut().push_back(unfocused_container);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert!(transparent.contains(&20));
+        assert!(!transparent.contains(&10));
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_hidden_workspace_containers_all_pre_dimmed_on_unfocused_monitor() {
+        let _guard = StateGuard::enable();
+        // Monitor 1 is focused; monitor 0 is unfocused. A hidden workspace on monitor 0 dims every
+        // container's focused window regardless of its own focus, since the whole monitor dims
+        // once shown on an (still) unfocused monitor.
+        let mut wm = window_manager_with_two_monitors(&[&[], &[]]);
+        wm.monitors_mut()[0]
+            .workspaces_mut()
+            .push_back(Workspace::default());
+        let hidden = wm.monitors_mut()[0].workspaces_mut().back_mut().unwrap();
+
+        let mut first = Container::default();
+        first.windows_mut().push_back(Window::from(10));
+        first.focus_window(0);
+
+        let mut second = Container::default();
+        second.windows_mut().push_back(Window::from(20));
+        second.focus_window(0);
+
+        hidden.containers_mut().push_back(first);
+        hidden.containers_mut().push_back(second);
+        wm.focus_monitor(1).unwrap();
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert!(transparent.contains(&10));
+        assert!(transparent.contains(&20));
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_hidden_workspace_floats_pre_dimmed_except_focused_float() {
+        let _guard = StateGuard::enable();
+        // ws1 is hidden and its only floats are on the focused monitor: the focused float is the
+        // prospective active window and stays opaque, the other float is pre-dimmed.
+        let wm = window_manager_with_floats(&[&[], &[20, 30]]);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert!(transparent.contains(&30));
+        assert!(!transparent.contains(&20));
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_hidden_workspace_floats_all_pre_dimmed_on_unfocused_monitor() {
+        let _guard = StateGuard::enable();
+        // On an unfocused monitor even the focused float of a hidden workspace is pre-dimmed.
+        let mut wm = window_manager_with_two_monitors(&[&[], &[]]);
+        wm.monitors_mut()[0]
+            .workspaces_mut()
+            .push_back(Workspace::default());
+        let hidden = wm.monitors_mut()[0].workspaces_mut().back_mut().unwrap();
+        hidden.floating_windows_mut().push_back(Window::from(20));
+        hidden.floating_windows_mut().push_back(Window::from(30));
+        wm.focus_monitor(1).unwrap();
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert!(transparent.contains(&20));
+        assert!(transparent.contains(&30));
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_hidden_workspace_floats_not_pre_dimmed_when_floating_toggle_off() {
+        let _guard = StateGuard::enable().disable_floating();
+        let wm = window_manager_with_floats(&[&[], &[20]]);
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert!(transparent.is_empty());
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_hidden_workspace_lone_container_pre_dimmed_with_monocle_on_unfocused_monitor() {
+        let _guard = StateGuard::enable().enable_monocle();
+        let mut wm = window_manager_with_two_monitors(&[&[], &[]]);
+        wm.monitors_mut()[0]
+            .workspaces_mut()
+            .push_back(Workspace::default());
+        let hidden = wm.monitors_mut()[0].workspaces_mut().back_mut().unwrap();
+
+        let mut container = Container::default();
+        container.windows_mut().push_back(Window::from(10));
+        container.focus_window(0);
+        hidden.containers_mut().push_back(container);
+        wm.focus_monitor(1).unwrap();
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert!(transparent.contains(&10));
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
+    fn test_hidden_workspace_lone_container_opaque_with_monocle_off() {
+        let _guard = StateGuard::enable();
+        let mut wm = window_manager_with_two_monitors(&[&[], &[]]);
+        wm.monitors_mut()[0]
+            .workspaces_mut()
+            .push_back(Workspace::default());
+        let hidden = wm.monitors_mut()[0].workspaces_mut().back_mut().unwrap();
+
+        let mut container = Container::default();
+        container.windows_mut().push_back(Window::from(10));
+        container.focus_window(0);
+        hidden.containers_mut().push_back(container);
+        wm.focus_monitor(1).unwrap();
+
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+
+        assert!(transparent.is_empty());
+        assert!(opaque.is_empty());
+    }
+
+    #[test]
     fn test_track_transparent_hwnd_is_idempotent() {
         let mut known = Vec::new();
 
@@ -1041,10 +1288,10 @@ mod tests {
         assert!(transparent.is_empty());
         assert_eq!(opaque, vec![10]);
 
-        // Toggling again flips the override back to on, which wins over the now-off state being
-        // applied to the focused workspace (the global toggle is still on).
+        // Toggling again flips the monitor override back to on, which now agrees with the global
+        // toggle, so the override is dropped and the monitor follows the global toggle again.
         wm.toggle_monitor_transparency().unwrap();
-        assert_eq!(wm.monitors_mut()[0].transparency, Some(true));
+        assert_eq!(wm.monitors_mut()[0].transparency, None);
         let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
         assert_eq!(transparent, vec![10]);
         assert!(opaque.is_empty());
@@ -1066,6 +1313,59 @@ mod tests {
         wm.monitors_mut()[0].transparency = Some(false);
         wm.toggle_workspace_transparency().unwrap();
         assert_eq!(wm.focused_workspace_mut().unwrap().transparency, Some(true));
+
+        // Toggling once more flips the workspace back to off, which agrees with the monitor's
+        // effective transparency, so the override is dropped and the workspace follows the monitor.
+        wm.toggle_workspace_transparency().unwrap();
+        assert_eq!(wm.focused_workspace_mut().unwrap().transparency, None);
+    }
+
+    #[test]
+    fn test_toggle_monitor_transparency_with_global_disabled_locks_then_releases() {
+        let _guard = StateGuard::lock();
+        TRANSPARENCY_ENABLED.store(false, Ordering::SeqCst);
+        TRANSPARENCY_FLOATING.store(true, Ordering::SeqCst);
+        let mut wm = window_manager_with_floats(&[&[10]]);
+
+        // Global toggle off and no monitor override: the effective value is off, so toggling the
+        // monitor locks it on and dims its windows despite the global toggle.
+        wm.toggle_monitor_transparency().unwrap();
+        assert_eq!(wm.monitors_mut()[0].transparency, Some(true));
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+        assert_eq!(transparent, vec![10]);
+        assert!(opaque.is_empty());
+
+        // Toggling again flips it back to off, agreeing with the global toggle; the override is
+        // dropped and the monitor follows the global toggle once more.
+        wm.toggle_monitor_transparency().unwrap();
+        assert_eq!(wm.monitors_mut()[0].transparency, None);
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+        assert!(transparent.is_empty());
+        assert_eq!(opaque, vec![10]);
+    }
+
+    #[test]
+    fn test_toggle_workspace_transparency_with_global_disabled_locks_then_releases() {
+        let _guard = StateGuard::lock();
+        TRANSPARENCY_ENABLED.store(false, Ordering::SeqCst);
+        TRANSPARENCY_FLOATING.store(true, Ordering::SeqCst);
+        let mut wm = window_manager_with_floats(&[&[10]]);
+
+        // Global toggle off and no overrides: toggling the workspace locks it on and dims its
+        // windows despite the global toggle.
+        wm.toggle_workspace_transparency().unwrap();
+        assert_eq!(wm.focused_workspace_mut().unwrap().transparency, Some(true));
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+        assert_eq!(transparent, vec![10]);
+        assert!(opaque.is_empty());
+
+        // Toggling again flips it back to off, agreeing with the global toggle; the override is
+        // dropped and the workspace follows the global toggle once more.
+        wm.toggle_workspace_transparency().unwrap();
+        assert_eq!(wm.focused_workspace_mut().unwrap().transparency, None);
+        let (transparent, opaque) = decide_targets(&wm, &Mutex::new(vec![]), 999, false);
+        assert!(transparent.is_empty());
+        assert_eq!(opaque, vec![10]);
     }
 
     #[test]
